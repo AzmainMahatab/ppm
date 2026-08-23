@@ -26,6 +26,9 @@ jobs:
         with:
           components: clippy
 
+      - name: Build All Targets
+        run: cargo build --workspace --all-targets
+
       - name: Static Analysis & Clippy
         run: cargo clippy --workspace --all-targets
 

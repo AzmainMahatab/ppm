@@ -12,6 +12,17 @@ fn test_e2e_virtualization_with_probe() {
     let ppm_exe = PathBuf::from(env!("CARGO_BIN_EXE_ppm"));
     let test_probe_exe = ppm_exe.with_file_name("test-probe.exe");
 
+    if !test_probe_exe.is_file() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut cmd = Command::new(cargo);
+        cmd.args(["build", "-p", "test-probe"]);
+        if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET") {
+            cmd.arg("--target").arg(target);
+        }
+        let status = cmd.status().expect("Failed to execute cargo build -p test-probe");
+        assert!(status.success(), "cargo build -p test-probe must succeed");
+    }
+
     assert!(ppm_exe.is_file(), "ppm.exe must exist at {:?}", ppm_exe);
     assert!(test_probe_exe.is_file(), "test-probe.exe must exist at {:?}", test_probe_exe);
 
