@@ -1,8 +1,42 @@
+use crate::arch::CpuArch;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// A string field that can be defined either as a single template string (with `{arch}`)
+/// or as an explicit per-architecture mapping (e.g. `{"x64": "...", "arm64": "..."}`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ArchString {
+    Single(String),
+    PerArch(HashMap<String, String>),
+}
+
+impl ArchString {
+    /// Resolves the string value for a specific CPU architecture.
+    pub fn resolve(&self, arch: CpuArch) -> Option<String> {
+        match self {
+            ArchString::Single(s) => Some(s.replace("{arch}", arch.as_str())),
+            ArchString::PerArch(map) => map
+                .get(arch.as_str())
+                .map(|s| s.replace("{arch}", arch.as_str())),
+        }
+    }
+}
+
+impl From<String> for ArchString {
+    fn from(s: String) -> Self {
+        ArchString::Single(s)
+    }
+}
+
+impl From<&str> for ArchString {
+    fn from(s: &str) -> Self {
+        ArchString::Single(s.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AppManifests {
@@ -21,6 +55,8 @@ pub struct AppDefinition {
     pub target_dir: String,
     pub executable: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_arch: Option<Vec<CpuArch>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Vec<String>>,
@@ -32,34 +68,67 @@ pub struct AppDefinition {
     pub post_install: Option<PostInstallConfig>,
 }
 
+impl AppDefinition {
+    /// Returns the target directory for a specific CPU architecture: `<root>/Apps/<arch>/<target_dir>`
+    pub fn app_dir_for_arch(&self, root: &Path, arch: CpuArch) -> PathBuf {
+        root.join("Apps").join(arch.as_str()).join(&self.target_dir)
+    }
+
+    /// Returns the full executable path for a specific CPU architecture: `<root>/Apps/<arch>/<target_dir>/<executable>`
+    pub fn executable_for_arch(&self, root: &Path, arch: CpuArch) -> PathBuf {
+        self.app_dir_for_arch(root, arch).join(&self.executable)
+    }
+
+    /// Checks if this application explicitly supports the requested architecture.
+    pub fn is_supported_on_arch(&self, arch: CpuArch) -> bool {
+        if let Some(supported) = &self.supported_arch {
+            supported.contains(&arch)
+        } else {
+            true
+        }
+    }
+
+    /// Checks if the application is installed for a specific CPU architecture.
+    pub fn is_installed_for_arch(&self, root: &Path, arch: CpuArch) -> bool {
+        self.executable_for_arch(root, arch).is_file()
+    }
+
+    /// Checks if the application is installed on any supported CPU architecture.
+    pub fn is_installed_any_arch(&self, root: &Path) -> bool {
+        CpuArch::all()
+            .iter()
+            .any(|&arch| self.is_installed_for_arch(root, arch))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VersionCheckConfig {
     ElectronManifest {
-        url: String,
+        url: ArchString,
         #[serde(skip_serializing_if = "Option::is_none")]
         version_key: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        url_template: Option<String>,
+        url_template: Option<ArchString>,
     },
     #[serde(rename = "github_release", alias = "git_hub_release")]
     GitHubRelease {
         repo: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        asset_pattern: Option<String>,
+        asset_pattern: Option<ArchString>,
     },
     JsonApi {
-        url: String,
-        version_key: String,
+        url: ArchString,
+        version_key: ArchString,
         #[serde(skip_serializing_if = "Option::is_none")]
-        url_key: Option<String>,
+        url_key: Option<ArchString>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        url_template: Option<String>,
+        url_template: Option<ArchString>,
     },
     RegexUrl {
-        url: String,
-        regex: String,
-        url_template: String,
+        url: ArchString,
+        regex: ArchString,
+        url_template: ArchString,
     },
 }
 
@@ -68,28 +137,28 @@ pub enum VersionCheckConfig {
 pub enum PackageConfig {
     #[serde(rename = "nsis_7z")]
     Nsis7z {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        extract_subpath: Option<String>,
-    },
-    Zip {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        extract_subpath: Option<String>,
-    },
-    Tar {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
         extract_subpath: Option<String>,
     },
     #[serde(rename = "7z", alias = "seven_z")]
     SevenZ {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        extract_subpath: Option<String>,
+    },
+    Zip {
+        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
         extract_subpath: Option<String>,
     },
     Cab {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
         extract_subpath: Option<String>,
     },
     Msi {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        extract_subpath: Option<String>,
+    },
+    Tar {
+        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
         extract_subpath: Option<String>,
     },
     Binary,
@@ -101,50 +170,31 @@ pub struct PostInstallConfig {
     pub remove_files: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remove_dirs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_dirs: Option<Vec<String>>,
 }
 
-pub fn get_manifest_path(root: &Path) -> PathBuf {
-    let p1 = root.join(".ppm").join("apps.json");
-    if p1.exists() {
-        return p1;
-    }
-    let p2 = root.join("manifests").join("apps.json");
-    if p2.exists() {
-        return p2;
-    }
-    p1
-}
-
-pub fn load_manifest(root: &Path) -> Result<AppManifests, String> {
-    let path = get_manifest_path(root);
-    if !path.exists() {
-        return Err(format!(
-            "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
-            path.display()
-        ));
+impl AppManifests {
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read manifest file at '{}': {}", path.display(), e))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse JSON manifest at '{}': {}", path.display(), e))
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read manifest '{}': {}", path.display(), e))?;
-
-    let manifests: AppManifests = serde_json::from_str(&content)
-        .map_err(|e| format!("Invalid manifest JSON in '{}': {}", path.display(), e))?;
-
-    Ok(manifests)
-}
-
-pub fn save_manifest(root: &Path, manifests: &AppManifests) -> Result<(), String> {
-    let path = root.join(".ppm").join("apps.json");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory '{}': {}", parent.display(), e))?;
+    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create parent directory for '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
+        fs::write(path, json)
+            .map_err(|e| format!("Failed to write manifest file at '{}': {}", path.display(), e))
     }
-
-    let json = serde_json::to_string_pretty(manifests)
-        .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
-
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write manifest to '{}': {}", path.display(), e))?;
-
-    Ok(())
 }

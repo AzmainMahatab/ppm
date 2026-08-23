@@ -1,5 +1,6 @@
+use crate::arch::CpuArch;
 use crate::assets::EMBEDDED_REDIRECTOR_DLL;
-use crate::config::load_manifest;
+use crate::config::AppManifests;
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,32 +73,35 @@ pub fn ensure_redirector_dll(root: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn run_app(root: &Path, app_name_or_path: &str, extra_args: &[String]) -> Result<i32, String> {
+    let host_arch = CpuArch::current();
     let mut target_exe_path: Option<PathBuf> = None;
     let mut combined_args: Vec<String> = Vec::new();
 
     // 1. Check if input matches configured app in .ppm/apps.json
-    if let Ok(manifests) = load_manifest(root) {
+    let apps_json_path = root.join(".ppm").join("apps.json");
+    if let Ok(manifests) = AppManifests::load_from_file(&apps_json_path) {
         if let Some(app_def) = manifests.apps.get(app_name_or_path) {
-            // Validate dependencies first
+            // Validate dependencies first for current architecture
             if let Some(deps) = &app_def.dependencies {
                 for dep_id in deps {
                     if let Some(dep_def) = manifests.apps.get(dep_id) {
-                        let dep_exe = root.join(&dep_def.target_dir).join(&dep_def.executable);
+                        let dep_exe = dep_def.executable_for_arch(root, host_arch);
                         if !dep_exe.exists() {
                             return Err(format!(
-                                "Application '{}' requires missing dependency '{}'. Run 'ppm install {}' first.",
-                                app_name_or_path, dep_id, app_name_or_path
+                                "Application '{}' requires missing dependency '{}' for arch '{}'. Run 'ppm install {}' first.",
+                                app_name_or_path, dep_id, host_arch.as_str(), app_name_or_path
                             ));
                         }
                     }
                 }
             }
 
-            let full_exe = root.join(&app_def.target_dir).join(&app_def.executable);
+            let full_exe = app_def.executable_for_arch(root, host_arch);
             if !full_exe.exists() {
                 return Err(format!(
-                    "Application '{}' is not installed at '{}'. Run 'ppm install {}' first.",
+                    "Application '{}' is not installed for architecture '{}' at '{}'. Run 'ppm install {}' first.",
                     app_name_or_path,
+                    host_arch.as_str(),
                     full_exe.display(),
                     app_name_or_path
                 ));
@@ -154,7 +158,7 @@ pub fn run_app(root: &Path, app_name_or_path: &str, extra_args: &[String]) -> Re
     let home_dir = root.join("Home");
     let local_appdata = home_dir.join("AppData").join("Local");
     let roaming_appdata = home_dir.join("AppData").join("Roaming");
-    let webview_runtime = root.join("Apps").join("WebView2");
+    let webview_runtime = root.join("Apps").join(host_arch.as_str()).join("WebView2");
     let webview_data = home_dir.join("AppData").join("WebViewData");
 
     let _ = fs::create_dir_all(&home_dir);

@@ -1,5 +1,5 @@
 use crate::assets::{DEFAULT_APPS_JSON, EMBEDDED_REDIRECTOR_DLL};
-use crate::config::{load_manifest, save_manifest, AppManifests};
+use crate::config::{AppManifests};
 use crate::launcher_gen::generate_launchers;
 use std::fs;
 use std::path::Path;
@@ -7,6 +7,8 @@ use std::path::Path;
 pub fn init_environment(root: &Path, force: bool) -> Result<(), String> {
     // 1. Scaffold canonical directory hierarchy
     let apps_dir = root.join("Apps");
+    let apps_x64 = apps_dir.join("x64");
+    let apps_arm64 = apps_dir.join("arm64");
     let ppm_dir = root.join(".ppm");
     let logs_dir = ppm_dir.join("logs");
     let home_dir = root.join("Home");
@@ -14,8 +16,10 @@ pub fn init_environment(root: &Path, force: bool) -> Result<(), String> {
     let roaming_appdata = home_dir.join("AppData").join("Roaming");
     let documents_dir = home_dir.join("Documents");
 
-    fs::create_dir_all(&apps_dir)
-        .map_err(|e| format!("Failed to create Apps directory: {}", e))?;
+    fs::create_dir_all(&apps_x64)
+        .map_err(|e| format!("Failed to create Apps/x64 directory: {}", e))?;
+    fs::create_dir_all(&apps_arm64)
+        .map_err(|e| format!("Failed to create Apps/arm64 directory: {}", e))?;
     fs::create_dir_all(&logs_dir)
         .map_err(|e| format!("Failed to create .ppm/logs directory: {}", e))?;
     fs::create_dir_all(&local_appdata)
@@ -38,14 +42,14 @@ pub fn init_environment(root: &Path, force: bool) -> Result<(), String> {
     if !apps_json_path.exists() || force {
         let manifests: AppManifests = serde_json::from_str(DEFAULT_APPS_JSON)
             .map_err(|e| format!("Failed to parse default apps.json: {}", e))?;
-        save_manifest(root, &manifests)?;
+        manifests.save_to_file(&apps_json_path)?;
         println!("  ✓ Initialized .ppm/apps.json (Default configuration)");
     } else {
         println!("  ✓ Preserved existing .ppm/apps.json");
     }
 
-    // 4. Generate batch launchers for installed apps
-    if let Ok(manifests) = load_manifest(root) {
+    // 4. Generate batch launchers for configured apps
+    if let Ok(manifests) = AppManifests::load_from_file(&apps_json_path) {
         if let Ok(generated) = generate_launchers(root, &manifests) {
             for launcher in generated {
                 println!("  ✓ Generated root launcher: {}", launcher);

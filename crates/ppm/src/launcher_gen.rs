@@ -6,8 +6,7 @@ pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<S
     let mut generated = Vec::new();
 
     for (app_id, app_def) in &manifests.apps {
-        let exe_path = root.join(&app_def.target_dir).join(&app_def.executable);
-        if exe_path.exists() {
+        if app_def.is_installed_any_arch(root) {
             let bat_filename = format!("{}.bat", app_id);
             let bat_path = root.join(&bat_filename);
             let bat_content = format!(

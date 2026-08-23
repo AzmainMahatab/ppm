@@ -1,3 +1,4 @@
+mod arch;
 mod assets;
 mod config;
 mod downloader;
@@ -8,11 +9,12 @@ mod runner;
 mod sanitizer;
 mod version;
 
+use arch::{ArchTarget, CpuArch};
 use clap::{Parser, Subcommand};
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Table};
-use config::{load_manifest, AppDefinition, AppManifests};
+use config::{AppDefinition, AppManifests};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -51,18 +53,30 @@ enum Commands {
     },
 
     /// Check for online updates across configured applications
-    Check,
+    Check {
+        /// Target CPU architecture (x64, arm64, or all)
+        #[arg(short, long, default_value = "all")]
+        arch: ArchTarget,
+    },
 
     /// Install one or all configured applications (resolves dependencies)
     Install {
         /// Application identifier to install, or 'all'
         app: String,
+
+        /// Target CPU architecture (defaults to current host architecture)
+        #[arg(short, long)]
+        arch: Option<ArchTarget>,
     },
 
     /// Update outdated applications to the latest online release
     Update {
         /// Application identifier to update, or 'all'
         app: String,
+
+        /// Target CPU architecture (defaults to current host architecture)
+        #[arg(short, long)]
+        arch: Option<ArchTarget>,
     },
 
     /// Generate or refresh 1-click .bat launchers in the root directory
@@ -74,7 +88,11 @@ enum Commands {
     },
 
     /// List all configured applications and their installation status
-    List,
+    List {
+        /// Target CPU architecture (x64, arm64, or all)
+        #[arg(short, long, default_value = "all")]
+        arch: ArchTarget,
+    },
 
     /// Generate or update the JSON schema (apps.schema.json)
     Schema,
@@ -101,6 +119,24 @@ fn resolve_root() -> PathBuf {
             .to_path_buf()
     } else {
         exe_dir.to_path_buf()
+    }
+}
+
+fn load_manifest(root: &Path) -> Result<AppManifests, String> {
+    let apps_json_path = root.join(".ppm").join("apps.json");
+    if apps_json_path.exists() {
+        AppManifests::load_from_file(&apps_json_path)
+    } else {
+        // Dev fallback to manifests/apps.json
+        let dev_manifest = root.join("manifests").join("apps.json");
+        if dev_manifest.exists() {
+            AppManifests::load_from_file(&dev_manifest)
+        } else {
+            Err(format!(
+                "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
+                apps_json_path.display()
+            ))
+        }
     }
 }
 
@@ -169,13 +205,19 @@ fn perform_install(
     root: &Path,
     app_id: &str,
     app_def: &AppDefinition,
+    arch: CpuArch,
     ledger: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    println!("\n▶ Processing '{}' ({})", app_def.name, app_id);
+    if !app_def.is_supported_on_arch(arch) {
+        println!("  • Skipping '{}' (Not supported on {})", app_def.name, arch.as_str());
+        return Ok(());
+    }
 
-    // 1. Fetch remote release metadata
-    println!("  • Checking online release...");
-    let release = check_remote_version(&app_def.version_check)?;
+    println!("\n▶ Processing '{}' ({}) for architecture [{}]", app_def.name, app_id, arch.as_str());
+
+    // 1. Fetch remote release metadata for architecture
+    println!("  • Checking online release for {}...", arch.as_str());
+    let release = check_remote_version(&app_def.version_check, arch)?;
     println!(
         "  • Found version {} at: {}",
         release.version, release.download_url
@@ -190,13 +232,13 @@ fn perform_install(
         .rsplit_once('.')
         .map(|(_, e)| e)
         .unwrap_or("pkg");
-    let temp_archive = temp_cache_dir.join(format!("{}_{}.{}", app_id, release.version, ext));
+    let temp_archive = temp_cache_dir.join(format!("{}_{}_{}.{}", app_id, arch.as_str(), release.version, ext));
 
     println!("  • Downloading package...");
-    downloader::download_file(&release.download_url, &temp_archive, &app_def.name)?;
+    downloader::download_file(&release.download_url, &temp_archive, &format!("{} ({})", app_def.name, arch.as_str()))?;
 
-    // 3. Extract to target directory
-    let target_dir = root.join(&app_def.target_dir);
+    // 3. Extract to target directory: Apps/<arch>/<target_dir>
+    let target_dir = app_def.app_dir_for_arch(root, arch);
     println!("  • Unpacking to '{}'...", target_dir.display());
     extractor::extract_package(&temp_archive, &app_def.package, &target_dir)?;
 
@@ -205,15 +247,16 @@ fn perform_install(
     sanitizer::sanitize_package(&target_dir, app_def.post_install.as_ref())?;
 
     // 5. Update state ledger
-    ledger.insert(app_id.to_string(), release.version.clone());
+    let ledger_key = format!("{}:{}", app_id, arch.as_str());
+    ledger.insert(ledger_key, release.version.clone());
     save_state_ledger(root, ledger)?;
 
     // 6. Clean temporary download
     let _ = std::fs::remove_file(&temp_archive);
 
     println!(
-        "  ✓ Successfully installed {} (v{})",
-        app_def.name, release.version
+        "  ✓ Successfully installed {} [{}] (v{})",
+        app_def.name, arch.as_str(), release.version
     );
 
     Ok(())
@@ -245,8 +288,9 @@ fn main() {
             }
         }
 
-        Commands::Check => {
-            println!("🔍 Checking configured applications...\n");
+        Commands::Check { arch } => {
+            let target_archs = arch.resolve();
+            println!("🔍 Checking configured applications for architectures {:?}...\n", target_archs.iter().map(|a| a.as_str()).collect::<Vec<_>>());
             let manifests = match load_manifest(&root) {
                 Ok(m) => m,
                 Err(e) => {
@@ -262,43 +306,60 @@ fn main() {
                 .set_header(vec![
                     "App ID",
                     "Name",
+                    "Arch",
                     "Local Version",
                     "Remote Version",
                     "Status",
                 ]);
 
             for (app_id, app_def) in &manifests.apps {
-                let local_v = detect_local_version(&root, app_id, app_def);
-                let remote_res = check_remote_version(&app_def.version_check);
-
-                let local_display = local_v.as_deref().unwrap_or("Not Installed");
-
-                match remote_res {
-                    Ok(remote) => {
-                        let status_cell = match &local_v {
-                            None => Cell::new("NOT INSTALLED").fg(Color::Yellow),
-                            Some(loc) if loc == &remote.version => {
-                                Cell::new("UP TO DATE").fg(Color::Green)
-                            }
-                            Some(_) => Cell::new("UPDATE AVAILABLE").fg(Color::Cyan),
-                        };
-
+                for &target_arch in &target_archs {
+                    if !app_def.is_supported_on_arch(target_arch) {
                         table.add_row(vec![
                             Cell::new(app_id),
                             Cell::new(&app_def.name),
-                            Cell::new(local_display),
-                            Cell::new(&remote.version),
-                            status_cell,
+                            Cell::new(target_arch.as_str()).fg(Color::DarkGrey),
+                            Cell::new("N/A").fg(Color::DarkGrey),
+                            Cell::new("N/A").fg(Color::DarkGrey),
+                            Cell::new("UNSUPPORTED").fg(Color::DarkGrey),
                         ]);
+                        continue;
                     }
-                    Err(e) => {
-                        table.add_row(vec![
-                            Cell::new(app_id),
-                            Cell::new(&app_def.name),
-                            Cell::new(local_display),
-                            Cell::new(format!("Error: {}", e)).fg(Color::Red),
-                            Cell::new("CHECK FAILED").fg(Color::Red),
-                        ]);
+
+                    let local_v = detect_local_version(&root, app_id, app_def, target_arch);
+                    let remote_res = check_remote_version(&app_def.version_check, target_arch);
+
+                    let local_display = local_v.as_deref().unwrap_or("Not Installed");
+
+                    match remote_res {
+                        Ok(remote) => {
+                            let status_cell = match &local_v {
+                                None => Cell::new("NOT INSTALLED").fg(Color::Yellow),
+                                Some(loc) if loc == &remote.version => {
+                                    Cell::new("UP TO DATE").fg(Color::Green)
+                                }
+                                Some(_) => Cell::new("UPDATE AVAILABLE").fg(Color::Cyan),
+                            };
+
+                            table.add_row(vec![
+                                Cell::new(app_id),
+                                Cell::new(&app_def.name),
+                                Cell::new(target_arch.as_str()).fg(Color::Magenta),
+                                Cell::new(local_display),
+                                Cell::new(&remote.version),
+                                status_cell,
+                            ]);
+                        }
+                        Err(e) => {
+                            table.add_row(vec![
+                                Cell::new(app_id),
+                                Cell::new(&app_def.name),
+                                Cell::new(target_arch.as_str()).fg(Color::Magenta),
+                                Cell::new(local_display),
+                                Cell::new(format!("Error: {}", e)).fg(Color::Red),
+                                Cell::new("CHECK FAILED").fg(Color::Red),
+                            ]);
+                        }
                     }
                 }
             }
@@ -306,7 +367,11 @@ fn main() {
             println!("{}", table);
         }
 
-        Commands::Install { app } => {
+        Commands::Install { app, arch } => {
+            let target_archs = arch
+                .map(|a| a.resolve())
+                .unwrap_or_else(|| vec![CpuArch::current()]);
+
             let manifests = match load_manifest(&root) {
                 Ok(m) => m,
                 Err(e) => {
@@ -325,11 +390,17 @@ fn main() {
 
             let mut ledger = load_state_ledger(&root);
 
-            for app_id in install_order {
-                if let Some(app_def) = manifests.apps.get(&app_id) {
-                    if let Err(e) = perform_install(&root, &app_id, app_def, &mut ledger) {
-                        eprintln!("\n✗ Installation failed for '{}': {}", app_id, e);
-                        std::process::exit(1);
+            for &target_arch in &target_archs {
+                println!("\n=======================================================");
+                println!("  Targeting Architecture: [{}]", target_arch.as_str());
+                println!("=======================================================");
+
+                for app_id in &install_order {
+                    if let Some(app_def) = manifests.apps.get(app_id) {
+                        if let Err(e) = perform_install(&root, app_id, app_def, target_arch, &mut ledger) {
+                            eprintln!("\n✗ Installation failed for '{}' [{}]: {}", app_id, target_arch.as_str(), e);
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -339,7 +410,11 @@ fn main() {
             println!("\n✓ All requested installations completed successfully!");
         }
 
-        Commands::Update { app } => {
+        Commands::Update { app, arch } => {
+            let target_archs = arch
+                .map(|a| a.resolve())
+                .unwrap_or_else(|| vec![CpuArch::current()]);
+
             let manifests = match load_manifest(&root) {
                 Ok(m) => m,
                 Err(e) => {
@@ -358,24 +433,34 @@ fn main() {
 
             let mut ledger = load_state_ledger(&root);
 
-            for app_id in update_order {
-                if let Some(app_def) = manifests.apps.get(&app_id) {
-                    println!("\n▶ Checking update for '{}'...", app_def.name);
-                    let local_v = detect_local_version(&root, &app_id, app_def);
-                    let remote_res = check_remote_version(&app_def.version_check);
+            for &target_arch in &target_archs {
+                println!("\n=======================================================");
+                println!("  Checking Updates for Architecture: [{}]", target_arch.as_str());
+                println!("=======================================================");
 
-                    match (local_v, remote_res) {
-                        (Some(loc), Ok(remote)) if loc == remote.version => {
-                            println!("  ✓ {} is already up to date (v{})", app_def.name, loc);
+                for app_id in &update_order {
+                    if let Some(app_def) = manifests.apps.get(app_id) {
+                        if !app_def.is_supported_on_arch(target_arch) {
+                            continue;
                         }
-                        (_, Ok(_)) => {
-                            if let Err(e) = perform_install(&root, &app_id, app_def, &mut ledger) {
-                                eprintln!("\n✗ Update failed for '{}': {}", app_id, e);
-                                std::process::exit(1);
+
+                        println!("\n▶ Checking update for '{}' [{}]...", app_def.name, target_arch.as_str());
+                        let local_v = detect_local_version(&root, app_id, app_def, target_arch);
+                        let remote_res = check_remote_version(&app_def.version_check, target_arch);
+
+                        match (local_v, remote_res) {
+                            (Some(loc), Ok(remote)) if loc == remote.version => {
+                                println!("  ✓ {} [{}] is already up to date (v{})", app_def.name, target_arch.as_str(), loc);
                             }
-                        }
-                        (_, Err(e)) => {
-                            eprintln!("  ✗ Failed to check remote version: {}", e);
+                            (_, Ok(_)) => {
+                                if let Err(e) = perform_install(&root, app_id, app_def, target_arch, &mut ledger) {
+                                    eprintln!("\n✗ Update failed for '{}' [{}]: {}", app_id, target_arch.as_str(), e);
+                                    std::process::exit(1);
+                                }
+                            }
+                            (_, Err(e)) => {
+                                eprintln!("  ✗ Failed to check remote version: {}", e);
+                            }
                         }
                     }
                 }
@@ -421,7 +506,8 @@ fn main() {
             }
         }
 
-        Commands::List => {
+        Commands::List { arch } => {
+            let target_archs = arch.resolve();
             let manifests = match load_manifest(&root) {
                 Ok(m) => m,
                 Err(e) => {
@@ -437,34 +523,59 @@ fn main() {
                 .set_header(vec![
                     "App ID",
                     "Name",
+                    "Arch",
                     "Target Directory",
-                    "Executable",
+                    "Executable Path",
                     "Dependencies",
                     "Installed",
                 ]);
 
             for (app_id, app_def) in &manifests.apps {
-                let full_exe = root.join(&app_def.target_dir).join(&app_def.executable);
-                let is_installed = if full_exe.exists() {
-                    Cell::new("YES").fg(Color::Green)
-                } else {
-                    Cell::new("NO").fg(Color::Red)
-                };
+                for &target_arch in &target_archs {
+                    if !app_def.is_supported_on_arch(target_arch) {
+                        let deps_str = app_def
+                            .dependencies
+                            .as_ref()
+                            .map(|d| d.join(", "))
+                            .unwrap_or_else(|| "-".to_string());
 
-                let deps_str = app_def
-                    .dependencies
-                    .as_ref()
-                    .map(|d| d.join(", "))
-                    .unwrap_or_else(|| "-".to_string());
+                        table.add_row(vec![
+                            Cell::new(app_id),
+                            Cell::new(&app_def.name),
+                            Cell::new(target_arch.as_str()).fg(Color::DarkGrey),
+                            Cell::new(&app_def.target_dir).fg(Color::DarkGrey),
+                            Cell::new("-").fg(Color::DarkGrey),
+                            Cell::new(deps_str).fg(Color::DarkGrey),
+                            Cell::new("UNSUPPORTED").fg(Color::DarkGrey),
+                        ]);
+                        continue;
+                    }
 
-                table.add_row(vec![
-                    Cell::new(app_id),
-                    Cell::new(&app_def.name),
-                    Cell::new(&app_def.target_dir),
-                    Cell::new(&app_def.executable),
-                    Cell::new(deps_str),
-                    is_installed,
-                ]);
+                    let exe_path = app_def.executable_for_arch(&root, target_arch);
+                    let is_installed = if exe_path.exists() {
+                        Cell::new("YES").fg(Color::Green)
+                    } else {
+                        Cell::new("NO").fg(Color::Red)
+                    };
+
+                    let deps_str = app_def
+                        .dependencies
+                        .as_ref()
+                        .map(|d| d.join(", "))
+                        .unwrap_or_else(|| "-".to_string());
+
+                    let rel_exe_path = format!("Apps/{}/{}/{}", target_arch.as_str(), app_def.target_dir, app_def.executable);
+
+                    table.add_row(vec![
+                        Cell::new(app_id),
+                        Cell::new(&app_def.name),
+                        Cell::new(target_arch.as_str()).fg(Color::Magenta),
+                        Cell::new(&app_def.target_dir),
+                        Cell::new(rel_exe_path),
+                        Cell::new(deps_str),
+                        is_installed,
+                    ]);
+                }
             }
 
             println!("{}", table);

@@ -88,6 +88,15 @@
             }
           ]
         },
+        "supported_arch": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/CpuArch"
+          }
+        },
         "target_dir": {
           "type": "string"
         },
@@ -95,6 +104,27 @@
           "$ref": "#/definitions/VersionCheckConfig"
         }
       }
+    },
+    "ArchString": {
+      "description": "A string field that can be defined either as a single template string (with `{arch}`) or as an explicit per-architecture mapping (e.g. `{\"x64\": \"...\", \"arm64\": \"...\"}`).",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "CpuArch": {
+      "type": "string",
+      "enum": [
+        "x64",
+        "arm64"
+      ]
     },
     "PackageConfig": {
       "oneOf": [
@@ -133,47 +163,27 @@
             "type": {
               "type": "string",
               "enum": [
-                "zip"
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": [
-            "type"
-          ],
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "enum": [
-                "tar"
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": [
-            "type"
-          ],
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "enum": [
                 "7z"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "zip"
               ]
             }
           }
@@ -224,6 +234,26 @@
             "type"
           ],
           "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tar"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
             "type": {
               "type": "string",
               "enum": [
@@ -237,6 +267,15 @@
     "PostInstallConfig": {
       "type": "object",
       "properties": {
+        "create_dirs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "remove_dirs": {
           "type": [
             "array",
@@ -273,12 +312,16 @@
               ]
             },
             "url": {
-              "type": "string"
+              "$ref": "#/definitions/ArchString"
             },
             "url_template": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ArchString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "version_key": {
@@ -297,9 +340,13 @@
           ],
           "properties": {
             "asset_pattern": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ArchString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "repo": {
@@ -328,22 +375,30 @@
               ]
             },
             "url": {
-              "type": "string"
+              "$ref": "#/definitions/ArchString"
             },
             "url_key": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ArchString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "url_template": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ArchString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "version_key": {
-              "type": "string"
+              "$ref": "#/definitions/ArchString"
             }
           }
         },
@@ -357,7 +412,7 @@
           ],
           "properties": {
             "regex": {
-              "type": "string"
+              "$ref": "#/definitions/ArchString"
             },
             "type": {
               "type": "string",
@@ -366,10 +421,10 @@
               ]
             },
             "url": {
-              "type": "string"
+              "$ref": "#/definitions/ArchString"
             },
             "url_template": {
-              "type": "string"
+              "$ref": "#/definitions/ArchString"
             }
           }
         }
