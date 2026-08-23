@@ -1,9 +1,7 @@
-mod core;
-mod engine;
-mod package;
-
-use crate::core::arch::{ArchTarget, CpuArch};
-use crate::core::config::{AppDefinition, AppManifests};
+use ppm::core::arch::{ArchTarget, CpuArch};
+use ppm::core::config::{AppDefinition, AppManifests};
+use ppm::engine;
+use ppm::package;
 use clap::{Parser, Subcommand};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Table};
