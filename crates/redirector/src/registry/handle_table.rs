@@ -73,21 +73,24 @@ impl VirtualHandleTable {
         if handle.is_null() {
             return None;
         }
-        let h_val = handle as usize;
-        if h_val == 0x80000001 || h_val == 0xFFFFFFFF80000001 {
+        let h_u32 = (handle as usize) as u32;
+        if h_u32 == 0x80000001 {
             return Some("HKCU".to_string());
         }
-        if h_val == 0x80000002 || h_val == 0xFFFFFFFF80000002 {
+        if h_u32 == 0x80000002 {
             return Some("HKLM".to_string());
         }
-        if h_val == 0x80000000 || h_val == 0xFFFFFFFF80000000 {
+        if h_u32 == 0x80000000 {
             return Some("HKCR".to_string());
         }
-        if h_val == 0x80000003 || h_val == 0xFFFFFFFF80000003 {
+        if h_u32 == 0x80000003 {
             return Some("HKU".to_string());
         }
+        if h_u32 == 0x80000005 {
+            return Some("HKCC".to_string());
+        }
         let map = self.entries.read();
-        map.get(&h_val).map(|e| e.path.clone())
+        map.get(&(handle as usize)).map(|e| e.path.clone())
     }
 
     /// Checks if a handle is a synthetic virtual handle.
