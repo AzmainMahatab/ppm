@@ -1,10 +1,9 @@
+use crate::detour::attach_detour;
 use crate::registry::handle_table::get_handle_table;
 use crate::registry::nt_types::*;
 use crate::registry::store::get_registry_store;
-use retour::GenericDetour;
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::HANDLE;
 
 thread_local! {
@@ -28,19 +27,16 @@ type FnNtOpenKey = unsafe extern "system" fn(*mut HANDLE, u32, *const OBJECT_ATT
 type FnNtOpenKeyEx = unsafe extern "system" fn(*mut HANDLE, u32, *const OBJECT_ATTRIBUTES, u32) -> NTSTATUS;
 type FnNtCreateKey = unsafe extern "system" fn(*mut HANDLE, u32, *const OBJECT_ATTRIBUTES, u32, *const UNICODE_STRING, u32, *mut u32) -> NTSTATUS;
 type FnNtQueryValueKey = unsafe extern "system" fn(HANDLE, *const UNICODE_STRING, u32, *mut c_void, u32, *mut u32) -> NTSTATUS;
-type FnNtSetValueKey = unsafe extern "system" fn(HANDLE, *const UNICODE_STRING, u32, u32, *const c_void, u32) -> NTSTATUS;
-type FnNtDeleteValueKey = unsafe extern "system" fn(HANDLE, *const UNICODE_STRING) -> NTSTATUS;
-type FnNtDeleteKey = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
 type FnNtClose = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
 
-static HOOK_NT_OPEN_KEY: OnceLock<GenericDetour<FnNtOpenKey>> = OnceLock::new();
-static HOOK_NT_OPEN_KEY_EX: OnceLock<GenericDetour<FnNtOpenKeyEx>> = OnceLock::new();
-static HOOK_NT_CREATE_KEY: OnceLock<GenericDetour<FnNtCreateKey>> = OnceLock::new();
-static HOOK_NT_QUERY_VALUE_KEY: OnceLock<GenericDetour<FnNtQueryValueKey>> = OnceLock::new();
-static HOOK_NT_SET_VALUE_KEY: OnceLock<GenericDetour<FnNtSetValueKey>> = OnceLock::new();
-static HOOK_NT_DELETE_VALUE_KEY: OnceLock<GenericDetour<FnNtDeleteValueKey>> = OnceLock::new();
-static HOOK_NT_DELETE_KEY: OnceLock<GenericDetour<FnNtDeleteKey>> = OnceLock::new();
-static HOOK_NT_CLOSE: OnceLock<GenericDetour<FnNtClose>> = OnceLock::new();
+static mut REAL_NT_OPEN_KEY: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_OPEN_KEY_EX: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_CREATE_KEY: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_QUERY_VALUE_KEY: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_SET_VALUE_KEY: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_DELETE_VALUE_KEY: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_DELETE_KEY: *mut c_void = std::ptr::null_mut();
+static mut REAL_NT_CLOSE: *mut c_void = std::ptr::null_mut();
 
 /// Normalizes an NT object path to a portable canonical root path (e.g. `HKCU\Software\Vendor\App`).
 unsafe fn resolve_full_key_path(obj_attr: *const OBJECT_ATTRIBUTES) -> String {
@@ -102,8 +98,9 @@ unsafe extern "system" fn hook_nt_open_key(
     desired_access: u32,
     obj_attr: *const OBJECT_ATTRIBUTES,
 ) -> NTSTATUS {
+    let real_fn: FnNtOpenKey = std::mem::transmute(REAL_NT_OPEN_KEY);
     guard_reg_hook!(
-        HOOK_NT_OPEN_KEY.get().unwrap().call(key_handle, desired_access, obj_attr),
+        real_fn(key_handle, desired_access, obj_attr),
         {
             let path = resolve_full_key_path(obj_attr);
 
@@ -112,7 +109,7 @@ unsafe extern "system" fn hook_nt_open_key(
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            let status = HOOK_NT_OPEN_KEY.get().unwrap().call(key_handle, desired_access, obj_attr);
+            let status = real_fn(key_handle, desired_access, obj_attr);
             if status == STATUS_SUCCESS && !key_handle.is_null() {
                 get_handle_table().register_host_handle(*key_handle, path);
             }
@@ -128,8 +125,9 @@ unsafe extern "system" fn hook_nt_open_key_ex(
     obj_attr: *const OBJECT_ATTRIBUTES,
     open_options: u32,
 ) -> NTSTATUS {
+    let real_fn: FnNtOpenKeyEx = std::mem::transmute(REAL_NT_OPEN_KEY_EX);
     guard_reg_hook!(
-        HOOK_NT_OPEN_KEY_EX.get().unwrap().call(key_handle, desired_access, obj_attr, open_options),
+        real_fn(key_handle, desired_access, obj_attr, open_options),
         {
             let path = resolve_full_key_path(obj_attr);
 
@@ -138,7 +136,7 @@ unsafe extern "system" fn hook_nt_open_key_ex(
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            let status = HOOK_NT_OPEN_KEY_EX.get().unwrap().call(key_handle, desired_access, obj_attr, open_options);
+            let status = real_fn(key_handle, desired_access, obj_attr, open_options);
             if status == STATUS_SUCCESS && !key_handle.is_null() {
                 get_handle_table().register_host_handle(*key_handle, path);
             }
@@ -157,14 +155,15 @@ unsafe extern "system" fn hook_nt_create_key(
     create_options: u32,
     disposition: *mut u32,
 ) -> NTSTATUS {
+    let real_fn: FnNtCreateKey = std::mem::transmute(REAL_NT_CREATE_KEY);
     guard_reg_hook!(
-        HOOK_NT_CREATE_KEY.get().unwrap().call(key_handle, desired_access, obj_attr, title_index, class, create_options, disposition),
+        real_fn(key_handle, desired_access, obj_attr, title_index, class, create_options, disposition),
         {
             let path = resolve_full_key_path(obj_attr);
             get_registry_store().create_key(&path);
             tracing::debug!("NtCreateKey: Virtual key created -> {}", path);
 
-            let status = HOOK_NT_CREATE_KEY.get().unwrap().call(key_handle, desired_access, obj_attr, title_index, class, create_options, disposition);
+            let status = real_fn(key_handle, desired_access, obj_attr, title_index, class, create_options, disposition);
             if status == STATUS_SUCCESS && !key_handle.is_null() {
                 get_handle_table().register_host_handle(*key_handle, path);
                 return status;
@@ -193,8 +192,9 @@ unsafe extern "system" fn hook_nt_query_value_key(
     length: u32,
     result_length: *mut u32,
 ) -> NTSTATUS {
+    let real_fn: FnNtQueryValueKey = std::mem::transmute(REAL_NT_QUERY_VALUE_KEY);
     guard_reg_hook!(
-        HOOK_NT_QUERY_VALUE_KEY.get().unwrap().call(key_handle, value_name, key_val_class, key_val_info, length, result_length),
+        real_fn(key_handle, value_name, key_val_class, key_val_info, length, result_length),
         {
             let key_path = get_handle_table().get_path(key_handle).unwrap_or_default();
             let val_name_str = if !value_name.is_null() {
@@ -241,7 +241,7 @@ unsafe extern "system" fn hook_nt_query_value_key(
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            HOOK_NT_QUERY_VALUE_KEY.get().unwrap().call(key_handle, value_name, key_val_class, key_val_info, length, result_length)
+            real_fn(key_handle, value_name, key_val_class, key_val_info, length, result_length)
         }
     )
 }
@@ -250,13 +250,13 @@ unsafe extern "system" fn hook_nt_query_value_key(
 unsafe extern "system" fn hook_nt_set_value_key(
     key_handle: HANDLE,
     value_name: *const UNICODE_STRING,
-    title_index: u32,
+    _title_index: u32,
     val_type: u32,
     data: *const c_void,
     data_size: u32,
 ) -> NTSTATUS {
     guard_reg_hook!(
-        HOOK_NT_SET_VALUE_KEY.get().unwrap().call(key_handle, value_name, title_index, val_type, data, data_size),
+        STATUS_SUCCESS,
         {
             let key_path = get_handle_table().get_path(key_handle).unwrap_or_default();
             let val_name_str = if !value_name.is_null() {
@@ -286,7 +286,7 @@ unsafe extern "system" fn hook_nt_delete_value_key(
     value_name: *const UNICODE_STRING,
 ) -> NTSTATUS {
     guard_reg_hook!(
-        HOOK_NT_DELETE_VALUE_KEY.get().unwrap().call(key_handle, value_name),
+        STATUS_SUCCESS,
         {
             let key_path = get_handle_table().get_path(key_handle).unwrap_or_default();
             let val_name_str = if !value_name.is_null() {
@@ -305,7 +305,7 @@ unsafe extern "system" fn hook_nt_delete_value_key(
 // 7. NtDeleteKey Detour
 unsafe extern "system" fn hook_nt_delete_key(key_handle: HANDLE) -> NTSTATUS {
     guard_reg_hook!(
-        HOOK_NT_DELETE_KEY.get().unwrap().call(key_handle),
+        STATUS_SUCCESS,
         {
             let key_path = get_handle_table().get_path(key_handle).unwrap_or_default();
             get_registry_store().delete_key(&key_path);
@@ -317,15 +317,16 @@ unsafe extern "system" fn hook_nt_delete_key(key_handle: HANDLE) -> NTSTATUS {
 
 // 8. NtClose Detour
 unsafe extern "system" fn hook_nt_close(handle: HANDLE) -> NTSTATUS {
+    let real_fn: FnNtClose = std::mem::transmute(REAL_NT_CLOSE);
     guard_reg_hook!(
-        HOOK_NT_CLOSE.get().unwrap().call(handle),
+        real_fn(handle),
         {
             if let Some(entry) = get_handle_table().close_handle(handle) {
                 if entry.is_synthetic {
                     return STATUS_SUCCESS;
                 }
             }
-            HOOK_NT_CLOSE.get().unwrap().call(handle)
+            real_fn(handle)
         }
     )
 }
@@ -340,75 +341,43 @@ pub fn init_hooks() {
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtOpenKey\0".as_ptr()) {
-            let target: FnNtOpenKey = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_open_key) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_OPEN_KEY.set(d);
-                }
-            }
+            REAL_NT_OPEN_KEY = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_OPEN_KEY, hook_nt_open_key as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtOpenKeyEx\0".as_ptr()) {
-            let target: FnNtOpenKeyEx = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_open_key_ex) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_OPEN_KEY_EX.set(d);
-                }
-            }
+            REAL_NT_OPEN_KEY_EX = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_OPEN_KEY_EX, hook_nt_open_key_ex as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtCreateKey\0".as_ptr()) {
-            let target: FnNtCreateKey = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_create_key) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_CREATE_KEY.set(d);
-                }
-            }
+            REAL_NT_CREATE_KEY = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_CREATE_KEY, hook_nt_create_key as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtQueryValueKey\0".as_ptr()) {
-            let target: FnNtQueryValueKey = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_query_value_key) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_QUERY_VALUE_KEY.set(d);
-                }
-            }
+            REAL_NT_QUERY_VALUE_KEY = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_QUERY_VALUE_KEY, hook_nt_query_value_key as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtSetValueKey\0".as_ptr()) {
-            let target: FnNtSetValueKey = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_set_value_key) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_SET_VALUE_KEY.set(d);
-                }
-            }
+            REAL_NT_SET_VALUE_KEY = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_SET_VALUE_KEY, hook_nt_set_value_key as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtDeleteValueKey\0".as_ptr()) {
-            let target: FnNtDeleteValueKey = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_delete_value_key) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_DELETE_VALUE_KEY.set(d);
-                }
-            }
+            REAL_NT_DELETE_VALUE_KEY = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_DELETE_VALUE_KEY, hook_nt_delete_value_key as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtDeleteKey\0".as_ptr()) {
-            let target: FnNtDeleteKey = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_delete_key) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_DELETE_KEY.set(d);
-                }
-            }
+            REAL_NT_DELETE_KEY = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_DELETE_KEY, hook_nt_delete_key as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(ntdll, b"NtClose\0".as_ptr()) {
-            let target: FnNtClose = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_nt_close) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_NT_CLOSE.set(d);
-                }
-            }
+            REAL_NT_CLOSE = proc as *mut c_void;
+            attach_detour(&raw mut REAL_NT_CLOSE, hook_nt_close as *mut c_void);
         }
     }
 }

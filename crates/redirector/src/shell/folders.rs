@@ -1,7 +1,6 @@
-use retour::GenericDetour;
+use crate::detour::attach_detour;
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::sync::OnceLock;
 use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HWND, S_OK, TRUE};
 
@@ -66,9 +65,9 @@ type FnSHGetKnownFolderPath = unsafe extern "system" fn(*const GUID, u32, HANDLE
 type FnSHGetFolderPathW = unsafe extern "system" fn(HWND, i32, HANDLE, u32, PWSTR) -> HRESULT;
 type FnGetUserProfileDirectoryW = unsafe extern "system" fn(HANDLE, PWSTR, *mut u32) -> BOOL;
 
-static HOOK_SH_GET_KNOWN_FOLDER_PATH: OnceLock<GenericDetour<FnSHGetKnownFolderPath>> = OnceLock::new();
-static HOOK_SH_GET_FOLDER_PATH_W: OnceLock<GenericDetour<FnSHGetFolderPathW>> = OnceLock::new();
-static HOOK_GET_USER_PROFILE_DIRECTORY_W: OnceLock<GenericDetour<FnGetUserProfileDirectoryW>> = OnceLock::new();
+static mut REAL_SH_GET_KNOWN_FOLDER_PATH: *mut c_void = std::ptr::null_mut();
+static mut REAL_SH_GET_FOLDER_PATH_W: *mut c_void = std::ptr::null_mut();
+static mut REAL_GET_USER_PROFILE_DIRECTORY_W: *mut c_void = std::ptr::null_mut();
 
 fn guids_equal(a: &GUID, b: &GUID) -> bool {
     a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
@@ -89,8 +88,9 @@ unsafe extern "system" fn hook_sh_get_known_folder_path(
     token: HANDLE,
     path_out: *mut PWSTR,
 ) -> HRESULT {
+    let real_fn: FnSHGetKnownFolderPath = std::mem::transmute(REAL_SH_GET_KNOWN_FOLDER_PATH);
     guard_shell_hook!(
-        HOOK_SH_GET_KNOWN_FOLDER_PATH.get().unwrap().call(rfid, flags, token, path_out),
+        real_fn(rfid, flags, token, path_out),
         {
             if !rfid.is_null() && !path_out.is_null() {
                 let id = &*rfid;
@@ -118,7 +118,7 @@ unsafe extern "system" fn hook_sh_get_known_folder_path(
                 }
             }
 
-            HOOK_SH_GET_KNOWN_FOLDER_PATH.get().unwrap().call(rfid, flags, token, path_out)
+            real_fn(rfid, flags, token, path_out)
         }
     )
 }
@@ -130,8 +130,9 @@ unsafe extern "system" fn hook_sh_get_folder_path_w(
     flags: u32,
     path_out: PWSTR,
 ) -> HRESULT {
+    let real_fn: FnSHGetFolderPathW = std::mem::transmute(REAL_SH_GET_FOLDER_PATH_W);
     guard_shell_hook!(
-        HOOK_SH_GET_FOLDER_PATH_W.get().unwrap().call(hwnd, csidl, token, flags, path_out),
+        real_fn(hwnd, csidl, token, flags, path_out),
         {
             if !path_out.is_null() {
                 let clean_csidl = csidl & 0x00FF;
@@ -163,7 +164,7 @@ unsafe extern "system" fn hook_sh_get_folder_path_w(
                 }
             }
 
-            HOOK_SH_GET_FOLDER_PATH_W.get().unwrap().call(hwnd, csidl, token, flags, path_out)
+            real_fn(hwnd, csidl, token, flags, path_out)
         }
     )
 }
@@ -173,8 +174,9 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
     profile_dir: PWSTR,
     size: *mut u32,
 ) -> BOOL {
+    let real_fn: FnGetUserProfileDirectoryW = std::mem::transmute(REAL_GET_USER_PROFILE_DIRECTORY_W);
     guard_shell_hook!(
-        HOOK_GET_USER_PROFILE_DIRECTORY_W.get().unwrap().call(token, profile_dir, size),
+        real_fn(token, profile_dir, size),
         {
             if !size.is_null() {
                 let cfg = crate::paths::init_paths();
@@ -195,7 +197,7 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
                 return TRUE;
             }
 
-            HOOK_GET_USER_PROFILE_DIRECTORY_W.get().unwrap().call(token, profile_dir, size)
+            real_fn(token, profile_dir, size)
         }
     )
 }
@@ -209,32 +211,20 @@ pub fn init_hooks() {
 
         if !shell32.is_null() {
             if let Some(proc) = GetProcAddress(shell32, b"SHGetKnownFolderPath\0".as_ptr()) {
-                let target: FnSHGetKnownFolderPath = std::mem::transmute(proc);
-                if let Ok(d) = GenericDetour::new(target, hook_sh_get_known_folder_path) {
-                    if d.enable().is_ok() {
-                        let _ = HOOK_SH_GET_KNOWN_FOLDER_PATH.set(d);
-                    }
-                }
+                REAL_SH_GET_KNOWN_FOLDER_PATH = proc as *mut c_void;
+                attach_detour(&raw mut REAL_SH_GET_KNOWN_FOLDER_PATH, hook_sh_get_known_folder_path as *mut c_void);
             }
 
             if let Some(proc) = GetProcAddress(shell32, b"SHGetFolderPathW\0".as_ptr()) {
-                let target: FnSHGetFolderPathW = std::mem::transmute(proc);
-                if let Ok(d) = GenericDetour::new(target, hook_sh_get_folder_path_w) {
-                    if d.enable().is_ok() {
-                        let _ = HOOK_SH_GET_FOLDER_PATH_W.set(d);
-                    }
-                }
+                REAL_SH_GET_FOLDER_PATH_W = proc as *mut c_void;
+                attach_detour(&raw mut REAL_SH_GET_FOLDER_PATH_W, hook_sh_get_folder_path_w as *mut c_void);
             }
         }
 
         if !userenv.is_null() {
             if let Some(proc) = GetProcAddress(userenv, b"GetUserProfileDirectoryW\0".as_ptr()) {
-                let target: FnGetUserProfileDirectoryW = std::mem::transmute(proc);
-                if let Ok(d) = GenericDetour::new(target, hook_get_user_profile_directory_w) {
-                    if d.enable().is_ok() {
-                        let _ = HOOK_GET_USER_PROFILE_DIRECTORY_W.set(d);
-                    }
-                }
+                REAL_GET_USER_PROFILE_DIRECTORY_W = proc as *mut c_void;
+                attach_detour(&raw mut REAL_GET_USER_PROFILE_DIRECTORY_W, hook_get_user_profile_directory_w as *mut c_void);
             }
         }
     }

@@ -1,8 +1,7 @@
 use crate::credentials::vault::get_vault;
-use retour::GenericDetour;
+use crate::detour::attach_detour;
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{BOOL, TRUE};
 use windows_sys::Win32::Security::Credentials::CREDENTIALW;
 
@@ -35,10 +34,10 @@ type FnCredWriteW = unsafe extern "system" fn(PCREDENTIALW, u32) -> BOOL;
 type FnCredDeleteW = unsafe extern "system" fn(*const u16, u32, u32) -> BOOL;
 type FnCredFree = unsafe extern "system" fn(*const c_void);
 
-static HOOK_CRED_READ_W: OnceLock<GenericDetour<FnCredReadW>> = OnceLock::new();
-static HOOK_CRED_WRITE_W: OnceLock<GenericDetour<FnCredWriteW>> = OnceLock::new();
-static HOOK_CRED_DELETE_W: OnceLock<GenericDetour<FnCredDeleteW>> = OnceLock::new();
-static HOOK_CRED_FREE: OnceLock<GenericDetour<FnCredFree>> = OnceLock::new();
+static mut REAL_CRED_READ_W: *mut c_void = std::ptr::null_mut();
+static mut REAL_CRED_WRITE_W: *mut c_void = std::ptr::null_mut();
+static mut REAL_CRED_DELETE_W: *mut c_void = std::ptr::null_mut();
+static mut REAL_CRED_FREE: *mut c_void = std::ptr::null_mut();
 
 unsafe fn utf16_ptr_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
@@ -67,8 +66,9 @@ unsafe extern "system" fn hook_cred_read_w(
     flags: u32,
     credential_out: *mut PCREDENTIALW,
 ) -> BOOL {
+    let real_fn: FnCredReadW = std::mem::transmute(REAL_CRED_READ_W);
     guard_cred_hook!(
-        HOOK_CRED_READ_W.get().unwrap().call(target_name, cred_type, flags, credential_out),
+        real_fn(target_name, cred_type, flags, credential_out),
         {
             if !target_name.is_null() && !credential_out.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
@@ -123,7 +123,7 @@ unsafe extern "system" fn hook_cred_read_w(
                 }
             }
 
-            HOOK_CRED_READ_W.get().unwrap().call(target_name, cred_type, flags, credential_out)
+            real_fn(target_name, cred_type, flags, credential_out)
         }
     )
 }
@@ -132,8 +132,9 @@ unsafe extern "system" fn hook_cred_write_w(
     credential: PCREDENTIALW,
     flags: u32,
 ) -> BOOL {
+    let real_fn: FnCredWriteW = std::mem::transmute(REAL_CRED_WRITE_W);
     guard_cred_hook!(
-        HOOK_CRED_WRITE_W.get().unwrap().call(credential, flags),
+        real_fn(credential, flags),
         {
             if !credential.is_null() {
                 let cred = &*credential;
@@ -151,7 +152,7 @@ unsafe extern "system" fn hook_cred_write_w(
                 return TRUE;
             }
 
-            HOOK_CRED_WRITE_W.get().unwrap().call(credential, flags)
+            real_fn(credential, flags)
         }
     )
 }
@@ -161,8 +162,9 @@ unsafe extern "system" fn hook_cred_delete_w(
     cred_type: u32,
     flags: u32,
 ) -> BOOL {
+    let real_fn: FnCredDeleteW = std::mem::transmute(REAL_CRED_DELETE_W);
     guard_cred_hook!(
-        HOOK_CRED_DELETE_W.get().unwrap().call(target_name, cred_type, flags),
+        real_fn(target_name, cred_type, flags),
         {
             if !target_name.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
@@ -172,14 +174,15 @@ unsafe extern "system" fn hook_cred_delete_w(
                 }
             }
 
-            HOOK_CRED_DELETE_W.get().unwrap().call(target_name, cred_type, flags)
+            real_fn(target_name, cred_type, flags)
         }
     )
 }
 
 unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
+    let real_fn: FnCredFree = std::mem::transmute(REAL_CRED_FREE);
     guard_cred_hook!(
-        HOOK_CRED_FREE.get().unwrap().call(buffer),
+        real_fn(buffer),
         {
             if !buffer.is_null() {
                 let cred_ptr = buffer as *mut CREDENTIALW;
@@ -196,7 +199,7 @@ unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
                 CoTaskMemFree(buffer as *mut c_void);
                 return;
             }
-            HOOK_CRED_FREE.get().unwrap().call(buffer);
+            real_fn(buffer);
         }
     )
 }
@@ -211,39 +214,23 @@ pub fn init_hooks() {
         }
 
         if let Some(proc) = GetProcAddress(advapi32, b"CredReadW\0".as_ptr()) {
-            let target: FnCredReadW = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_cred_read_w) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_CRED_READ_W.set(d);
-                }
-            }
+            REAL_CRED_READ_W = proc as *mut c_void;
+            attach_detour(&raw mut REAL_CRED_READ_W, hook_cred_read_w as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(advapi32, b"CredWriteW\0".as_ptr()) {
-            let target: FnCredWriteW = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_cred_write_w) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_CRED_WRITE_W.set(d);
-                }
-            }
+            REAL_CRED_WRITE_W = proc as *mut c_void;
+            attach_detour(&raw mut REAL_CRED_WRITE_W, hook_cred_write_w as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(advapi32, b"CredDeleteW\0".as_ptr()) {
-            let target: FnCredDeleteW = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_cred_delete_w) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_CRED_DELETE_W.set(d);
-                }
-            }
+            REAL_CRED_DELETE_W = proc as *mut c_void;
+            attach_detour(&raw mut REAL_CRED_DELETE_W, hook_cred_delete_w as *mut c_void);
         }
 
         if let Some(proc) = GetProcAddress(advapi32, b"CredFree\0".as_ptr()) {
-            let target: FnCredFree = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_cred_free) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_CRED_FREE.set(d);
-                }
-            }
+            REAL_CRED_FREE = proc as *mut c_void;
+            attach_detour(&raw mut REAL_CRED_FREE, hook_cred_free as *mut c_void);
         }
     }
 }

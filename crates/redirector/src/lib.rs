@@ -1,4 +1,5 @@
 pub mod credentials;
+pub mod detour;
 pub mod paths;
 pub mod process;
 pub mod registry;

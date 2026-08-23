@@ -23,7 +23,6 @@ crate-type = ["cdylib"]
 cc = "1.0"
 
 [dependencies]
-retour = "0.3"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_SystemServices",

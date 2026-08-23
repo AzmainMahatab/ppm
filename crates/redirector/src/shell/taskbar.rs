@@ -1,6 +1,6 @@
-use retour::GenericDetour;
+use crate::detour::attach_detour;
 use std::cell::Cell;
-use std::sync::OnceLock;
+use std::ffi::c_void;
 use windows_sys::core::HRESULT;
 
 thread_local! {
@@ -8,18 +8,19 @@ thread_local! {
 }
 
 type FnSetCurrentProcessExplicitAppUserModelID = unsafe extern "system" fn(*const u16) -> HRESULT;
-static HOOK_SET_APP_USER_MODEL_ID: OnceLock<GenericDetour<FnSetCurrentProcessExplicitAppUserModelID>> = OnceLock::new();
+static mut REAL_SET_APP_USER_MODEL_ID: *mut c_void = std::ptr::null_mut();
 
 unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRESULT {
+    let real_fn: FnSetCurrentProcessExplicitAppUserModelID = std::mem::transmute(REAL_SET_APP_USER_MODEL_ID);
     if IN_APP_ID_HOOK.with(|h| h.get()) {
-        return HOOK_SET_APP_USER_MODEL_ID.get().unwrap().call(app_id);
+        return real_fn(app_id);
     }
 
     IN_APP_ID_HOOK.with(|h| h.set(true));
 
     // Force canonical portable application ID
     let portable_id = windows_sys::core::w!("Google.Antigravity.Portable");
-    let res = HOOK_SET_APP_USER_MODEL_ID.get().unwrap().call(portable_id);
+    let res = real_fn(portable_id);
 
     IN_APP_ID_HOOK.with(|h| h.set(false));
     res
@@ -32,12 +33,8 @@ pub fn init_hooks() {
         let shell32 = GetModuleHandleW(windows_sys::core::w!("shell32.dll"));
         if !shell32.is_null() {
             if let Some(proc) = GetProcAddress(shell32, b"SetCurrentProcessExplicitAppUserModelID\0".as_ptr()) {
-                let target: FnSetCurrentProcessExplicitAppUserModelID = std::mem::transmute(proc);
-                if let Ok(d) = GenericDetour::new(target, hook_set_app_user_model_id) {
-                    if d.enable().is_ok() {
-                        let _ = HOOK_SET_APP_USER_MODEL_ID.set(d);
-                    }
-                }
+                REAL_SET_APP_USER_MODEL_ID = proc as *mut c_void;
+                attach_detour(&raw mut REAL_SET_APP_USER_MODEL_ID, hook_set_app_user_model_id as *mut c_void);
             }
         }
     }

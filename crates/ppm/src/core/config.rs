@@ -182,6 +182,7 @@ impl AppManifests {
             .map_err(|e| format!("Failed to parse JSON manifest at '{}': {}", path.display(), e))
     }
 
+    #[allow(dead_code)]
     pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {

@@ -1,7 +1,6 @@
-use retour::GenericDetour;
+use crate::detour::attach_detour;
 use std::cell::Cell;
 use std::ffi::{c_void, CString};
-use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{BOOL, TRUE};
 use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTUPINFOW,
@@ -56,7 +55,7 @@ type FnCreateProcessW = unsafe extern "system" fn(
     LpprocessInformation,
 ) -> BOOL;
 
-static HOOK_CREATE_PROCESS_W: OnceLock<GenericDetour<FnCreateProcessW>> = OnceLock::new();
+static mut REAL_CREATE_PROCESS_W: *mut c_void = std::ptr::null_mut();
 
 unsafe extern "system" fn hook_create_process_w(
     app_name: *const u16,
@@ -70,8 +69,9 @@ unsafe extern "system" fn hook_create_process_w(
     startup_info: LPSTARTUPINFOW,
     proc_info: LpprocessInformation,
 ) -> BOOL {
+    let real_fn: FnCreateProcessW = std::mem::transmute(REAL_CREATE_PROCESS_W);
     guard_proc_hook!(
-        HOOK_CREATE_PROCESS_W.get().unwrap().call(
+        real_fn(
             app_name, cmd_line, proc_attr, thread_attr, inherit, flags, env, curr_dir, startup_info, proc_info
         ),
         {
@@ -101,7 +101,7 @@ unsafe extern "system" fn hook_create_process_w(
                 }
             }
 
-            HOOK_CREATE_PROCESS_W.get().unwrap().call(
+            real_fn(
                 app_name, cmd_line, proc_attr, thread_attr, inherit, flags, env, curr_dir, startup_info, proc_info
             )
         }
@@ -132,12 +132,8 @@ pub fn init_hooks() {
         }
 
         if let Some(proc) = target_proc {
-            let target: FnCreateProcessW = std::mem::transmute(proc);
-            if let Ok(d) = GenericDetour::new(target, hook_create_process_w) {
-                if d.enable().is_ok() {
-                    let _ = HOOK_CREATE_PROCESS_W.set(d);
-                }
-            }
+            REAL_CREATE_PROCESS_W = proc as *mut c_void;
+            attach_detour(&raw mut REAL_CREATE_PROCESS_W, hook_create_process_w as *mut c_void);
         }
     }
 }
