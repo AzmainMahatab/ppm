@@ -1,8 +1,9 @@
 use crate::core::config::AppManifests;
+use color_eyre::eyre::Result;
 use std::fs;
 use std::path::Path;
 
-pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<String>, String> {
+pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<String>> {
     let mut generated = Vec::new();
 
     for (app_id, app_def) in &manifests.apps {
@@ -27,9 +28,7 @@ pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<S
                 app_id
             );
 
-            fs::write(&bat_path, content)
-                .map_err(|e| format!("Failed to write launcher '{}': {}", bat_path.display(), e))?;
-
+            fs::write(&bat_path, content)?;
             generated.push(bat_filename);
         }
     }
@@ -37,7 +36,7 @@ pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<S
     Ok(generated)
 }
 
-pub fn generate_single_launcher(root: &Path, app_id: &str) -> Result<(), String> {
+pub fn generate_single_launcher(root: &Path, app_id: &str) -> Result<()> {
     let bat_filename = format!("{}.bat", app_id);
     let bat_path = root.join(&bat_filename);
 
@@ -58,9 +57,7 @@ pub fn generate_single_launcher(root: &Path, app_id: &str) -> Result<(), String>
         app_id
     );
 
-    fs::write(&bat_path, content)
-        .map_err(|e| format!("Failed to write launcher '{}': {}", bat_path.display(), e))?;
-
+    fs::write(&bat_path, content)?;
     Ok(())
 }
 

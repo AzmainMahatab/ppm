@@ -1,21 +1,16 @@
 use crate::core::config::PostInstallConfig;
+use color_eyre::eyre::Result;
 use std::fs;
 use std::path::Path;
 
 pub fn sanitize_package(
     target_dir: &Path,
     post_install: Option<&PostInstallConfig>,
-) -> Result<(), String> {
+) -> Result<()> {
     // 1. Universal portable sanitization: remove auto-updater manifest
     let auto_updater_yml = target_dir.join("resources").join("app-update.yml");
     if auto_updater_yml.exists() {
-        fs::remove_file(&auto_updater_yml).map_err(|e| {
-            format!(
-                "Failed to remove auto-updater manifest '{}': {}",
-                auto_updater_yml.display(),
-                e
-            )
-        })?;
+        fs::remove_file(&auto_updater_yml)?;
         println!("  ✓ Sanitized: Removed auto-updater manifest 'resources/app-update.yml'");
     }
 
@@ -25,9 +20,7 @@ pub fn sanitize_package(
             for file_rel in files {
                 let target = target_dir.join(file_rel);
                 if target.exists() {
-                    fs::remove_file(&target).map_err(|e| {
-                        format!("Failed to remove file '{}': {}", target.display(), e)
-                    })?;
+                    fs::remove_file(&target)?;
                     println!("  ✓ Removed file: {}", file_rel);
                 }
             }
@@ -37,9 +30,7 @@ pub fn sanitize_package(
             for dir_rel in dirs {
                 let target = target_dir.join(dir_rel);
                 if target.exists() {
-                    fs::remove_dir_all(&target).map_err(|e| {
-                        format!("Failed to remove directory '{}': {}", target.display(), e)
-                    })?;
+                    fs::remove_dir_all(&target)?;
                     println!("  ✓ Removed directory: {}", dir_rel);
                 }
             }

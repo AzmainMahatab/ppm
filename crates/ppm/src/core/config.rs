@@ -175,28 +175,20 @@ pub struct PostInstallConfig {
 }
 
 impl AppManifests {
-    pub fn load_from_file(path: &Path) -> Result<Self, String> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read manifest file at '{}': {}", path.display(), e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse JSON manifest at '{}': {}", path.display(), e))
+    pub fn load_from_file(path: &Path) -> color_eyre::Result<Self> {
+        let content = fs::read_to_string(path)?;
+        let manifests: Self = serde_json::from_str(&content)?;
+        Ok(manifests)
     }
 
     #[allow(dead_code)]
-    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+    pub fn save_to_file(&self, path: &Path) -> color_eyre::Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to create parent directory for '{}': {}",
-                    path.display(),
-                    e
-                )
-            })?;
+            fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
-        fs::write(path, json)
-            .map_err(|e| format!("Failed to write manifest file at '{}': {}", path.display(), e))
+        let json = serde_json::to_string_pretty(self)?;
+        fs::write(path, json)?;
+        Ok(())
     }
 }
 

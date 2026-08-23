@@ -1,8 +1,8 @@
 # Rust build artifacts
 /target/
 
-# Local state, cache & logs
-/.ppm/
+# Temporary files
+/scratch/
 *.log
 *.part
 

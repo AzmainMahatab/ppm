@@ -1,5 +1,6 @@
 use crate::core::arch::CpuArch;
 use crate::core::config::AppManifests;
+use color_eyre::eyre::{bail, eyre, Result};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -25,7 +26,7 @@ extern "C" {
     ) -> i32;
 }
 
-pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Result<i32, String> {
+pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Result<i32> {
     let host_arch = CpuArch::current();
 
     // 1. Resolve executable and target directory
@@ -54,7 +55,7 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
         let app_def = manifests
             .apps
             .get(app_name_or_path)
-            .ok_or_else(|| format!("Application '{}' not found in apps.json", app_name_or_path))?;
+            .ok_or_else(|| eyre!("Application '{}' not found in apps.json", app_name_or_path))?;
 
         // Determine effective architecture: prefer native host arch, fallback to x64 on ARM64 if available
         let effective_arch = if app_def.is_installed_for_arch(root, host_arch) {
@@ -74,12 +75,12 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
             for dep in deps {
                 if let Some(dep_def) = manifests.apps.get(dep) {
                     if !dep_def.is_installed_for_arch(root, effective_arch) {
-                        return Err(format!(
+                        bail!(
                             "Required dependency '{}' is not installed for [{}]. Run 'ppm install {}' first.",
                             dep_def.name,
                             effective_arch.as_str(),
                             dep
-                        ));
+                        );
                     }
                 }
             }
@@ -97,12 +98,12 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     };
 
     if !exe_path.exists() {
-        return Err(format!(
+        bail!(
             "Target binary does not exist at '{}' for architecture [{}]. Run 'ppm install {}' first.",
             exe_path.display(),
             run_arch.as_str(),
             app_name_or_path
-        ));
+        );
     }
 
     // 2. Setup Canonical Portable User Profile (%USERPROFILE%, %HOME%, %LOCALAPPDATA%, %APPDATA%)
@@ -112,14 +113,10 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     let webview_data = home_dir.join("AppData").join("WebViewData");
     let documents_dir = home_dir.join("Documents");
 
-    fs::create_dir_all(&local_appdata)
-        .map_err(|e| format!("Failed to create Home/AppData/Local at '{}': {}", local_appdata.display(), e))?;
-    fs::create_dir_all(&roaming_appdata)
-        .map_err(|e| format!("Failed to create Home/AppData/Roaming at '{}': {}", roaming_appdata.display(), e))?;
-    fs::create_dir_all(&webview_data)
-        .map_err(|e| format!("Failed to create Home/AppData/WebViewData at '{}': {}", webview_data.display(), e))?;
-    fs::create_dir_all(&documents_dir)
-        .map_err(|e| format!("Failed to create Home/Documents at '{}': {}", documents_dir.display(), e))?;
+    fs::create_dir_all(&local_appdata)?;
+    fs::create_dir_all(&roaming_appdata)?;
+    fs::create_dir_all(&webview_data)?;
+    fs::create_dir_all(&documents_dir)?;
 
     env::set_var("USERPROFILE", &home_dir);
     env::set_var("HOME", &home_dir);
@@ -174,10 +171,7 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     cmd.current_dir(&app_dir);
     cmd.args(&final_args);
 
-    let status = cmd
-        .status()
-        .map_err(|e| format!("Failed to spawn process '{}': {}", exe_path.display(), e))?;
-
+    let status = cmd.status()?;
     Ok(status.code().unwrap_or(0))
 }
 
@@ -187,7 +181,7 @@ fn launch_with_detours(
     work_dir: &Path,
     args: &[String],
     dll_path: &Path,
-) -> Result<i32, String> {
+) -> Result<i32> {
     use std::ffi::CString;
     use std::mem::zeroed;
     use windows_sys::Win32::System::Threading::{
@@ -210,8 +204,7 @@ fn launch_with_detours(
         .chain(std::iter::once(0))
         .collect();
 
-    let dll_path_cstr = CString::new(dll_path.to_string_lossy().as_bytes())
-        .map_err(|e| format!("Invalid DLL path encoding: {}", e))?;
+    let dll_path_cstr = CString::new(dll_path.to_string_lossy().as_bytes())?;
 
     unsafe {
         let mut si: STARTUPINFOW = zeroed();
@@ -234,11 +227,11 @@ fn launch_with_detours(
         );
 
         if success == 0 {
-            return Err(format!(
+            bail!(
                 "DetourCreateProcessWithDllExW failed to launch '{}' with DLL '{}'",
                 exe_path.display(),
                 dll_path.display()
-            ));
+            );
         }
 
         WaitForSingleObject(pi.hProcess, INFINITE);

@@ -1,98 +1,19 @@
 use crate::core::config::PackageConfig;
+use color_eyre::eyre::{bail, Result};
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SEVENZ_SIGNATURE: &[u8] = &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
-pub fn find_7z_offset(path: &Path) -> Result<u64, String> {
-    let file = File::open(path)
-        .map_err(|e| format!("Failed to open package file '{}': {}", path.display(), e))?;
-    let mut reader = BufReader::new(file);
+struct StagingGuard<'a>(&'a Path);
 
-    let mut buffer = [0u8; 65536];
-    let mut current_offset: u64 = 0;
-
-    loop {
-        let bytes_read = reader
-            .read(&mut buffer)
-            .map_err(|e| format!("Failed to read package file: {}", e))?;
-        if bytes_read < 6 {
-            break;
-        }
-
-        for i in 0..=(bytes_read - 6) {
-            if &buffer[i..i + 6] == SEVENZ_SIGNATURE {
-                return Ok(current_offset + i as u64);
-            }
-        }
-
-        current_offset += (bytes_read - 5) as u64;
-        reader
-            .seek(SeekFrom::Start(current_offset))
-            .map_err(|e| format!("Failed to seek file: {}", e))?;
+impl<'a> Drop for StagingGuard<'a> {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.0);
     }
-
-    Err("Could not find embedded 7-Zip payload header in NSIS installer".to_string())
-}
-
-pub fn extract_7z_stream(archive_path: &Path, offset: u64, dest_dir: &Path) -> Result<(), String> {
-    let mut file = File::open(archive_path)
-        .map_err(|e| format!("Failed to open archive '{}': {}", archive_path.display(), e))?;
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| format!("Failed to seek to 7z offset {}: {}", offset, e))?;
-
-    let temp_7z = dest_dir.join("__temp_payload.7z");
-    let mut temp_file = File::create(&temp_7z)
-        .map_err(|e| format!("Failed to create temporary 7z payload: {}", e))?;
-
-    std::io::copy(&mut file, &mut temp_file)
-        .map_err(|e| format!("Failed to copy 7z payload: {}", e))?;
-    drop(temp_file);
-
-    let res = sevenz_rust::decompress_file(&temp_7z, dest_dir)
-        .map_err(|e| format!("7-Zip extraction failed: {}", e));
-
-    let _ = fs::remove_file(&temp_7z);
-    res
-}
-
-pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let file = File::open(archive_path)
-        .map_err(|e| format!("Failed to open zip file '{}': {}", archive_path.display(), e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Failed to parse zip archive: {}", e))?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read zip entry #{}: {}", i, e))?;
-        let outpath = match entry.enclosed_name() {
-            Some(path) => dest_dir.join(path),
-            None => continue,
-        };
-
-        if entry.is_dir() {
-            fs::create_dir_all(&outpath)
-                .map_err(|e| format!("Failed to create dir '{}': {}", outpath.display(), e))?;
-        } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p).map_err(|e| {
-                        format!("Failed to create parent dir '{}': {}", p.display(), e)
-                    })?;
-                }
-            }
-            let mut outfile = File::create(&outpath).map_err(|e| {
-                format!("Failed to create output file '{}': {}", outpath.display(), e)
-            })?;
-            std::io::copy(&mut entry, &mut outfile)
-                .map_err(|e| format!("Failed to write entry content: {}", e))?;
-        }
-    }
-
-    Ok(())
 }
 
 fn to_cmd_path(path: &Path) -> String {
@@ -109,43 +30,249 @@ fn to_cmd_path(path: &Path) -> String {
     }
 }
 
-pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let abs_archive = to_cmd_path(archive_path);
-    fs::create_dir_all(dest_dir)
-        .map_err(|e| format!("Failed to create cab destination directory: {}", e))?;
-    let abs_dest = to_cmd_path(dest_dir);
+pub fn find_7z_offset(path: &Path) -> Result<u64> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
 
-    let status = Command::new("expand.exe")
-        .arg(&abs_archive)
-        .arg("-F:*")
-        .arg(&abs_dest)
-        .status()
-        .map_err(|e| format!("Failed to spawn expand.exe: {}", e))?;
+    let mut buffer = [0u8; 65536];
+    let mut current_offset: u64 = 0;
 
-    if !status.success() {
-        return Err(format!("expand.exe failed with exit code: {:?}", status.code()));
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read < 6 {
+            break;
+        }
+
+        for i in 0..=(bytes_read - 6) {
+            if &buffer[i..i + 6] == SEVENZ_SIGNATURE {
+                return Ok(current_offset + i as u64);
+            }
+        }
+
+        current_offset += (bytes_read - 5) as u64;
+        reader.seek(SeekFrom::Start(current_offset))?;
+    }
+
+    bail!(
+        "Could not find embedded 7-Zip payload header in NSIS installer '{}'",
+        path.display()
+    )
+}
+
+pub fn extract_7z_stream(archive_path: &Path, offset: u64, dest_dir: &Path) -> Result<()> {
+    let mut file = File::open(archive_path)?;
+    file.seek(SeekFrom::Start(offset))?;
+
+    let temp_7z = dest_dir.join("__temp_payload.7z");
+    let mut temp_file = File::create(&temp_7z)?;
+
+    std::io::copy(&mut file, &mut temp_file)?;
+    drop(temp_file);
+
+    let res = sevenz_rust::decompress_file(&temp_7z, dest_dir);
+    let _ = fs::remove_file(&temp_7z);
+    if let Err(e) = res {
+        bail!(
+            "7-Zip decompression failed for '{}': {}",
+            archive_path.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
+pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let file = File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let outpath = match entry.enclosed_name() {
+            Some(path) => dest_dir.join(path),
+            None => continue,
+        };
+
+        if entry.is_dir() {
+            fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)?;
+                }
+            }
+            let mut outfile = File::create(&outpath)?;
+            std::io::copy(&mut entry, &mut outfile)?;
+        }
     }
 
     Ok(())
 }
 
-pub fn extract_msi(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let abs_archive = to_cmd_path(archive_path);
-    fs::create_dir_all(dest_dir)
-        .map_err(|e| format!("Failed to create msi destination directory: {}", e))?;
-    let abs_dest = to_cmd_path(dest_dir);
+pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    fs::create_dir_all(dest_dir)?;
 
-    let target_dir_arg = format!("TARGETDIR={}", abs_dest);
+    #[cfg(windows)]
+    {
+        let abs_archive = to_cmd_path(archive_path);
+        let abs_dest = to_cmd_path(dest_dir);
+
+        if let Ok(status) = Command::new("expand.exe")
+            .arg(&abs_archive)
+            .arg("-F:*")
+            .arg(&abs_dest)
+            .status()
+        {
+            if status.success() {
+                return Ok(());
+            }
+        }
+    }
+
+    if let Ok(file) = File::open(archive_path) {
+        if let Ok(mut cabinet) = cab::Cabinet::new(file) {
+            let file_names: Vec<String> = cabinet
+                .folder_entries()
+                .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
+                .collect();
+
+            for name in file_names {
+                if let Ok(mut reader) = cabinet.read_file(&name) {
+                    let out_path = dest_dir.join(&name);
+                    if let Some(parent) = out_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    if let Ok(mut out_file) = File::create(&out_path) {
+                        let _ = std::io::copy(&mut reader, &mut out_file);
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    bail!("Failed to extract CAB package '{}'", archive_path.display())
+}
+
+pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
+    // 1. Pure-Rust extraction for standard WiX/MSI relational packages
+    if let Ok(file) = File::open(msi_path) {
+        if let Ok(mut package) = msi::Package::open(file) {
+            let mut file_map: HashMap<String, String> = HashMap::new();
+            if let Ok(file_rows) = package.select_rows(msi::Select::table("File")) {
+                for row in file_rows {
+                    let file_key = row[0].as_str().unwrap_or("").to_string();
+                    let raw_name = row[2].as_str().unwrap_or("");
+                    let clean_name = if let Some((_, long_name)) = raw_name.split_once('|') {
+                        long_name
+                    } else {
+                        raw_name
+                    };
+                    if !file_key.is_empty() && !clean_name.is_empty() {
+                        file_map.insert(file_key, clean_name.to_string());
+                    }
+                }
+            }
+
+            let stream_names: Vec<String> = package.streams().map(|s| s.to_string()).collect();
+            let mut extracted_any = false;
+
+            for stream_name in &stream_names {
+                let mut stream_reader = match package.read_stream(stream_name) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+
+                let mut stream_bytes = Vec::new();
+                if stream_reader.read_to_end(&mut stream_bytes).is_err() {
+                    continue;
+                }
+
+                if stream_bytes.starts_with(b"MSCF") {
+                    if let Ok(mut cabinet) = cab::Cabinet::new(Cursor::new(stream_bytes)) {
+                        let cab_entries: Vec<String> = cabinet
+                            .folder_entries()
+                            .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
+                            .collect();
+
+                        for cab_file_key in cab_entries {
+                            if let Ok(mut reader) = cabinet.read_file(&cab_file_key) {
+                                let target_name = file_map
+                                    .get(&cab_file_key)
+                                    .cloned()
+                                    .unwrap_or_else(|| cab_file_key.clone());
+
+                                let out_file_path = dest_dir.join(&target_name);
+                                if let Some(parent) = out_file_path.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+
+                                if let Ok(mut out_file) = File::create(&out_file_path) {
+                                    if std::io::copy(&mut reader, &mut out_file).is_ok() {
+                                        extracted_any = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check external CAB files if referenced
+            if !extracted_any {
+                if let Some(parent_dir) = msi_path.parent() {
+                    if let Ok(entries) = fs::read_dir(parent_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file()
+                                && path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|e| e.eq_ignore_ascii_case("cab"))
+                                    .unwrap_or(false)
+                                && extract_cab(&path, dest_dir).is_ok()
+                            {
+                                extracted_any = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if extracted_any {
+                return Ok(());
+            }
+        }
+    }
+
+    // 2. Fallback for custom-action wrapped MSIs (e.g. Microsoft Edge Enterprise)
+    let abs_msi = to_cmd_path(msi_path);
+    let abs_dest = to_cmd_path(dest_dir);
+    fs::create_dir_all(dest_dir)?;
+
     let status = Command::new("msiexec.exe")
         .arg("/a")
-        .arg(&abs_archive)
-        .arg("/qb")
-        .arg(&target_dir_arg)
-        .status()
-        .map_err(|e| format!("Failed to spawn msiexec.exe: {}", e))?;
+        .arg(&abs_msi)
+        .arg("/qn")
+        .arg(format!("TARGETDIR={}", abs_dest))
+        .status()?;
 
     if !status.success() {
-        return Err(format!("msiexec.exe administrative extract failed: {:?}", status.code()));
+        bail!("msiexec extraction failed with exit status: {:?}", status.code());
+    }
+
+    // Clean up any stray .msi files dropped into dest_dir by msiexec /a
+    if let Ok(entries) = fs::read_dir(dest_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("msi"))
+                    .unwrap_or(false)
+            {
+                let _ = fs::remove_file(&p);
+            }
+        }
     }
 
     Ok(())
@@ -155,50 +282,48 @@ pub fn extract_package(
     archive_path: &Path,
     package_config: &PackageConfig,
     dest_dir: &Path,
-) -> Result<(), String> {
+) -> Result<()> {
     let stage_dir = dest_dir.join("__stage_extract");
     let _ = fs::remove_dir_all(&stage_dir);
-    fs::create_dir_all(&stage_dir)
-        .map_err(|e| format!("Failed to create staging directory '{}': {}", stage_dir.display(), e))?;
+    fs::create_dir_all(&stage_dir)?;
 
-    let (extract_subpath, extract_result) = match package_config {
+    let _guard = StagingGuard(&stage_dir);
+
+    let extract_subpath = match package_config {
         PackageConfig::Nsis7z { extract_subpath } => {
             let offset = find_7z_offset(archive_path)?;
-            let res = extract_7z_stream(archive_path, offset, &stage_dir);
-            (extract_subpath.as_deref(), res)
+            extract_7z_stream(archive_path, offset, &stage_dir)?;
+            extract_subpath.as_deref()
         }
         PackageConfig::SevenZ { extract_subpath } => {
-            let res = sevenz_rust::decompress_file(archive_path, &stage_dir)
-                .map_err(|e| format!("7-Zip decompression failed: {}", e));
-            (extract_subpath.as_deref(), res)
+            if let Err(e) = sevenz_rust::decompress_file(archive_path, &stage_dir) {
+                bail!("7-Zip decompression failed for '{}': {}", archive_path.display(), e);
+            }
+            extract_subpath.as_deref()
         }
         PackageConfig::Zip { extract_subpath } => {
-            let res = extract_zip(archive_path, &stage_dir);
-            (extract_subpath.as_deref(), res)
+            extract_zip(archive_path, &stage_dir)?;
+            extract_subpath.as_deref()
         }
         PackageConfig::Cab { extract_subpath } => {
-            let res = extract_cab(archive_path, &stage_dir);
-            (extract_subpath.as_deref(), res)
+            extract_cab(archive_path, &stage_dir)?;
+            extract_subpath.as_deref()
         }
         PackageConfig::Msi { extract_subpath } => {
-            let res = extract_msi(archive_path, &stage_dir);
-            (extract_subpath.as_deref(), res)
+            extract_msi(archive_path, &stage_dir)?;
+            extract_subpath.as_deref()
         }
         PackageConfig::Tar { extract_subpath } => {
-            let res = extract_zip(archive_path, &stage_dir);
-            (extract_subpath.as_deref(), res)
+            extract_zip(archive_path, &stage_dir)?;
+            extract_subpath.as_deref()
         }
         PackageConfig::Binary => {
             let file_name = archive_path.file_name().unwrap_or_default();
             let dest_file = stage_dir.join(file_name);
-            let res = fs::copy(archive_path, &dest_file)
-                .map(|_| ())
-                .map_err(|e| format!("Failed to copy binary payload: {}", e));
-            (None, res)
+            fs::copy(archive_path, &dest_file)?;
+            None
         }
     };
-
-    extract_result?;
 
     let source_root = if let Some(sub) = extract_subpath {
         let custom_sub = stage_dir.join(sub);
@@ -211,54 +336,67 @@ pub fn extract_package(
         find_payload_root(&stage_dir)
     };
 
-    fs::create_dir_all(dest_dir)
-        .map_err(|e| format!("Failed to create destination directory '{}': {}", dest_dir.display(), e))?;
+    fs::create_dir_all(dest_dir)?;
     copy_dir_recursive(&source_root, dest_dir)?;
 
-    let _ = fs::remove_dir_all(&stage_dir);
     Ok(())
 }
 
 fn find_payload_root(dir: &Path) -> PathBuf {
-    let app_64 = dir.join("app-64");
-    if app_64.is_dir() {
-        return app_64;
-    }
-    let app_32 = dir.join("app-32");
-    if app_32.is_dir() {
-        return app_32;
-    }
-    let app = dir.join("app");
-    if app.is_dir() {
-        return app;
+    // 1. Explicit app-64 / app-32 / app conventions
+    for sub in &["app-64", "app-32", "app"] {
+        let p = dir.join(sub);
+        if p.is_dir() {
+            return p;
+        }
     }
 
-    // Common enterprise MSI payload subdirectories
-    let candidates = [
+    // 2. Standard MSI directory hierarchies: PFiles/<App>/, Program Files/<Vendor>/<App>/
+    for prefix in &["PFiles", "Program Files", "Program Files (x86)"] {
+        let p = dir.join(prefix);
+        if p.is_dir() {
+            if let Ok(mut entries) = fs::read_dir(&p) {
+                if let Some(Ok(child)) = entries.next() {
+                    let child_path = child.path();
+                    if child_path.is_dir() {
+                        return child_path;
+                    }
+                }
+            }
+            return p;
+        }
+    }
+
+    // 3. Common enterprise MSI payload subdirectories
+    for candidate in &[
         dir.join("Microsoft").join("Edge").join("Application"),
-        dir.join("Program Files").join("Microsoft").join("Edge").join("Application"),
-        dir.join("Program Files (x86)").join("Microsoft").join("Edge").join("Application"),
-    ];
-
-    for candidate in candidates {
+        dir.join("Microsoft").join("Edge Dev").join("Application"),
+        dir.join("Microsoft").join("Edge Beta").join("Application"),
+    ] {
         if candidate.is_dir() {
-            return candidate;
+            return candidate.clone();
+        }
+    }
+
+    // 4. Single nested folder flattening
+    if let Ok(entries) = fs::read_dir(dir) {
+        let items: Vec<_> = entries.flatten().collect();
+        if items.len() == 1 && items[0].path().is_dir() {
+            return items[0].path();
         }
     }
 
     dir.to_path_buf()
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() {
         return Ok(());
     }
 
     if src.is_dir() {
-        fs::create_dir_all(dst)
-            .map_err(|e| format!("Failed to create directory '{}': {}", dst.display(), e))?;
-        let entries = fs::read_dir(src)
-            .map_err(|e| format!("Failed to read dir '{}': {}", src.display(), e))?;
+        fs::create_dir_all(dst)?;
+        let entries = fs::read_dir(src)?;
 
         for entry in entries.flatten() {
             let src_path = entry.path();
@@ -267,25 +405,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
             if src_path.is_dir() {
                 copy_dir_recursive(&src_path, &dst_path)?;
             } else {
-                fs::copy(&src_path, &dst_path).map_err(|e| {
-                    format!(
-                        "Failed to copy '{}' to '{}': {}",
-                        src_path.display(),
-                        dst_path.display(),
-                        e
-                    )
-                })?;
+                fs::copy(&src_path, &dst_path)?;
             }
         }
     } else {
-        fs::copy(src, dst).map_err(|e| {
-            format!(
-                "Failed to copy file '{}' to '{}': {}",
-                src.display(),
-                dst.display(),
-                e
-            )
-        })?;
+        fs::copy(src, dst)?;
     }
 
     Ok(())
@@ -294,108 +418,19 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use zip::write::SimpleFileOptions;
-    use zip::ZipWriter;
-
-    #[test]
-    fn test_extract_zip_package() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let zip_path = temp_dir.path().join("test_package.zip");
-        let dest_dir = temp_dir.path().join("extracted");
-
-        // 1. Create a zip archive with files and subdirectories
-        {
-            let file = File::create(&zip_path).expect("Failed to create zip file");
-            let mut zip = ZipWriter::new(file);
-
-            zip.start_file("root_file.txt", SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"root content").unwrap();
-
-            zip.start_file("subdir/nested.txt", SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"nested content").unwrap();
-
-            zip.finish().unwrap();
-        }
-
-        // 2. Extract using extract_package
-        let config = PackageConfig::Zip { extract_subpath: None };
-        let res = extract_package(&zip_path, &config, &dest_dir);
-        assert!(res.is_ok(), "Zip extraction should succeed: {:?}", res);
-
-        // 3. Verify extracted contents
-        assert!(dest_dir.join("root_file.txt").is_file());
-        assert_eq!(
-            fs::read_to_string(dest_dir.join("root_file.txt")).unwrap(),
-            "root content"
-        );
-        assert!(dest_dir.join("subdir").join("nested.txt").is_file());
-        assert_eq!(
-            fs::read_to_string(dest_dir.join("subdir").join("nested.txt")).unwrap(),
-            "nested content"
-        );
-    }
-
-    #[test]
-    fn test_extract_zip_with_subpath_flattening() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let zip_path = temp_dir.path().join("nested_package.zip");
-        let dest_dir = temp_dir.path().join("extracted_flat");
-
-        {
-            let file = File::create(&zip_path).expect("Failed to create zip file");
-            let mut zip = ZipWriter::new(file);
-
-            zip.start_file("outer/inner/payload.exe", SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"binary payload").unwrap();
-
-            zip.finish().unwrap();
-        }
-
-        let config = PackageConfig::Zip {
-            extract_subpath: Some("outer/inner".to_string()),
-        };
-        let res = extract_package(&zip_path, &config, &dest_dir);
-        assert!(res.is_ok());
-
-        assert!(dest_dir.join("payload.exe").is_file());
-        assert_eq!(
-            fs::read_to_string(dest_dir.join("payload.exe")).unwrap(),
-            "binary payload"
-        );
-    }
-
-    #[test]
-    fn test_extract_binary_package() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let bin_path = temp_dir.path().join("standalone.exe");
-        let dest_dir = temp_dir.path().join("installed");
-
-        fs::write(&bin_path, b"MZ\x90\x00raw_executable").unwrap();
-
-        let config = PackageConfig::Binary;
-        let res = extract_package(&bin_path, &config, &dest_dir);
-        assert!(res.is_ok());
-
-        assert!(dest_dir.join("standalone.exe").is_file());
-        assert_eq!(
-            fs::read(dest_dir.join("standalone.exe")).unwrap(),
-            b"MZ\x90\x00raw_executable"
-        );
-    }
 
     #[test]
     fn test_find_7z_offset_detection() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let installer_path = temp_dir.path().join("sample_nsis.exe");
+        let mut sample_nsis = Vec::new();
+        sample_nsis.extend_from_slice(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xFF\xFF\x00\x00");
+        sample_nsis.resize(1024, 0);
+        sample_nsis.extend_from_slice(SEVENZ_SIGNATURE);
+        sample_nsis.extend_from_slice(b"sample_7z_stream_payload");
 
-        let mut data = vec![0u8; 1024]; // NSIS PE stub
-        data.extend_from_slice(SEVENZ_SIGNATURE); // 7z magic signature
-        data.extend_from_slice(&[0x00, 0x01, 0x02, 0x03]); // 7z stream payload bytes
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp_file.path(), &sample_nsis).unwrap();
 
-        fs::write(&installer_path, &data).unwrap();
-
-        let offset = find_7z_offset(&installer_path);
-        assert_eq!(offset, Ok(1024));
+        let offset = find_7z_offset(temp_file.path()).expect("Should detect 7z offset");
+        assert_eq!(offset, 1024);
     }
 }

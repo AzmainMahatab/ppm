@@ -1,10 +1,7 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AppManifests",
   "type": "object",
-  "required": [
-    "apps"
-  ],
   "properties": {
     "$schema": {
       "type": [
@@ -15,20 +12,16 @@
     "apps": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/definitions/AppDefinition"
+        "$ref": "#/$defs/AppDefinition"
       }
     }
   },
-  "definitions": {
+  "required": [
+    "apps"
+  ],
+  "$defs": {
     "AppDefinition": {
       "type": "object",
-      "required": [
-        "executable",
-        "name",
-        "package",
-        "target_dir",
-        "version_check"
-      ],
       "properties": {
         "default_args": {
           "type": [
@@ -76,12 +69,12 @@
           "type": "string"
         },
         "package": {
-          "$ref": "#/definitions/PackageConfig"
+          "$ref": "#/$defs/PackageConfig"
         },
         "post_install": {
           "anyOf": [
             {
-              "$ref": "#/definitions/PostInstallConfig"
+              "$ref": "#/$defs/PostInstallConfig"
             },
             {
               "type": "null"
@@ -94,19 +87,26 @@
             "null"
           ],
           "items": {
-            "$ref": "#/definitions/CpuArch"
+            "$ref": "#/$defs/CpuArch"
           }
         },
         "target_dir": {
           "type": "string"
         },
         "version_check": {
-          "$ref": "#/definitions/VersionCheckConfig"
+          "$ref": "#/$defs/VersionCheckConfig"
         }
-      }
+      },
+      "required": [
+        "name",
+        "target_dir",
+        "executable",
+        "version_check",
+        "package"
+      ]
     },
     "ArchString": {
-      "description": "A string field that can be defined either as a single template string (with `{arch}`) or as an explicit per-architecture mapping (e.g. `{\"x64\": \"...\", \"arm64\": \"...\"}`).",
+      "description": "A string field that can be defined either as a single template string (with `{arch}`)\nor as an explicit per-architecture mapping (e.g. `{\"x64\": \"...\", \"arm64\": \"...\"}`).",
       "anyOf": [
         {
           "type": "string"
@@ -130,9 +130,6 @@
       "oneOf": [
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "extract_subpath": {
               "type": [
@@ -142,17 +139,15 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "nsis_7z"
-              ]
+              "const": "nsis_7z"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "extract_subpath": {
               "type": [
@@ -162,17 +157,15 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "7z"
-              ]
+              "const": "7z"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "extract_subpath": {
               "type": [
@@ -182,17 +175,15 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "zip"
-              ]
+              "const": "zip"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "extract_subpath": {
               "type": [
@@ -202,17 +193,15 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "cab"
-              ]
+              "const": "cab"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "extract_subpath": {
               "type": [
@@ -222,17 +211,15 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "msi"
-              ]
+              "const": "msi"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "extract_subpath": {
               "type": [
@@ -242,25 +229,24 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "tar"
-              ]
+              "const": "tar"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type"
-          ],
           "properties": {
             "type": {
               "type": "string",
-              "enum": [
-                "binary"
-              ]
+              "const": "binary"
             }
-          }
+          },
+          "required": [
+            "type"
+          ]
         }
       ]
     },
@@ -300,24 +286,18 @@
       "oneOf": [
         {
           "type": "object",
-          "required": [
-            "type",
-            "url"
-          ],
           "properties": {
             "type": {
               "type": "string",
-              "enum": [
-                "electron_manifest"
-              ]
+              "const": "electron_manifest"
             },
             "url": {
-              "$ref": "#/definitions/ArchString"
+              "$ref": "#/$defs/ArchString"
             },
             "url_template": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ArchString"
+                  "$ref": "#/$defs/ArchString"
                 },
                 {
                   "type": "null"
@@ -330,19 +310,19 @@
                 "null"
               ]
             }
-          }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "repo",
-            "type"
-          ],
           "properties": {
             "asset_pattern": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ArchString"
+                  "$ref": "#/$defs/ArchString"
                 },
                 {
                   "type": "null"
@@ -354,33 +334,28 @@
             },
             "type": {
               "type": "string",
-              "enum": [
-                "github_release"
-              ]
+              "const": "github_release"
             }
-          }
+          },
+          "required": [
+            "type",
+            "repo"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "type",
-            "url",
-            "version_key"
-          ],
           "properties": {
             "type": {
               "type": "string",
-              "enum": [
-                "json_api"
-              ]
+              "const": "json_api"
             },
             "url": {
-              "$ref": "#/definitions/ArchString"
+              "$ref": "#/$defs/ArchString"
             },
             "url_key": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ArchString"
+                  "$ref": "#/$defs/ArchString"
                 },
                 {
                   "type": "null"
@@ -390,7 +365,7 @@
             "url_template": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/ArchString"
+                  "$ref": "#/$defs/ArchString"
                 },
                 {
                   "type": "null"
@@ -398,35 +373,38 @@
               ]
             },
             "version_key": {
-              "$ref": "#/definitions/ArchString"
+              "$ref": "#/$defs/ArchString"
             }
-          }
+          },
+          "required": [
+            "type",
+            "url",
+            "version_key"
+          ]
         },
         {
           "type": "object",
-          "required": [
-            "regex",
-            "type",
-            "url",
-            "url_template"
-          ],
           "properties": {
             "regex": {
-              "$ref": "#/definitions/ArchString"
+              "$ref": "#/$defs/ArchString"
             },
             "type": {
               "type": "string",
-              "enum": [
-                "regex_url"
-              ]
+              "const": "regex_url"
             },
             "url": {
-              "$ref": "#/definitions/ArchString"
+              "$ref": "#/$defs/ArchString"
             },
             "url_template": {
-              "$ref": "#/definitions/ArchString"
+              "$ref": "#/$defs/ArchString"
             }
-          }
+          },
+          "required": [
+            "type",
+            "url",
+            "regex",
+            "url_template"
+          ]
         }
       ]
     }

@@ -1,24 +1,21 @@
+use color_eyre::eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<(), String> {
+pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("ppm-portable-package-manager/0.1")
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .build()?;
 
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("Failed to connect to '{}': {}", url, e))?;
+    let mut response = client.get(url).send()?;
 
     if !response.status().is_success() {
-        return Err(format!(
+        bail!(
             "Download failed with HTTP status code: {}",
             response.status()
-        ));
+        );
     }
 
     let total_size = response.content_length().unwrap_or(0);
@@ -33,33 +30,23 @@ pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<
     pb.set_message(format!("  • Downloading {}", display_name));
 
     if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create parent directory '{}': {}",
-                parent.display(),
-                e
-            )
-        })?;
+        std::fs::create_dir_all(parent)?;
     }
 
-    let mut file = File::create(dest_path)
-        .map_err(|e| format!("Failed to create destination file '{}': {}", dest_path.display(), e))?;
+    let mut file = File::create(dest_path)?;
 
     let mut buffer = [0u8; 65536];
     let mut downloaded: u64 = 0;
 
     loop {
         use std::io::Read;
-        let bytes_read = response
-            .read(&mut buffer)
-            .map_err(|e| format!("Error reading network stream: {}", e))?;
+        let bytes_read = response.read(&mut buffer)?;
 
         if bytes_read == 0 {
             break;
         }
 
-        file.write_all(&buffer[..bytes_read])
-            .map_err(|e| format!("Failed to write bytes to disk: {}", e))?;
+        file.write_all(&buffer[..bytes_read])?;
 
         downloaded += bytes_read as u64;
         pb.set_position(downloaded);

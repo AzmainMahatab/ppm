@@ -110,7 +110,7 @@ fn resolve_root() -> PathBuf {
     }
 }
 
-fn load_manifest(root: &Path) -> Result<AppManifests, String> {
+fn load_manifest(root: &Path) -> color_eyre::Result<AppManifests> {
     let apps_json_path = root.join(".ppm").join("apps.json");
     if apps_json_path.exists() {
         AppManifests::load_from_file(&apps_json_path)
@@ -119,10 +119,10 @@ fn load_manifest(root: &Path) -> Result<AppManifests, String> {
         if dev_manifest.exists() {
             AppManifests::load_from_file(&dev_manifest)
         } else {
-            Err(format!(
+            color_eyre::eyre::bail!(
                 "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
                 apps_json_path.display()
-            ))
+            );
         }
     }
 }
@@ -130,7 +130,7 @@ fn load_manifest(root: &Path) -> Result<AppManifests, String> {
 fn resolve_install_order(
     manifests: &AppManifests,
     target_app_id: &str,
-) -> Result<Vec<String>, String> {
+) -> color_eyre::Result<Vec<String>> {
     let mut order = Vec::new();
     let mut visited = HashSet::new();
     let mut visiting = HashSet::new();
@@ -141,9 +141,9 @@ fn resolve_install_order(
         order: &mut Vec<String>,
         visited: &mut HashSet<String>,
         visiting: &mut HashSet<String>,
-    ) -> Result<(), String> {
+    ) -> color_eyre::Result<()> {
         if visiting.contains(app_id) {
-            return Err(format!("Circular dependency detected involving '{}'", app_id));
+            color_eyre::eyre::bail!("Circular dependency detected involving '{}'", app_id);
         }
         if visited.contains(app_id) {
             return Ok(());
@@ -154,7 +154,7 @@ fn resolve_install_order(
         let app_def = manifests
             .apps
             .get(app_id)
-            .ok_or_else(|| format!("Dependency '{}' not defined in apps.json", app_id))?;
+            .ok_or_else(|| color_eyre::eyre::eyre!("Dependency '{}' not defined in apps.json", app_id))?;
 
         if let Some(deps) = &app_def.dependencies {
             for dep in deps {
@@ -193,7 +193,7 @@ fn perform_install(
     app_id: &str,
     app_def: &AppDefinition,
     arch: CpuArch,
-) -> Result<(), String> {
+) -> color_eyre::Result<()> {
     if !app_def.is_supported_on_arch(arch) {
         println!("  • Skipping '{}' (Not supported on {})", app_def.name, arch.as_str());
         return Ok(());
@@ -243,42 +243,27 @@ fn perform_install(
     Ok(())
 }
 
-fn main() {
+fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
     let root = resolve_root();
 
     match cli.command {
         Commands::Init { force } => {
             println!("⚡ Initializing Portable Environment in '{}'...", root.display());
-            match engine::init::init_environment(&root, force) {
-                Ok(()) => println!("\n✓ Portable environment initialized successfully!"),
-                Err(e) => {
-                    eprintln!("\n✗ Error initializing environment: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            engine::init::init_environment(&root, force)?;
+            println!("\n✓ Portable environment initialized successfully!");
         }
 
         Commands::Run { app, args } => {
-            match engine::runner::run_app(&root, &app, &args) {
-                Ok(code) => std::process::exit(code),
-                Err(e) => {
-                    eprintln!("✗ Failed to run '{}': {}", app, e);
-                    std::process::exit(1);
-                }
-            }
+            let code = engine::runner::run_app(&root, &app, &args)?;
+            std::process::exit(code);
         }
 
         Commands::Check { arch } => {
             let target_archs = arch.resolve();
             println!("🔍 Checking configured applications for architectures {:?}...\n", target_archs.iter().map(|a| a.as_str()).collect::<Vec<_>>());
-            let manifests = match load_manifest(&root) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("✗ {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let manifests = load_manifest(&root)?;
 
             let mut table = Table::new();
             table
@@ -358,21 +343,8 @@ fn main() {
                 .map(|a| a.resolve())
                 .unwrap_or_else(|| vec![CpuArch::current()]);
 
-            let manifests = match load_manifest(&root) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("✗ {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            let install_order = match resolve_install_order(&manifests, &app) {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("✗ Failed to resolve dependency order: {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let manifests = load_manifest(&root)?;
+            let install_order = resolve_install_order(&manifests, &app)?;
 
             for &target_arch in &target_archs {
                 println!("\n=======================================================");
@@ -381,19 +353,13 @@ fn main() {
 
                 for app_id in &install_order {
                     if let Some(app_def) = manifests.apps.get(app_id) {
-                        if let Err(e) = perform_install(&root, app_id, app_def, target_arch) {
-                            eprintln!("\n✗ Installation failed for '{}' [{}]: {}", app_id, target_arch.as_str(), e);
-                            std::process::exit(1);
-                        }
+                        perform_install(&root, app_id, app_def, target_arch)?;
                     }
                 }
             }
 
             // Refresh batch launchers
-            if let Err(e) = engine::launcher::generate_launchers(&root, &manifests) {
-                eprintln!("\n✗ Failed to generate launchers: {}", e);
-                std::process::exit(1);
-            }
+            engine::launcher::generate_launchers(&root, &manifests)?;
             println!("\n✓ All requested installations completed successfully!");
         }
 
@@ -402,21 +368,8 @@ fn main() {
                 .map(|a| a.resolve())
                 .unwrap_or_else(|| vec![CpuArch::current()]);
 
-            let manifests = match load_manifest(&root) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("✗ {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            let update_order = match resolve_install_order(&manifests, &app) {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("✗ Failed to resolve dependency order: {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let manifests = load_manifest(&root)?;
+            let update_order = resolve_install_order(&manifests, &app)?;
 
             for &target_arch in &target_archs {
                 println!("\n=======================================================");
@@ -438,10 +391,7 @@ fn main() {
                                 println!("  ✓ {} [{}] is already up to date (v{})", app_def.name, target_arch.as_str(), loc);
                             }
                             (_, Ok(_)) => {
-                                if let Err(e) = perform_install(&root, app_id, app_def, target_arch) {
-                                    eprintln!("\n✗ Update failed for '{}' [{}]: {}", app_id, target_arch.as_str(), e);
-                                    std::process::exit(1);
-                                }
+                                perform_install(&root, app_id, app_def, target_arch)?;
                             }
                             (_, Err(e)) => {
                                 eprintln!("  ✗ Failed to check remote version: {}", e);
@@ -451,58 +401,30 @@ fn main() {
                 }
             }
 
-            if let Err(e) = engine::launcher::generate_launchers(&root, &manifests) {
-                eprintln!("\n✗ Failed to generate launchers: {}", e);
-                std::process::exit(1);
-            }
+            engine::launcher::generate_launchers(&root, &manifests)?;
             println!("\n✓ Update check and upgrade cycle complete!");
         }
 
         Commands::Link { app } => {
-            let manifests = match load_manifest(&root) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("✗ {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let manifests = load_manifest(&root)?;
 
             if app == "all" {
-                match engine::launcher::generate_launchers(&root, &manifests) {
-                    Ok(generated) => {
-                        println!("⚡ Generated root launchers:");
-                        for g in generated {
-                            println!("  ✓ {}", g);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("✗ Error generating launchers: {}", e);
-                        std::process::exit(1);
-                    }
+                let generated = engine::launcher::generate_launchers(&root, &manifests)?;
+                println!("⚡ Generated root launchers:");
+                for g in generated {
+                    println!("  ✓ {}", g);
                 }
             } else if manifests.apps.contains_key(&app) {
-                match engine::launcher::generate_single_launcher(&root, &app) {
-                    Ok(()) => println!("✓ Generated root launcher: {}.bat", app),
-                    Err(e) => {
-                        eprintln!("✗ Error generating launcher: {}", e);
-                        std::process::exit(1);
-                    }
-                }
+                engine::launcher::generate_single_launcher(&root, &app)?;
+                println!("✓ Generated root launcher: {}.bat", app);
             } else {
-                eprintln!("✗ App '{}' not found in apps.json", app);
-                std::process::exit(1);
+                color_eyre::eyre::bail!("App '{}' not found in apps.json", app);
             }
         }
 
         Commands::List { arch } => {
             let target_archs = arch.resolve();
-            let manifests = match load_manifest(&root) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("✗ {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let manifests = load_manifest(&root)?;
 
             let mut table = Table::new();
             table
@@ -544,7 +466,7 @@ fn main() {
                     let is_installed = app_def.is_installed_for_arch(&root, target_arch);
                     let installed_cell = if is_installed {
                         Cell::new("YES").fg(Color::Green)
-                    } else {
+                      } else {
                         Cell::new("NO").fg(Color::Red)
                     };
 
@@ -580,7 +502,7 @@ fn main() {
 
         Commands::Schema => {
             let schema = schemars::schema_for!(AppManifests);
-            let schema_json = serde_json::to_string_pretty(&schema).unwrap();
+            let schema_json = serde_json::to_string_pretty(&schema)?;
 
             let schema_path = root.join(".ppm").join("apps.schema.json");
             if let Some(p) = schema_path.parent() {
@@ -598,20 +520,17 @@ fn main() {
             println!("✓ JSON Schema generated at '{}'", schema_path.display());
         }
 
-        Commands::Validate => match load_manifest(&root) {
-            Ok(manifests) => {
-                println!(
-                    "✓ Manifest is valid! Configured applications ({}):",
-                    manifests.apps.len()
-                );
-                for (id, app) in manifests.apps {
-                    println!("  • {} ({}) -> {}", app.name, id, app.executable);
-                }
+        Commands::Validate => {
+            let manifests = load_manifest(&root)?;
+            println!(
+                "✓ Manifest is valid! Configured applications ({}):",
+                manifests.apps.len()
+            );
+            for (id, app) in manifests.apps {
+                println!("  • {} ({}) -> {}", app.name, id, app.executable);
             }
-            Err(e) => {
-                eprintln!("✗ Manifest validation failed: {}", e);
-                std::process::exit(1);
-            }
-        },
+        }
     }
+
+    Ok(())
 }

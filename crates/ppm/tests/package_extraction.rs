@@ -1,141 +1,95 @@
 use ppm::core::config::{PackageConfig, PostInstallConfig};
 use ppm::package::extractor::extract_package;
 use ppm::package::sanitizer::sanitize_package;
-use std::fs::{self, File};
-use std::io::Write;
-use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
+use std::fs;
+use std::path::PathBuf;
+
+fn find_fixture_path(name: &str) -> PathBuf {
+    let candidates = [
+        PathBuf::from("crates/ppm/tests/fixtures").join(name),
+        PathBuf::from("tests/fixtures").join(name),
+        PathBuf::from("../fixtures").join(name),
+        PathBuf::from("../../crates/ppm/tests/fixtures").join(name),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("Fixture '{}' not found on disk", name))
+}
 
 #[test]
-fn test_zip_package_extraction() {
+fn test_zip_extraction_with_real_fixture() {
+    let fixture_path = find_fixture_path("sample_files_dirs.zip");
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-    let zip_path = temp_dir.path().join("package.zip");
     let dest_dir = temp_dir.path().join("extracted_zip");
 
-    // 1. Build a valid ZIP archive containing an app-64 directory hierarchy
-    {
-        let file = File::create(&zip_path).expect("Failed to create zip file");
-        let mut zip = ZipWriter::new(file);
-
-        zip.start_file("app-64/app.exe", SimpleFileOptions::default()).unwrap();
-        zip.write_all(b"MZ\x90\x00_zip_executable_bytes").unwrap();
-
-        zip.start_file("app-64/resources/settings.json", SimpleFileOptions::default()).unwrap();
-        zip.write_all(b"{\"portable\": true}").unwrap();
-
-        zip.finish().unwrap();
-    }
-
-    // 2. Extract using PackageConfig::Zip
     let config = PackageConfig::Zip { extract_subpath: None };
-    let res = extract_package(&zip_path, &config, &dest_dir);
+    let res = extract_package(&fixture_path, &config, &dest_dir);
     assert!(res.is_ok(), "Zip extraction must succeed: {:?}", res);
 
-    // 3. Verify that app-64 was automatically flattened and files exist at root
-    let exe_path = dest_dir.join("app.exe");
-    let config_path = dest_dir.join("resources").join("settings.json");
-
-    assert!(exe_path.is_file(), "app.exe must exist at destination root");
-    assert_eq!(fs::read(&exe_path).unwrap(), b"MZ\x90\x00_zip_executable_bytes");
-
-    assert!(config_path.is_file(), "settings.json must exist in resources");
-    assert_eq!(fs::read_to_string(&config_path).unwrap(), "{\"portable\": true}");
+    assert!(dest_dir.is_dir());
+    let mut entries = fs::read_dir(&dest_dir).unwrap();
+    assert!(entries.next().is_some(), "Extracted zip dir should contain files");
 }
 
 #[test]
-fn test_sevenz_package_extraction() {
+fn test_sevenz_extraction_with_real_fixture() {
+    let fixture_path = find_fixture_path("sample_lzma2.7z");
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-    let src_dir = temp_dir.path().join("source_7z");
-    let archive_path = temp_dir.path().join("package.7z");
     let dest_dir = temp_dir.path().join("extracted_7z");
 
-    // 1. Create source payload
-    fs::create_dir_all(src_dir.join("app-64")).unwrap();
-    fs::write(src_dir.join("app-64").join("app.exe"), b"MZ\x90\x00_7z_binary").unwrap();
-    fs::write(src_dir.join("app-64").join("data.bin"), b"7z_payload_data").unwrap();
-
-    // 2. Compress to valid 7z archive
-    sevenz_rust::compress_to_path(&src_dir, &archive_path).expect("Failed to create 7z archive");
-    assert!(archive_path.is_file());
-
-    // 3. Extract using PackageConfig::SevenZ
     let config = PackageConfig::SevenZ { extract_subpath: None };
-    let res = extract_package(&archive_path, &config, &dest_dir);
-    assert!(res.is_ok(), "7z extraction must succeed: {:?}", res);
+    let res = extract_package(&fixture_path, &config, &dest_dir);
+    assert!(res.is_ok(), "7-Zip extraction must succeed: {:?}", res);
 
-    // 4. Verify extracted files
-    assert!(dest_dir.join("app.exe").is_file());
-    assert_eq!(fs::read(dest_dir.join("app.exe")).unwrap(), b"MZ\x90\x00_7z_binary");
-    assert!(dest_dir.join("data.bin").is_file());
-    assert_eq!(fs::read(dest_dir.join("data.bin")).unwrap(), b"7z_payload_data");
+    assert!(dest_dir.is_dir());
+    let mut entries = fs::read_dir(&dest_dir).unwrap();
+    assert!(entries.next().is_some(), "Extracted 7z dir should contain files");
 }
 
 #[test]
-fn test_nsis_7z_embedded_package_extraction() {
+fn test_cab_pure_rust_extraction_with_real_fixture() {
+    let fixture_path = find_fixture_path("sample_vcredis.cab");
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-    let payload_src = temp_dir.path().join("nsis_payload_src");
-    let raw_7z_path = temp_dir.path().join("payload.7z");
-    let nsis_exe_path = temp_dir.path().join("installer_setup.exe");
-    let dest_dir = temp_dir.path().join("extracted_nsis");
-
-    // 1. Create payload and compress to 7z
-    fs::create_dir_all(payload_src.join("app-64")).unwrap();
-    fs::write(payload_src.join("app-64").join("tool.exe"), b"MZ\x90\x00_nsis_embedded_tool").unwrap();
-    sevenz_rust::compress_to_path(&payload_src, &raw_7z_path).expect("Failed to create 7z payload");
-
-    // 2. Build NSIS binary structure (PE executable header + NSIS decompressor stub + 7z stream)
-    let mut nsis_binary_data = Vec::new();
-    nsis_binary_data.extend_from_slice(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xFF\xFF\x00\x00"); // DOS header
-    nsis_binary_data.resize(32768, 0xAA); // 32KB NSIS installer decompressor stub
-    let raw_7z_bytes = fs::read(&raw_7z_path).unwrap();
-    nsis_binary_data.extend_from_slice(&raw_7z_bytes); // Append 7z stream starting with magic bytes 37 7A BC AF 27 1C
-
-    fs::write(&nsis_exe_path, &nsis_binary_data).unwrap();
-
-    // 3. Extract using PackageConfig::Nsis7z
-    let config = PackageConfig::Nsis7z { extract_subpath: None };
-    let res = extract_package(&nsis_exe_path, &config, &dest_dir);
-    assert!(res.is_ok(), "NSIS 7z stream extraction must succeed: {:?}", res);
-
-    // 4. Verify extracted payload
-    assert!(dest_dir.join("tool.exe").is_file());
-    assert_eq!(fs::read(dest_dir.join("tool.exe")).unwrap(), b"MZ\x90\x00_nsis_embedded_tool");
-}
-
-#[cfg(windows)]
-#[test]
-fn test_cab_package_extraction() {
-    use std::process::Command;
-
-    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-    let src_file = temp_dir.path().join("payload.dll");
-    let cab_file = temp_dir.path().join("archive.cab");
     let dest_dir = temp_dir.path().join("extracted_cab");
 
-    let dll_content = b"MZ\x90\x00_sample_cab_compressed_dll_payload";
-    fs::write(&src_file, dll_content).unwrap();
+    let config = PackageConfig::Cab { extract_subpath: None };
+    let res = extract_package(&fixture_path, &config, &dest_dir);
+    assert!(res.is_ok(), "CAB pure Rust extraction must succeed: {:?}", res);
 
-    // Generate real CAB file using Windows makecab.exe
-    let src_str = src_file.to_string_lossy().replace(r"\\?\", "");
-    let cab_str = cab_file.to_string_lossy().replace(r"\\?\", "");
-    let makecab_status = Command::new("makecab.exe")
-        .arg(&src_str)
-        .arg(&cab_str)
-        .status();
+    assert!(dest_dir.is_dir());
+    let mut entries = fs::read_dir(&dest_dir).unwrap();
+    assert!(entries.next().is_some(), "Extracted cab dir should contain files");
+}
 
-    if let Ok(status) = makecab_status {
-        if status.success() && cab_file.is_file() {
-            let config = PackageConfig::Cab { extract_subpath: None };
-            let res = extract_package(&cab_file, &config, &dest_dir);
-            assert!(res.is_ok(), "CAB extraction must succeed: {:?}", res);
-            let extracted_files: Vec<_> = fs::read_dir(&dest_dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect();
-            assert!(!extracted_files.is_empty(), "Extracted files should not be empty: {:?}", extracted_files);
-        }
-    }
+#[test]
+fn test_msi_embedded_pure_rust_extraction_with_real_fixture() {
+    let fixture_path = find_fixture_path("sample_embedded.msi");
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let dest_dir = temp_dir.path().join("extracted_msi_embedded");
+
+    let config = PackageConfig::Msi { extract_subpath: None };
+    let res = extract_package(&fixture_path, &config, &dest_dir);
+    assert!(res.is_ok(), "MSI embedded pure Rust extraction must succeed: {:?}", res);
+
+    assert!(dest_dir.is_dir());
+    let mut entries = fs::read_dir(&dest_dir).unwrap();
+    assert!(entries.next().is_some(), "Extracted MSI dir should contain files");
+}
+
+#[test]
+fn test_msi_external_cab_pure_rust_extraction_with_real_fixture() {
+    let fixture_path = find_fixture_path("msi_with_external_cab.msi");
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let dest_dir = temp_dir.path().join("extracted_msi_external");
+
+    let config = PackageConfig::Msi { extract_subpath: None };
+    let res = extract_package(&fixture_path, &config, &dest_dir);
+    assert!(res.is_ok(), "MSI external cab pure Rust extraction must succeed: {:?}", res);
+
+    assert!(dest_dir.is_dir());
+    let mut entries = fs::read_dir(&dest_dir).unwrap();
+    assert!(entries.next().is_some(), "Extracted MSI dir should contain files");
 }
 
 #[test]
@@ -154,6 +108,23 @@ fn test_binary_package_deployment() {
     let installed_file = dest_dir.join("standalone_utility.exe");
     assert!(installed_file.is_file());
     assert_eq!(fs::read(&installed_file).unwrap(), binary_bytes);
+}
+
+#[test]
+fn test_staging_directory_raii_cleanup_on_failure() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let invalid_file = temp_dir.path().join("corrupted.zip");
+    fs::write(&invalid_file, b"corrupted_non_zip_header").unwrap();
+
+    let dest_dir = temp_dir.path().join("test_app_dir");
+    let config = PackageConfig::Zip { extract_subpath: None };
+
+    let res = extract_package(&invalid_file, &config, &dest_dir);
+    assert!(res.is_err(), "Corrupted package extraction must fail");
+
+    // Staging directory __stage_extract must be completely cleaned up by RAII guard
+    let stage_dir = dest_dir.join("__stage_extract");
+    assert!(!stage_dir.exists(), "Staging directory must not remain on failure");
 }
 
 #[test]

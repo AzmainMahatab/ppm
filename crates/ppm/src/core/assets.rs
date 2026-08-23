@@ -11,8 +11,7 @@ pub const DEFAULT_APPS_JSON: &str = r#"{
       "executable": "Antigravity.exe",
       "version_check": {
         "type": "electron_manifest",
-        "url": "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-{arch}-win.yml",
-        "url_template": "https://storage.googleapis.com/antigravity-public/antigravity-hub/{version}-6512087774658560/windows-{arch}/Antigravity-{arch}.exe"
+        "url": "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-{arch}-win.yml"
       },
       "package": {
         "type": "nsis_7z"
@@ -28,7 +27,7 @@ pub const DEFAULT_APPS_JSON: &str = r#"{
       "description": "Central management console for Antigravity tools and local runtime dependencies",
       "homepage": "https://github.com/lbjlaq/Antigravity-Manager",
       "target_dir": "AntigravityManager",
-      "executable": "Antigravity Tools.exe",
+      "executable": "antigravity_tools.exe",
       "supported_arch": [
         "x64"
       ],
@@ -38,26 +37,26 @@ pub const DEFAULT_APPS_JSON: &str = r#"{
       "version_check": {
         "type": "github_release",
         "repo": "lbjlaq/Antigravity-Manager",
-        "asset_pattern": ".*_{arch}-setup\\.exe"
-      },
-      "package": {
-        "type": "nsis_7z"
-      }
-    },
-    "webview2": {
-      "name": "Microsoft Edge Enterprise Runtime",
-      "description": "Embedded WebView2 browser engine for host-independent GUI execution",
-      "homepage": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
-      "target_dir": "WebView2",
-      "executable": "msedge.exe",
-      "version_check": {
-        "type": "json_api",
-        "url": "https://edgeupdates.microsoft.com/api/products?view=enterprise",
-        "version_key": "/0/Releases[Platform=Windows,Architecture={arch}]/ProductVersion",
-        "url_key": "/0/Releases[Platform=Windows,Architecture={arch}]/Artifacts/0/Location"
+        "asset_pattern": ".*_{arch}.*\\.msi"
       },
       "package": {
         "type": "msi"
+      }
+    },
+    "webview2": {
+      "name": "Microsoft Edge WebView2 Runtime (Fixed Version)",
+      "description": "Embedded WebView2 browser runtime for host-independent portable execution",
+      "homepage": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
+      "target_dir": "WebView2",
+      "executable": "msedgewebview2.exe",
+      "version_check": {
+        "type": "regex_url",
+        "url": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
+        "regex": "https:[^\"'\\s]+?Microsoft\\.WebView2\\.FixedVersionRuntime\\.([0-9\\.]+)\\.{arch}\\.cab",
+        "url_template": "{url}"
+      },
+      "package": {
+        "type": "cab"
       }
     }
   }
