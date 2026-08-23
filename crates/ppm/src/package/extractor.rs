@@ -95,20 +95,30 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn to_cmd_path(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let s = abs.to_string_lossy().to_string();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        s
+    }
+}
+
 pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let abs_archive = archive_path.canonicalize().unwrap_or_else(|_| archive_path.to_path_buf());
+    let abs_archive = to_cmd_path(archive_path);
     fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Failed to create cab destination directory: {}", e))?;
-    let abs_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+    let abs_dest = to_cmd_path(dest_dir);
 
-    let expand_cmd = format!(
-        "expand.exe -F:* \"{}\" \"{}\"",
-        abs_archive.display(),
-        abs_dest.display()
-    );
-
-    let status = Command::new("cmd")
-        .args(["/C", &expand_cmd])
+    let status = Command::new("expand.exe")
+        .arg(&abs_archive)
+        .arg("-F:*")
+        .arg(&abs_dest)
         .status()
         .map_err(|e| format!("Failed to spawn expand.exe: {}", e))?;
 
@@ -120,19 +130,17 @@ pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
 }
 
 pub fn extract_msi(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    let abs_archive = archive_path.canonicalize().unwrap_or_else(|_| archive_path.to_path_buf());
+    let abs_archive = to_cmd_path(archive_path);
     fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Failed to create msi destination directory: {}", e))?;
-    let abs_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+    let abs_dest = to_cmd_path(dest_dir);
 
-    let msiexec_cmd = format!(
-        "msiexec.exe /a \"{}\" /qb TARGETDIR=\"{}\"",
-        abs_archive.display(),
-        abs_dest.display()
-    );
-
-    let status = Command::new("cmd")
-        .args(["/C", &msiexec_cmd])
+    let target_dir_arg = format!("TARGETDIR={}", abs_dest);
+    let status = Command::new("msiexec.exe")
+        .arg("/a")
+        .arg(&abs_archive)
+        .arg("/qb")
+        .arg(&target_dir_arg)
         .status()
         .map_err(|e| format!("Failed to spawn msiexec.exe: {}", e))?;
 

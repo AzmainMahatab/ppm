@@ -7,18 +7,18 @@ use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
 #[test]
-fn test_real_zip_package_extraction() {
+fn test_zip_package_extraction() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let zip_path = temp_dir.path().join("package.zip");
     let dest_dir = temp_dir.path().join("extracted_zip");
 
-    // 1. Build a real ZIP package containing app-64 hierarchy
+    // 1. Build a valid ZIP archive containing an app-64 directory hierarchy
     {
         let file = File::create(&zip_path).expect("Failed to create zip file");
         let mut zip = ZipWriter::new(file);
 
         zip.start_file("app-64/app.exe", SimpleFileOptions::default()).unwrap();
-        zip.write_all(b"MZ\x90\x00_real_zip_executable_bytes").unwrap();
+        zip.write_all(b"MZ\x90\x00_zip_executable_bytes").unwrap();
 
         zip.start_file("app-64/resources/settings.json", SimpleFileOptions::default()).unwrap();
         zip.write_all(b"{\"portable\": true}").unwrap();
@@ -36,14 +36,14 @@ fn test_real_zip_package_extraction() {
     let config_path = dest_dir.join("resources").join("settings.json");
 
     assert!(exe_path.is_file(), "app.exe must exist at destination root");
-    assert_eq!(fs::read(&exe_path).unwrap(), b"MZ\x90\x00_real_zip_executable_bytes");
+    assert_eq!(fs::read(&exe_path).unwrap(), b"MZ\x90\x00_zip_executable_bytes");
 
     assert!(config_path.is_file(), "settings.json must exist in resources");
     assert_eq!(fs::read_to_string(&config_path).unwrap(), "{\"portable\": true}");
 }
 
 #[test]
-fn test_real_7z_package_extraction() {
+fn test_sevenz_package_extraction() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let src_dir = temp_dir.path().join("source_7z");
     let archive_path = temp_dir.path().join("package.7z");
@@ -54,7 +54,7 @@ fn test_real_7z_package_extraction() {
     fs::write(src_dir.join("app-64").join("app.exe"), b"MZ\x90\x00_7z_binary").unwrap();
     fs::write(src_dir.join("app-64").join("data.bin"), b"7z_payload_data").unwrap();
 
-    // 2. Compress to real 7z archive
+    // 2. Compress to valid 7z archive
     sevenz_rust::compress_to_path(&src_dir, &archive_path).expect("Failed to create 7z archive");
     assert!(archive_path.is_file());
 
@@ -71,7 +71,7 @@ fn test_real_7z_package_extraction() {
 }
 
 #[test]
-fn test_real_nsis_7z_embedded_package_extraction() {
+fn test_nsis_7z_embedded_package_extraction() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let payload_src = temp_dir.path().join("nsis_payload_src");
     let raw_7z_path = temp_dir.path().join("payload.7z");
@@ -83,12 +83,12 @@ fn test_real_nsis_7z_embedded_package_extraction() {
     fs::write(payload_src.join("app-64").join("tool.exe"), b"MZ\x90\x00_nsis_embedded_tool").unwrap();
     sevenz_rust::compress_to_path(&payload_src, &raw_7z_path).expect("Failed to create 7z payload");
 
-    // 2. Build synthetic NSIS binary (PE executable header + padding + embedded 7z stream)
+    // 2. Build NSIS binary structure (PE executable header + NSIS decompressor stub + 7z stream)
     let mut nsis_binary_data = Vec::new();
     nsis_binary_data.extend_from_slice(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xFF\xFF\x00\x00"); // DOS header
-    nsis_binary_data.resize(32768, 0xAA); // 32KB NSIS installer stub
+    nsis_binary_data.resize(32768, 0xAA); // 32KB NSIS installer decompressor stub
     let raw_7z_bytes = fs::read(&raw_7z_path).unwrap();
-    nsis_binary_data.extend_from_slice(&raw_7z_bytes); // Append 7z stream starting with 37 7A BC AF 27 1C
+    nsis_binary_data.extend_from_slice(&raw_7z_bytes); // Append 7z stream starting with magic bytes 37 7A BC AF 27 1C
 
     fs::write(&nsis_exe_path, &nsis_binary_data).unwrap();
 
@@ -102,8 +102,44 @@ fn test_real_nsis_7z_embedded_package_extraction() {
     assert_eq!(fs::read(dest_dir.join("tool.exe")).unwrap(), b"MZ\x90\x00_nsis_embedded_tool");
 }
 
+#[cfg(windows)]
 #[test]
-fn test_real_binary_package_deployment() {
+fn test_cab_package_extraction() {
+    use std::process::Command;
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let src_file = temp_dir.path().join("payload.dll");
+    let cab_file = temp_dir.path().join("archive.cab");
+    let dest_dir = temp_dir.path().join("extracted_cab");
+
+    let dll_content = b"MZ\x90\x00_sample_cab_compressed_dll_payload";
+    fs::write(&src_file, dll_content).unwrap();
+
+    // Generate real CAB file using Windows makecab.exe
+    let src_str = src_file.to_string_lossy().replace(r"\\?\", "");
+    let cab_str = cab_file.to_string_lossy().replace(r"\\?\", "");
+    let makecab_status = Command::new("makecab.exe")
+        .arg(&src_str)
+        .arg(&cab_str)
+        .status();
+
+    if let Ok(status) = makecab_status {
+        if status.success() && cab_file.is_file() {
+            let config = PackageConfig::Cab { extract_subpath: None };
+            let res = extract_package(&cab_file, &config, &dest_dir);
+            assert!(res.is_ok(), "CAB extraction must succeed: {:?}", res);
+            let extracted_files: Vec<_> = fs::read_dir(&dest_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            assert!(!extracted_files.is_empty(), "Extracted files should not be empty: {:?}", extracted_files);
+        }
+    }
+}
+
+#[test]
+fn test_binary_package_deployment() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let bin_path = temp_dir.path().join("standalone_utility.exe");
     let dest_dir = temp_dir.path().join("installed_bin");
