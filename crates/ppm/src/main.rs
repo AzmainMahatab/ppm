@@ -30,6 +30,7 @@ enum Commands {
     },
 
     /// Launch an application with virtualization and taskbar badging
+    #[command(disable_help_flag = true)]
     Run {
         /// Application identifier from apps.json or raw executable path
         app: String,
@@ -89,6 +90,22 @@ enum Commands {
 }
 
 fn resolve_root() -> PathBuf {
+    // 1. Explicit environment variable override
+    if let Ok(ppm_root) = env::var("PPM_ROOT") {
+        let p = PathBuf::from(ppm_root);
+        if p.is_dir() {
+            return p;
+        }
+    }
+
+    // 2. If current working directory has a portable environment (.ppm/apps.json or manifests/apps.json)
+    if let Ok(cwd) = env::current_dir() {
+        if cwd.join(".ppm").join("apps.json").is_file() || cwd.join("manifests").join("apps.json").is_file() {
+            return cwd;
+        }
+    }
+
+    // 3. Fallback to executable location
     let current_exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("ppm.exe"));
     let exe_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
 
