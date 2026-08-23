@@ -57,7 +57,7 @@ pub const DEFAULT_APPS_JSON: &str = r#"{
         "url_key": "/0/Releases[Platform=Windows,Architecture={arch}]/Artifacts/0/Location"
       },
       "package": {
-        "type": "cab"
+        "type": "msi"
       }
     }
   }

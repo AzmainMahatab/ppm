@@ -1,7 +1,7 @@
 use crate::core::config::PackageConfig;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SEVENZ_SIGNATURE: &[u8] = &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
@@ -96,10 +96,15 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
 }
 
 pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let abs_archive = archive_path.canonicalize().unwrap_or_else(|_| archive_path.to_path_buf());
+    fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed to create cab destination directory: {}", e))?;
+    let abs_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+
     let expand_cmd = format!(
         "expand.exe -F:* \"{}\" \"{}\"",
-        archive_path.display(),
-        dest_dir.display()
+        abs_archive.display(),
+        abs_dest.display()
     );
 
     let status = Command::new("cmd")
@@ -115,10 +120,15 @@ pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
 }
 
 pub fn extract_msi(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let abs_archive = archive_path.canonicalize().unwrap_or_else(|_| archive_path.to_path_buf());
+    fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed to create msi destination directory: {}", e))?;
+    let abs_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+
     let msiexec_cmd = format!(
         "msiexec.exe /a \"{}\" /qb TARGETDIR=\"{}\"",
-        archive_path.display(),
-        dest_dir.display()
+        abs_archive.display(),
+        abs_dest.display()
     );
 
     let status = Command::new("cmd")
@@ -200,7 +210,7 @@ pub fn extract_package(
     Ok(())
 }
 
-fn find_payload_root(dir: &Path) -> std::path::PathBuf {
+fn find_payload_root(dir: &Path) -> PathBuf {
     let app_64 = dir.join("app-64");
     if app_64.is_dir() {
         return app_64;
@@ -212,6 +222,19 @@ fn find_payload_root(dir: &Path) -> std::path::PathBuf {
     let app = dir.join("app");
     if app.is_dir() {
         return app;
+    }
+
+    // Common enterprise MSI payload subdirectories
+    let candidates = [
+        dir.join("Microsoft").join("Edge").join("Application"),
+        dir.join("Program Files").join("Microsoft").join("Edge").join("Application"),
+        dir.join("Program Files (x86)").join("Microsoft").join("Edge").join("Application"),
+    ];
+
+    for candidate in candidates {
+        if candidate.is_dir() {
+            return candidate;
+        }
     }
 
     dir.to_path_buf()
@@ -242,4 +265,113 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    #[test]
+    fn test_extract_zip_package() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let zip_path = temp_dir.path().join("test_package.zip");
+        let dest_dir = temp_dir.path().join("extracted");
+
+        // 1. Create a zip archive with files and subdirectories
+        {
+            let file = File::create(&zip_path).expect("Failed to create zip file");
+            let mut zip = ZipWriter::new(file);
+
+            zip.start_file("root_file.txt", SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"root content").unwrap();
+
+            zip.start_file("subdir/nested.txt", SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"nested content").unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        // 2. Extract using extract_package
+        let config = PackageConfig::Zip { extract_subpath: None };
+        let res = extract_package(&zip_path, &config, &dest_dir);
+        assert!(res.is_ok(), "Zip extraction should succeed: {:?}", res);
+
+        // 3. Verify extracted contents
+        assert!(dest_dir.join("root_file.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("root_file.txt")).unwrap(),
+            "root content"
+        );
+        assert!(dest_dir.join("subdir").join("nested.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("subdir").join("nested.txt")).unwrap(),
+            "nested content"
+        );
+    }
+
+    #[test]
+    fn test_extract_zip_with_subpath_flattening() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let zip_path = temp_dir.path().join("nested_package.zip");
+        let dest_dir = temp_dir.path().join("extracted_flat");
+
+        {
+            let file = File::create(&zip_path).expect("Failed to create zip file");
+            let mut zip = ZipWriter::new(file);
+
+            zip.start_file("outer/inner/payload.exe", SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"binary payload").unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let config = PackageConfig::Zip {
+            extract_subpath: Some("outer/inner".to_string()),
+        };
+        let res = extract_package(&zip_path, &config, &dest_dir);
+        assert!(res.is_ok());
+
+        assert!(dest_dir.join("payload.exe").is_file());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("payload.exe")).unwrap(),
+            "binary payload"
+        );
+    }
+
+    #[test]
+    fn test_extract_binary_package() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let bin_path = temp_dir.path().join("standalone.exe");
+        let dest_dir = temp_dir.path().join("installed");
+
+        fs::write(&bin_path, b"MZ\x90\x00raw_executable").unwrap();
+
+        let config = PackageConfig::Binary;
+        let res = extract_package(&bin_path, &config, &dest_dir);
+        assert!(res.is_ok());
+
+        assert!(dest_dir.join("standalone.exe").is_file());
+        assert_eq!(
+            fs::read(dest_dir.join("standalone.exe")).unwrap(),
+            b"MZ\x90\x00raw_executable"
+        );
+    }
+
+    #[test]
+    fn test_find_7z_offset_detection() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let installer_path = temp_dir.path().join("fake_nsis.exe");
+
+        let mut data = vec![0u8; 1024]; // NSIS stub
+        data.extend_from_slice(SEVENZ_SIGNATURE); // 7z magic signature
+        data.extend_from_slice(&[0x00, 0x01, 0x02, 0x03]); // dummy payload
+
+        fs::write(&installer_path, &data).unwrap();
+
+        let offset = find_7z_offset(&installer_path);
+        assert_eq!(offset, Ok(1024));
+    }
 }
