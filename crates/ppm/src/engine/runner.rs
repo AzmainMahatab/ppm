@@ -192,11 +192,8 @@ fn launch_with_detours(
 
     let mut cmd_line_str = format!("\"{}\"", exe_path.display());
     for arg in args {
-        if arg.contains(' ') {
-            cmd_line_str.push_str(&format!(" \"{}\"", arg));
-        } else {
-            cmd_line_str.push_str(&format!(" {}", arg));
-        }
+        cmd_line_str.push(' ');
+        cmd_line_str.push_str(&quote_win32_arg(arg));
     }
 
     let mut cmd_line_wide: Vec<u16> = OsStr::new(&cmd_line_str)
@@ -250,4 +247,41 @@ fn launch_with_detours(
 
         Ok(exit_code as i32)
     }
+}
+
+#[cfg(windows)]
+fn quote_win32_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..backslashes * 2 + 1 {
+                    quoted.push('\\');
+                }
+                backslashes = 0;
+                quoted.push('"');
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    quoted.push('\\');
+                }
+                backslashes = 0;
+                quoted.push(c);
+            }
+        }
+    }
+    for _ in 0..backslashes * 2 {
+        quoted.push('\\');
+    }
+    quoted.push('"');
+    quoted
 }

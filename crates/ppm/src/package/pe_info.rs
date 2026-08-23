@@ -77,15 +77,15 @@ fn get_windows_pe_version(exe_path: &Path) -> Option<String> {
 
         let get_size_proc = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
             version_lib,
-            b"GetFileVersionInfoSizeW\0".as_ptr(),
+            c"GetFileVersionInfoSizeW".as_ptr().cast(),
         );
         let get_info_proc = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
             version_lib,
-            b"GetFileVersionInfoW\0".as_ptr(),
+            c"GetFileVersionInfoW".as_ptr().cast(),
         );
         let query_val_proc = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
             version_lib,
-            b"VerQueryValueW\0".as_ptr(),
+            c"VerQueryValueW".as_ptr().cast(),
         );
 
         if get_size_proc.is_none() || get_info_proc.is_none() || query_val_proc.is_none() {

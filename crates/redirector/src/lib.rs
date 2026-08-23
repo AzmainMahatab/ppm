@@ -11,6 +11,10 @@ use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS
 
 pub static HMODULE_SELF: AtomicIsize = AtomicIsize::new(0);
 
+/// DLL entry point invoked by the Windows PE Loader.
+///
+/// # Safety
+/// Must only be invoked by Windows runtime loader in accordance with standard Win32 `DllMain` ABI contracts.
 #[no_mangle]
 pub unsafe extern "system" fn DllMain(
     h_inst_dll: HMODULE,

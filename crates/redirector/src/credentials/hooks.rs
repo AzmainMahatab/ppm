@@ -5,7 +5,9 @@ use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{BOOL, TRUE};
 use windows_sys::Win32::Security::Credentials::CREDENTIALW;
 
+#[allow(clippy::upper_case_acronyms)]
 type PWSTR = *mut u16;
+#[allow(clippy::upper_case_acronyms)]
 type PCREDENTIALW = *mut CREDENTIALW;
 
 thread_local! {
@@ -221,30 +223,30 @@ unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
     unsafe {
-        let advapi32 = GetModuleHandleW(windows_sys::core::w!("advapi32.dll"));
+        let advapi32 = LoadLibraryW(windows_sys::core::w!("advapi32.dll"));
         if advapi32.is_null() {
             return;
         }
 
-        if let Some(proc) = GetProcAddress(advapi32, b"CredReadW\0".as_ptr()) {
+        if let Some(proc) = GetProcAddress(advapi32, c"CredReadW".as_ptr().cast()) {
             REAL_CRED_READ_W = proc as *mut c_void;
             attach_detour(&raw mut REAL_CRED_READ_W, hook_cred_read_w as *mut c_void);
         }
 
-        if let Some(proc) = GetProcAddress(advapi32, b"CredWriteW\0".as_ptr()) {
+        if let Some(proc) = GetProcAddress(advapi32, c"CredWriteW".as_ptr().cast()) {
             REAL_CRED_WRITE_W = proc as *mut c_void;
             attach_detour(&raw mut REAL_CRED_WRITE_W, hook_cred_write_w as *mut c_void);
         }
 
-        if let Some(proc) = GetProcAddress(advapi32, b"CredDeleteW\0".as_ptr()) {
+        if let Some(proc) = GetProcAddress(advapi32, c"CredDeleteW".as_ptr().cast()) {
             REAL_CRED_DELETE_W = proc as *mut c_void;
             attach_detour(&raw mut REAL_CRED_DELETE_W, hook_cred_delete_w as *mut c_void);
         }
 
-        if let Some(proc) = GetProcAddress(advapi32, b"CredFree\0".as_ptr()) {
+        if let Some(proc) = GetProcAddress(advapi32, c"CredFree".as_ptr().cast()) {
             REAL_CRED_FREE = proc as *mut c_void;
             attach_detour(&raw mut REAL_CRED_FREE, hook_cred_free as *mut c_void);
         }

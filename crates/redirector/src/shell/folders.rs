@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HWND, S_OK, TRUE};
 
+#[allow(clippy::upper_case_acronyms)]
 type PWSTR = *mut u16;
 
 thread_local! {
@@ -219,26 +220,26 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
     unsafe {
-        let shell32 = GetModuleHandleW(windows_sys::core::w!("shell32.dll"));
-        let userenv = GetModuleHandleW(windows_sys::core::w!("userenv.dll"));
+        let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
+        let userenv = LoadLibraryW(windows_sys::core::w!("userenv.dll"));
 
         if !shell32.is_null() {
-            if let Some(proc) = GetProcAddress(shell32, b"SHGetKnownFolderPath\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(shell32, c"SHGetKnownFolderPath".as_ptr().cast()) {
                 REAL_SH_GET_KNOWN_FOLDER_PATH = proc as *mut c_void;
                 attach_detour(&raw mut REAL_SH_GET_KNOWN_FOLDER_PATH, hook_sh_get_known_folder_path as *mut c_void);
             }
 
-            if let Some(proc) = GetProcAddress(shell32, b"SHGetFolderPathW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(shell32, c"SHGetFolderPathW".as_ptr().cast()) {
                 REAL_SH_GET_FOLDER_PATH_W = proc as *mut c_void;
                 attach_detour(&raw mut REAL_SH_GET_FOLDER_PATH_W, hook_sh_get_folder_path_w as *mut c_void);
             }
         }
 
         if !userenv.is_null() {
-            if let Some(proc) = GetProcAddress(userenv, b"GetUserProfileDirectoryW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(userenv, c"GetUserProfileDirectoryW".as_ptr().cast()) {
                 REAL_GET_USER_PROFILE_DIRECTORY_W = proc as *mut c_void;
                 attach_detour(&raw mut REAL_GET_USER_PROFILE_DIRECTORY_W, hook_get_user_profile_directory_w as *mut c_void);
             }

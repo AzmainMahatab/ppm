@@ -31,6 +31,10 @@ pub struct UNICODE_STRING {
 }
 
 impl UNICODE_STRING {
+    /// Converts the UTF-16 buffer to a standard Rust `String`.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.Buffer` points to valid readable memory for at least `self.Length / 2` 16-bit elements.
     pub unsafe fn to_string_lossy(&self) -> String {
         if self.Buffer.is_null() || self.Length == 0 {
             return String::new();

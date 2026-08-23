@@ -210,7 +210,7 @@ fn test_child_process_injection() -> Result<(), String> {
             0,
             ptr::null_mut(),
             ptr::null(),
-            &mut si,
+            &si,
             &mut pi,
         );
 

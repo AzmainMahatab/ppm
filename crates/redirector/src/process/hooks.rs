@@ -6,7 +6,9 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTUPINFOW,
 };
 
+#[allow(clippy::upper_case_acronyms)]
 type LPSTARTUPINFOW = *mut STARTUPINFOW;
+#[allow(clippy::upper_case_acronyms)]
 type LpprocessInformation = *mut PROCESS_INFORMATION;
 
 thread_local! {
@@ -135,14 +137,14 @@ pub fn init_hooks() {
 
         // 1. Try kernelbase.dll!CreateProcessW
         if !kernelbase.is_null() {
-            if let Some(proc) = GetProcAddress(kernelbase, b"CreateProcessW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(kernelbase, c"CreateProcessW".as_ptr().cast()) {
                 target_proc = Some(proc);
             }
         }
 
         // 2. Fallback kernel32.dll!CreateProcessW
         if target_proc.is_none() && !kernel32.is_null() {
-            if let Some(proc) = GetProcAddress(kernel32, b"CreateProcessW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(kernel32, c"CreateProcessW".as_ptr().cast()) {
                 target_proc = Some(proc);
             }
         }

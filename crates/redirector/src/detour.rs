@@ -12,6 +12,10 @@ extern "system" {
 /// Atomically attaches a detour to a target function using Microsoft Detours.
 /// `target_ptr` must point to the variable holding the original function address.
 /// Upon success, Microsoft Detours updates `*target_ptr` to point to the trampoline.
+///
+/// # Safety
+/// Caller must ensure `target_ptr` points to a valid function pointer in executable memory
+/// and `detour_fn` has a signature matching the target ABI.
 pub unsafe fn attach_detour(target_ptr: *mut *mut c_void, detour_fn: *mut c_void) -> bool {
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());

@@ -125,9 +125,11 @@ fn resolve_root() -> PathBuf {
                 let p = PathBuf::from(dll_path);
                 if let Some(parent) = p.parent() {
                     // If DLL is in .ppm/lib/, walk up 2 levels
-                    if parent.ends_with("lib") || parent.ends_with(".ppm") {
+                    let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if parent_name == "lib" || parent_name == ".ppm" {
                         if let Some(ppm_parent) = parent.parent() {
-                            if ppm_parent.ends_with(".ppm") {
+                            let ppm_name = ppm_parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if ppm_name == ".ppm" {
                                 if let Some(root) = ppm_parent.parent() {
                                     return root.to_path_buf();
                                 }

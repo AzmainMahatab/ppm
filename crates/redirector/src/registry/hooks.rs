@@ -707,49 +707,49 @@ pub fn init_hooks() {
         // 1. Hook NT Syscalls in ntdll.dll
         let ntdll = GetModuleHandleW(windows_sys::core::w!("ntdll.dll"));
         if !ntdll.is_null() {
-            if let Some(proc) = GetProcAddress(ntdll, b"NtOpenKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtOpenKey".as_ptr().cast()) {
                 REAL_NT_OPEN_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_OPEN_KEY, hook_nt_open_key as *mut c_void);
                 tracing::info!("Hook NtOpenKey: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtOpenKeyEx\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtOpenKeyEx".as_ptr().cast()) {
                 REAL_NT_OPEN_KEY_EX = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_OPEN_KEY_EX, hook_nt_open_key_ex as *mut c_void);
                 tracing::info!("Hook NtOpenKeyEx: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtCreateKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtCreateKey".as_ptr().cast()) {
                 REAL_NT_CREATE_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_CREATE_KEY, hook_nt_create_key as *mut c_void);
                 tracing::info!("Hook NtCreateKey: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtQueryValueKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtQueryValueKey".as_ptr().cast()) {
                 REAL_NT_QUERY_VALUE_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_QUERY_VALUE_KEY, hook_nt_query_value_key as *mut c_void);
                 tracing::info!("Hook NtQueryValueKey: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtSetValueKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtSetValueKey".as_ptr().cast()) {
                 REAL_NT_SET_VALUE_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_SET_VALUE_KEY, hook_nt_set_value_key as *mut c_void);
                 tracing::info!("Hook NtSetValueKey: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtDeleteValueKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtDeleteValueKey".as_ptr().cast()) {
                 REAL_NT_DELETE_VALUE_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_DELETE_VALUE_KEY, hook_nt_delete_value_key as *mut c_void);
                 tracing::info!("Hook NtDeleteValueKey: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtDeleteKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtDeleteKey".as_ptr().cast()) {
                 REAL_NT_DELETE_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_DELETE_KEY, hook_nt_delete_key as *mut c_void);
                 tracing::info!("Hook NtDeleteKey: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(ntdll, b"NtClose\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(ntdll, c"NtClose".as_ptr().cast()) {
                 REAL_NT_CLOSE = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_NT_CLOSE, hook_nt_close as *mut c_void);
                 tracing::info!("Hook NtClose: {}", ok);
@@ -759,43 +759,43 @@ pub fn init_hooks() {
         // 2. Hook Win32 Registry APIs in advapi32.dll
         let advapi32 = LoadLibraryW(windows_sys::core::w!("advapi32.dll"));
         if !advapi32.is_null() {
-            if let Some(proc) = GetProcAddress(advapi32, b"RegOpenKeyExW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegOpenKeyExW".as_ptr().cast()) {
                 REAL_REG_OPEN_KEY_EX_W = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_OPEN_KEY_EX_W, hook_reg_open_key_ex_w as *mut c_void);
                 tracing::info!("Hook RegOpenKeyExW: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(advapi32, b"RegCreateKeyExW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegCreateKeyExW".as_ptr().cast()) {
                 REAL_REG_CREATE_KEY_EX_W = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_CREATE_KEY_EX_W, hook_reg_create_key_ex_w as *mut c_void);
                 tracing::info!("Hook RegCreateKeyExW: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(advapi32, b"RegQueryValueExW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegQueryValueExW".as_ptr().cast()) {
                 REAL_REG_QUERY_VALUE_EX_W = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_QUERY_VALUE_EX_W, hook_reg_query_value_ex_w as *mut c_void);
                 tracing::info!("Hook RegQueryValueExW: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(advapi32, b"RegSetValueExW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegSetValueExW".as_ptr().cast()) {
                 REAL_REG_SET_VALUE_EX_W = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_SET_VALUE_EX_W, hook_reg_set_value_ex_w as *mut c_void);
                 tracing::info!("Hook RegSetValueExW: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(advapi32, b"RegDeleteValueW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegDeleteValueW".as_ptr().cast()) {
                 REAL_REG_DELETE_VALUE_W = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_DELETE_VALUE_W, hook_reg_delete_value_w as *mut c_void);
                 tracing::info!("Hook RegDeleteValueW: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(advapi32, b"RegDeleteKeyW\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegDeleteKeyW".as_ptr().cast()) {
                 REAL_REG_DELETE_KEY_W = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_DELETE_KEY_W, hook_reg_delete_key_w as *mut c_void);
                 tracing::info!("Hook RegDeleteKeyW: {}", ok);
             }
 
-            if let Some(proc) = GetProcAddress(advapi32, b"RegCloseKey\0".as_ptr()) {
+            if let Some(proc) = GetProcAddress(advapi32, c"RegCloseKey".as_ptr().cast()) {
                 REAL_REG_CLOSE_KEY = proc as *mut c_void;
                 let ok = attach_detour(&raw mut REAL_REG_CLOSE_KEY, hook_reg_close_key as *mut c_void);
                 tracing::info!("Hook RegCloseKey: {}", ok);

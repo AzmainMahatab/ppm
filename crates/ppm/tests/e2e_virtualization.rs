@@ -50,25 +50,23 @@ fn test_e2e_virtualization_with_probe() {
     }
 
     // 4. Write apps.json configuring test-probe
-    let apps_json = format!(
-        r#"{{
+    let apps_json = r#"{
         "$schema": "./apps.schema.json",
-        "apps": {{
-            "test-probe": {{
+        "apps": {
+            "test-probe": {
                 "name": "Virtualization Test Probe",
                 "target_dir": "TestProbe",
                 "executable": "test-probe.exe",
-                "version_check": {{
+                "version_check": {
                     "type": "github_release",
                     "repo": "owner/repo"
-                }},
-                "package": {{
+                },
+                "package": {
                     "type": "zip"
-                }}
-            }}
-        }}
-    }}"#
-    );
+                }
+            }
+        }
+    }"#;
     fs::write(root.join(".ppm").join("apps.json"), apps_json).expect("Failed to write apps.json");
 
     // 5. Run ppm.exe run test-probe

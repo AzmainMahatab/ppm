@@ -95,13 +95,14 @@ fn resolve_root() -> PathBuf {
     let current_exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("ppm.exe"));
     let exe_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
 
-    if exe_dir.ends_with(".ppm")
-        || exe_dir.ends_with("Engine")
-        || exe_dir.ends_with("lib")
-        || exe_dir.ends_with("dist")
-    {
+    let last_comp = exe_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    if matches!(last_comp, ".ppm" | "Engine" | "lib" | "dist") {
         exe_dir.parent().unwrap_or(exe_dir).to_path_buf()
-    } else if exe_dir.ends_with("release") || exe_dir.ends_with("debug") {
+    } else if matches!(last_comp, "release" | "debug") {
         exe_dir
             .parent()
             .and_then(|p| p.parent())

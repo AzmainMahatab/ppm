@@ -113,7 +113,10 @@ impl CredentialVault {
             if let Some(parent) = self.path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let _ = fs::write(&self.path, json_str);
+            let tmp_path = self.path.with_extension(format!("tmp.{}", std::process::id()));
+            if fs::write(&tmp_path, json_str).is_ok() {
+                let _ = fs::rename(&tmp_path, &self.path);
+            }
         }
     }
 }
