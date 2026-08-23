@@ -20,7 +20,7 @@ categories = [
 crate-type = ["cdylib"]
 
 [build-dependencies]
-cc = "1.0"
+cc = "1.2"
 
 [dependencies]
 windows-sys = { version = "0.59", features = [
