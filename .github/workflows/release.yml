@@ -38,8 +38,8 @@ jobs:
     name: Determine Version & Generate Changelog
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.resolve_version.outputs.tag }}
-      changelog: ${{ steps.resolve_version.outputs.changelog }}
+      tag: ${{ steps.version_output.outputs.tag }}
+      changelog: ${{ steps.version_output.outputs.changelog }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Resolve Dynamic Version & Changelog
-        id: resolve_version
+        id: resolve_tag
         uses: mathieudutour/github-tag-action@v6.2
         if: github.event_name == 'workflow_dispatch'
         with:
@@ -56,19 +56,26 @@ jobs:
           release_branches: main
           create_annotated_tag: true
 
-      - name: Fallback to Pushed Git Tag
-        if: github.event_name == 'push'
+      - name: Export Consolidated Version Output
+        id: version_output
         run: |
-          echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          echo "changelog=" >> $GITHUB_OUTPUT
-
-      - name: Export Workflow Outputs
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "tag=${{ steps.resolve_version.outputs.new_tag }}" >> $GITHUB_OUTPUT
-          echo "changelog<<EOF" >> $GITHUB_OUTPUT
-          echo "${{ steps.resolve_version.outputs.changelog }}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${{ github.ref_name }}"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "changelog=" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${{ steps.resolve_tag.outputs.new_tag }}"
+            if [ -z "$TAG" ]; then
+              TAG="${{ steps.resolve_tag.outputs.release_type }}"
+            fi
+            if [ -z "$TAG" ]; then
+              TAG="v0.1.0"
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.resolve_tag.outputs.changelog }}" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
 
   # ─────────────────────────────────────────────────────────────────────────────
   # STAGE 2: Multi-Architecture Build Matrix (x64 & ARM64)
@@ -110,6 +117,9 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ needs.version.outputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = "v0.1.0"
+          }
           $zipName = "ppm-$tag-windows-${{ matrix.arch }}.zip"
           $stagingDir = "staging_${{ matrix.arch }}"
           

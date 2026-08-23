@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Cargo Ecosystem: Monitors all Rust dependencies across the workspace
+  # ─────────────────────────────────────────────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 15
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GitHub Actions Ecosystem: Monitors GitHub Action workflow action versions
+  # ─────────────────────────────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
