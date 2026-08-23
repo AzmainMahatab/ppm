@@ -85,7 +85,7 @@ graph TD
 ├──────────────────────┬───────────────────────────────┬─────────────────────────────────┤
 │ Subsystem            │ Interception Boundary         │ Scope & Target DLL              │
 ├──────────────────────┼───────────────────────────────┼─────────────────────────────────┤
-│ 1. Registry (CoW)    │ advapi32.dll + ntdll.dll      │ Win32 Registry APIs + NT Syscalls│
+│ 1. Registry (CoW)    │ kernelbase.dll / advapi32.dll │ Win32 Application Registry APIs │
 │ 2. Process Spawning  │ kernelbase.dll / kernel32.dll │ CreateProcessW                  │
 │ 3. Credentials       │ advapi32.dll                  │ CredReadW / CredWriteW / Delete │
 │ 4. Shell Paths       │ shell32.dll + userenv.dll     │ Known Folders / Profile Paths   │
@@ -95,13 +95,13 @@ graph TD
 
 | Target API | Interception Layer | Virtualization Function |
 | :--- | :--- | :--- |
-| **`RegOpenKeyExW` / `NtOpenKey`** | `advapi32.dll` / `ntdll.dll` | Normalizes registry paths (`HKCU\...`, `\Registry\User\...`); tracks handle in `VirtualHandleTable`. |
-| **`RegCreateKeyExW` / `NtCreateKey`** | `advapi32.dll` / `ntdll.dll` | Creates key in virtual overlay; registers handle in `VirtualHandleTable`. |
-| **`RegQueryValueExW` / `NtQueryValueKey`** | `advapi32.dll` / `ntdll.dll` | Queries virtual overlay and tombstones; falls back to host OS for unshadowed reads. |
-| **`RegSetValueExW` / `NtSetValueKey`** | `advapi32.dll` / `ntdll.dll` | Stores typed value in memory and atomically persists to `.ppm/system/registry.json`. |
-| **`RegDeleteValueW` / `RegDeleteKeyW` / `NtDelete*`** | `advapi32.dll` / `ntdll.dll` | Records tombstones in virtual store, masking host values. |
-| **`RegCloseKey` / `NtClose`** | `advapi32.dll` / `ntdll.dll` | Cleans up handles in `VirtualHandleTable`. |
-| **`CreateProcessW` / `CreateProcessInternalW`** | `kernelbase.dll` / `kernel32.dll` | Injects `redirector.dll` into spawned child processes via Microsoft Detours. |
+| **`RegOpenKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Normalizes registry paths (`HKCU\...`, `HKLM\...`); tracks handle in `VirtualHandleTable`. |
+| **`RegCreateKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Creates key in virtual overlay; registers handle in `VirtualHandleTable`. |
+| **`RegQueryValueExW`** | `kernelbase.dll` / `advapi32.dll` | Queries virtual overlay and tombstones; falls back to host OS for unshadowed reads. |
+| **`RegSetValueExW`** | `kernelbase.dll` / `advapi32.dll` | Stores typed value in memory and atomically persists to `.ppm/system/registry.json`. |
+| **`RegDeleteValueW` / `RegDeleteKeyW`** | `kernelbase.dll` / `advapi32.dll` | Records tombstones in virtual store, masking host values. |
+| **`RegCloseKey`** | `kernelbase.dll` / `advapi32.dll` | Cleans up handles in `VirtualHandleTable`. |
+| **`CreateProcessW`** | `kernelbase.dll` / `kernel32.dll` | Injects `redirector.dll` into spawned child processes via Microsoft Detours. |
 | **`CredReadW`, `CredWriteW`, `CredDeleteW`** | `advapi32.dll` | Intercepts credentials and persists to encrypted `.ppm/system/credentials.json`. |
 | **`SHGetKnownFolderPath`** | `shell32.dll` | Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` to `<root>\Home\...`. |
 | **`GetUserProfileDirectoryW`** | `userenv.dll` | Returns `<root>\Home` as user profile directory. |
@@ -137,10 +137,9 @@ crates/redirector/src/
 │
 ├── registry/                       # Registry Virtualization
 │   ├── mod.rs                      # Registry module export & initialization
-│   ├── nt_types.rs                 # UNICODE_STRING, OBJECT_ATTRIBUTES, NTSTATUS definitions
 │   ├── store.rs                    # In-Memory Hive & Atomic JSON Persistence (.ppm/system/registry.json)
 │   ├── handle_table.rs             # Virtual Handle Table & Pseudo-Handle Mapping
-│   └── hooks.rs                    # Win32 (advapi32) + NT (ntdll) Detour Hooks
+│   └── hooks.rs                    # Win32 (KernelBase / advapi32) Detour Hooks
 │
 ├── process/                        # Process Virtualization
 │   ├── mod.rs                      # Process module export & initialization

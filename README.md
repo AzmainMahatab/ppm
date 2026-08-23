@@ -2,7 +2,7 @@
 
 [![Language: Rust](https://img.shields.io/badge/Language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows_x64%20%7C%20arm64-blue.svg)](https://microsoft.com)
-[![Virtualization: ntdll CoW](https://img.shields.io/badge/Virtualization-ntdll.dll%20Syscalls-green.svg)](#)
+[![Virtualization: Win32 CoW](https://img.shields.io/badge/Virtualization-Win32%20Registry%20CoW-green.svg)](#)
 [![Isolation: Pre--ALPC Vault](https://img.shields.io/badge/Isolation-Pre--ALPC%20Vault-teal.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
@@ -13,7 +13,7 @@ A lightweight, single-binary portable application runner, virtualization engine,
 * **Multi-Architecture Management**: Organizes and runs native binaries for **Intel/AMD x64** (`Apps/x64/`) and **ARM64** (`Apps/arm64/`).
 * **Hardware Architecture Routing**: Inspects host CPU architecture on startup via `GetNativeSystemInfo` and launches the matching native application binary.
 * **User-Mode Virtualization**:
-  * **Dual-Layer Copy-on-Write Registry**: Intercepts Win32 registry APIs (`advapi32.dll` / `kernelbase.dll`) and native NT syscalls (`ntdll.dll`), persisting state to `.ppm/system/registry.json`.
+  * **Copy-on-Write Registry Virtualization**: Intercepts Win32 registry APIs (`KernelBase.dll` / `advapi32.dll`), persisting modifications and tombstones to `.ppm/system/registry.json` without modifying the host OS.
   * **Child Process Injection**: Injects `redirector.dll` across child processes via Microsoft Detours (`CreateProcessW`).
   * **Isolated Credential Vault**: Intercepts `Cred*` APIs (`advapi32.dll`), persisting encrypted credentials to `.ppm/system/credentials.json`.
   * **Shell Path Redirection**: Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, and `FOLDERID_RoamingAppData` (`shell32.dll` / `userenv.dll`) to `Home/`.
