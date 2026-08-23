@@ -95,6 +95,7 @@ unsafe extern "system" fn hook_create_process_w(
                         std::ptr::null_mut(),
                     );
                     if res != 0 {
+                        tracing::info!("CreateProcess [Child Injected]: Injected redirector.dll into new child process");
                         return TRUE;
                     }
                 }

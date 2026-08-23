@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Clone)]
 pub struct PathConfig {
@@ -8,6 +10,7 @@ pub struct PathConfig {
     pub system_dir: PathBuf,
     pub registry_json: PathBuf,
     pub credentials_json: PathBuf,
+    pub logs_dir: PathBuf,
     pub log_file: PathBuf,
 
     // Canonical Portable Profile Paths
@@ -24,6 +27,7 @@ pub struct PathConfig {
 }
 
 static PATHS: OnceLock<PathConfig> = OnceLock::new();
+static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 pub fn init_paths() -> &'static PathConfig {
     PATHS.get_or_init(|| {
@@ -64,6 +68,7 @@ pub fn init_paths() -> &'static PathConfig {
             system_dir,
             registry_json,
             credentials_json,
+            logs_dir,
             log_file,
             user_profile,
             local_appdata,
@@ -71,6 +76,30 @@ pub fn init_paths() -> &'static PathConfig {
             documents,
         }
     })
+}
+
+/// Initializes the high-performance non-blocking concurrent logger.
+/// Emitted logs are dispatched to an in-memory lock-free queue with sub-microsecond latency,
+/// while a dedicated background worker thread flushes batches to `.ppm/logs/redirector.log`.
+pub fn init_logger() {
+    LOGGER_GUARD.get_or_init(|| {
+        let cfg = init_paths();
+        let file_appender = tracing_appender::rolling::never(&cfg.logs_dir, "redirector.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
+
+        let _ = tracing_subscriber::fmt()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_thread_ids(true)
+            .try_init();
+
+        guard
+    });
 }
 
 fn resolve_root() -> PathBuf {
@@ -114,14 +143,4 @@ fn resolve_root() -> PathBuf {
 
     // Fallback: Current working directory
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
-pub fn log_msg(msg: &str) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    let cfg = init_paths();
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&cfg.log_file) {
-        let _ = writeln!(file, "[redirector] {}", msg);
-    }
 }

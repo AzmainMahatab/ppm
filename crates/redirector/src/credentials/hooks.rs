@@ -117,6 +117,7 @@ unsafe extern "system" fn hook_cred_read_w(
                         cred_struct.Comment = std::ptr::null_mut();
 
                         *credential_out = cred_mem;
+                        tracing::trace!("CredReadW [Vault Hit]: target '{}' read from virtual store", target_str);
                         return TRUE;
                     }
                 }
@@ -145,7 +146,8 @@ unsafe extern "system" fn hook_cred_write_w(
                     &[]
                 };
 
-                get_vault().set(target_name, cred.Type, user_name, blob, cred.Persist);
+                get_vault().set(target_name.clone(), cred.Type, user_name.clone(), blob, cred.Persist);
+                tracing::debug!("CredWriteW [Vault Intercept]: target '{}' (user: '{}') saved to virtual store", target_name, user_name);
                 return TRUE;
             }
 
@@ -165,6 +167,7 @@ unsafe extern "system" fn hook_cred_delete_w(
             if !target_name.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
                 if get_vault().delete(&target_str) {
+                    tracing::debug!("CredDeleteW [Vault Intercept]: target '{}' removed from virtual store", target_str);
                     return TRUE;
                 }
             }

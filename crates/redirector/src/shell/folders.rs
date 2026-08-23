@@ -97,12 +97,16 @@ unsafe extern "system" fn hook_sh_get_known_folder_path(
                 let cfg = crate::paths::init_paths();
 
                 let target_w = if guids_equal(id, &FOLDERID_PROFILE) {
+                    tracing::debug!("SHGetKnownFolderPath [PROFILE]: redirected to Home");
                     Some(&cfg.user_profile_w)
                 } else if guids_equal(id, &FOLDERID_LOCAL_APP_DATA) {
+                    tracing::debug!("SHGetKnownFolderPath [LOCAL_APP_DATA]: redirected to Home/AppData/Local");
                     Some(&cfg.local_appdata_w)
                 } else if guids_equal(id, &FOLDERID_ROAMING_APP_DATA) {
+                    tracing::debug!("SHGetKnownFolderPath [ROAMING_APP_DATA]: redirected to Home/AppData/Roaming");
                     Some(&cfg.roaming_appdata_w)
                 } else if guids_equal(id, &FOLDERID_DOCUMENTS) {
+                    tracing::debug!("SHGetKnownFolderPath [DOCUMENTS]: redirected to Home/Documents");
                     Some(&cfg.documents_w)
                 } else {
                     None
@@ -134,10 +138,22 @@ unsafe extern "system" fn hook_sh_get_folder_path_w(
                 let cfg = crate::paths::init_paths();
 
                 let target_w = match clean_csidl {
-                    CSIDL_PROFILE => Some(&cfg.user_profile_w),
-                    CSIDL_LOCAL_APPDATA => Some(&cfg.local_appdata_w),
-                    CSIDL_APPDATA => Some(&cfg.roaming_appdata_w),
-                    CSIDL_PERSONAL => Some(&cfg.documents_w),
+                    CSIDL_PROFILE => {
+                        tracing::debug!("SHGetFolderPathW [CSIDL_PROFILE]: redirected to Home");
+                        Some(&cfg.user_profile_w)
+                    }
+                    CSIDL_LOCAL_APPDATA => {
+                        tracing::debug!("SHGetFolderPathW [CSIDL_LOCAL_APPDATA]: redirected to Home/AppData/Local");
+                        Some(&cfg.local_appdata_w)
+                    }
+                    CSIDL_APPDATA => {
+                        tracing::debug!("SHGetFolderPathW [CSIDL_APPDATA]: redirected to Home/AppData/Roaming");
+                        Some(&cfg.roaming_appdata_w)
+                    }
+                    CSIDL_PERSONAL => {
+                        tracing::debug!("SHGetFolderPathW [CSIDL_PERSONAL]: redirected to Home/Documents");
+                        Some(&cfg.documents_w)
+                    }
                     _ => None,
                 };
 
@@ -175,6 +191,7 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
                     cfg.user_profile_w.len(),
                 );
                 *size = needed_len;
+                tracing::debug!("GetUserProfileDirectoryW: redirected to Home");
                 return TRUE;
             }
 

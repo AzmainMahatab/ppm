@@ -108,6 +108,7 @@ unsafe extern "system" fn hook_nt_open_key(
             let path = resolve_full_key_path(obj_attr);
 
             if get_registry_store().is_key_tombstoned(&path) {
+                tracing::trace!("NtOpenKey: Key is tombstoned -> {}", path);
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
@@ -133,6 +134,7 @@ unsafe extern "system" fn hook_nt_open_key_ex(
             let path = resolve_full_key_path(obj_attr);
 
             if get_registry_store().is_key_tombstoned(&path) {
+                tracing::trace!("NtOpenKeyEx: Key is tombstoned -> {}", path);
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
@@ -160,6 +162,7 @@ unsafe extern "system" fn hook_nt_create_key(
         {
             let path = resolve_full_key_path(obj_attr);
             get_registry_store().create_key(&path);
+            tracing::debug!("NtCreateKey: Virtual key created -> {}", path);
 
             let status = HOOK_NT_CREATE_KEY.get().unwrap().call(key_handle, desired_access, obj_attr, title_index, class, create_options, disposition);
             if status == STATUS_SUCCESS && !key_handle.is_null() {
@@ -202,7 +205,10 @@ unsafe extern "system" fn hook_nt_query_value_key(
 
             if let Some(query_res) = get_registry_store().get_value(&key_path, &val_name_str) {
                 match query_res {
-                    Err(()) => return STATUS_OBJECT_NAME_NOT_FOUND,
+                    Err(()) => {
+                        tracing::trace!("NtQueryValueKey [Tombstoned Value]: {}\\{}", key_path, val_name_str);
+                        return STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
                     Ok((val_type, data)) => {
                         if key_val_class == KeyValuePartialInformation {
                             let header_size = std::mem::size_of::<KEY_VALUE_PARTIAL_INFORMATION>() - 1;
@@ -224,6 +230,7 @@ unsafe extern "system" fn hook_nt_query_value_key(
                                 std::ptr::copy_nonoverlapping(data.as_ptr(), info.Data.as_mut_ptr(), data.len());
                             }
 
+                            tracing::trace!("NtQueryValueKey [Virtual Overlay Hit]: {}\\{}", key_path, val_name_str);
                             return STATUS_SUCCESS;
                         }
                     }
@@ -266,6 +273,7 @@ unsafe extern "system" fn hook_nt_set_value_key(
 
             // Copy-on-Write: Store exclusively in portable overlay!
             get_registry_store().set_value(&key_path, &val_name_str, val_type, byte_slice);
+            tracing::debug!("NtSetValueKey [CoW Intercept]: {}\\{} (type: {}, bytes: {})", key_path, val_name_str, val_type, byte_slice.len());
 
             STATUS_SUCCESS
         }
@@ -288,6 +296,7 @@ unsafe extern "system" fn hook_nt_delete_value_key(
             };
 
             get_registry_store().delete_value(&key_path, &val_name_str);
+            tracing::debug!("NtDeleteValueKey [CoW Mask]: {}\\{}", key_path, val_name_str);
             STATUS_SUCCESS
         }
     )
@@ -300,6 +309,7 @@ unsafe extern "system" fn hook_nt_delete_key(key_handle: HANDLE) -> NTSTATUS {
         {
             let key_path = get_handle_table().get_path(key_handle).unwrap_or_default();
             get_registry_store().delete_key(&key_path);
+            tracing::debug!("NtDeleteKey [CoW Tombstone]: {}", key_path);
             STATUS_SUCCESS
         }
     )

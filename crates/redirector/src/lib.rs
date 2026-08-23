@@ -20,7 +20,9 @@ pub unsafe extern "system" fn DllMain(
         DLL_PROCESS_ATTACH => {
             HMODULE_SELF.store(h_inst_dll as isize, Ordering::SeqCst);
             paths::init_paths();
-            paths::log_msg("redirector.dll attached to process");
+            paths::init_logger();
+
+            tracing::info!("redirector.dll attached to process (PID: {})", std::process::id());
 
             // Initialize all 4 virtualization pillars
             registry::init_hooks();
@@ -29,7 +31,7 @@ pub unsafe extern "system" fn DllMain(
             shell::init_hooks();
         }
         DLL_PROCESS_DETACH => {
-            paths::log_msg("redirector.dll detached from process");
+            tracing::info!("redirector.dll detached from process (PID: {})", std::process::id());
         }
         _ => {}
     }
