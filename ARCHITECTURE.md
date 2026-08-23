@@ -10,22 +10,22 @@ This document provides a comprehensive technical overview of the **`ppm` (Portab
 
 ```mermaid
 graph TD
-    subgraph Single Binary Distribution Product (USB Flash Drive)
-        PPM[ppm.exe - Master Binary at Root]
+    subgraph SingleBinary["Single Binary Distribution Product (USB Flash Drive)"]
+        PPM["ppm.exe - Master Binary at Root"]
         PPMDir[".ppm/ (apps.json, system/, lib/, cache/, logs/)"]
         HomeDir["Home/ (Pure %USERPROFILE% & %HOME% - Zero .ppm files)"]
         BatLaunchers["Clean Root .bat Shortcuts (antigravity.bat, antigravity-manager.bat)"]
 
-        subgraph Apps/ Top-Level Architecture
+        subgraph AppsStructure["Apps/ Top-Level Architecture"]
             X64Dir["Apps/x64/ (Intel / AMD 64-bit Binaries)"]
             ARM64Dir["Apps/arm64/ (Snapdragon / Surface ARM64 Binaries)"]
         end
     end
 
     PPM -->|ppm init| PPMDir & X64Dir & ARM64Dir & HomeDir & BatLaunchers
-    PPM -->|ppm install <app>| DepResolver[Resolves Dependencies via DAG -> Installs to Apps/arch/target_dir]
-    PPM -->|ppm run <app>| HostDetect[Detects Host CPU via GetNativeSystemInfo]
-    HostDetect -->|Routes to Apps/host_arch/target_dir| Virtualize[Injects .ppm/lib/redirector.dll & Spawns Target App]
+    PPM -->|ppm install app| DepResolver["Resolves Dependencies via DAG -> Installs to Apps/arch/target_dir"]
+    PPM -->|ppm run app| HostDetect["Detects Host CPU via GetNativeSystemInfo"]
+    HostDetect -->|Routes to Apps/host_arch/target_dir| Virtualize["Injects .ppm/lib/redirector.dll & Spawns Target App"]
     PPM -->|ppm link| BatLaunchers
 ```
 
@@ -115,13 +115,13 @@ We completely eliminate `state.json`. `ppm` inspects local executables on disk d
 
 ```mermaid
 graph TD
-    Inspect[AppDefinition.executable_for_arch] --> Exists{File exists on disk?}
-    Exists -->|No| NotInstalled[Status: NOT INSTALLED]
-    Exists -->|Yes| Win32PE[Call Win32 GetFileVersionInfoW & VerQueryValueW]
-    Win32PE -->|Found VS_VERSIONINFO| ReadPE[Read ProductVersion directly from PE Header e.g. 2.9.1]
-    Win32PE -->|No PE Header| PkgJson[Check resources/app/package.json for Electron]
-    PkgJson -->|Found| ReadPkg[Read version from package.json]
-    PkgJson -->|Not Found| FoundFallback[Status: INSTALLED]
+    Inspect["AppDefinition.executable_for_arch"] --> Exists{File exists on disk?}
+    Exists -->|No| NotInstalled["Status: NOT INSTALLED"]
+    Exists -->|Yes| Win32PE["Call Win32 GetFileVersionInfoW & VerQueryValueW"]
+    Win32PE -->|Found VS_VERSIONINFO| ReadPE["Read ProductVersion directly from PE Header e.g. 2.9.1"]
+    Win32PE -->|No PE Header| PkgJson["Check resources/app/package.json for Electron"]
+    PkgJson -->|Found| ReadPkg["Read version from package.json"]
+    PkgJson -->|Not Found| FoundFallback["Status: INSTALLED"]
 ```
 
 ---
