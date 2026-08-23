@@ -1,0 +1,22 @@
+# Repository Configuration & Topic Tags
+repository:
+  name: ppm
+  description: "Lightweight user-mode Windows virtualization engine and multi-architecture portable package manager"
+  homepage: ""
+  topics:
+    - windows
+    - virtualization
+    - portable-apps
+    - detours
+    - ntdll
+    - copy-on-write
+    - package-manager
+    - rust
+    - arm64
+    - x64
+    - win32
+    - sandboxing
+  features:
+    issues: true
+    projects: false
+    wiki: false

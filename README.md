@@ -1,5 +1,11 @@
 # Portable Package Manager (`ppm`)
 
+[![Language: Rust](https://img.shields.io/badge/Language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows_x64%20%7C%20arm64-blue.svg)](https://microsoft.com)
+[![Virtualization: ntdll CoW](https://img.shields.io/badge/Virtualization-ntdll.dll%20Syscalls-green.svg)](#)
+[![Isolation: Pre--ALPC Vault](https://img.shields.io/badge/Isolation-Pre--ALPC%20Vault-teal.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
+
 A lightweight, zero-dependency, single-binary portable application runner, virtualization engine, and multi-architecture package manager for Windows.
 
 ## Features

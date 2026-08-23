@@ -2,6 +2,19 @@
 name = "redirector"
 version = "0.1.0"
 edition = "2021"
+description = "Lowest-boundary Win32/NT native system call detours and Copy-on-Write virtualization library"
+license = "MIT"
+keywords = [
+    "virtualization",
+    "detours",
+    "ntdll",
+    "copy-on-write",
+    "windows"
+]
+categories = [
+    "os::windows-apis",
+    "development-tools"
+]
 
 [lib]
 crate-type = ["cdylib"]

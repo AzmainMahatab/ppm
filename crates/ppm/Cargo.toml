@@ -2,6 +2,21 @@
 name = "ppm"
 version = "0.1.0"
 edition = "2021"
+description = "Lightweight user-mode Windows virtualization engine and multi-architecture portable package manager"
+license = "MIT"
+readme = "../../README.md"
+keywords = [
+    "portable",
+    "virtualization",
+    "windows",
+    "detours",
+    "package-manager"
+]
+categories = [
+    "command-line-utilities",
+    "os::windows-apis",
+    "development-tools"
+]
 
 [build-dependencies]
 cc = "1.0"
