@@ -97,8 +97,8 @@ fn get_windows_pe_version(exe_path: &Path) -> Option<String> {
         let get_info: FnGetFileVersionInfoW = std::mem::transmute(get_info_proc.unwrap());
         let query_val: FnVerQueryValueW = std::mem::transmute(query_val_proc.unwrap());
 
-        let mut dummy = 0u32;
-        let size = get_size(path_wide.as_ptr(), &mut dummy);
+        let mut _handle = 0u32;
+        let size = get_size(path_wide.as_ptr(), &mut _handle);
         if size == 0 {
             windows_sys::Win32::Foundation::FreeLibrary(version_lib);
             return None;

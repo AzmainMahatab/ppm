@@ -65,13 +65,15 @@ pub fn init_environment(root: &Path, force: bool) -> Result<(), String> {
     let schema_json = serde_json::to_string_pretty(&schema)
         .map_err(|e| format!("Failed to serialize schema: {}", e))?;
     let schema_path = ppm_dir.join("apps.schema.json");
-    let _ = fs::write(&schema_path, &schema_json);
+    fs::write(&schema_path, &schema_json)
+        .map_err(|e| format!("Failed to write schema '{}': {}", schema_path.display(), e))?;
 
     // Also update dev manifests/apps.schema.json if manifests/ exists
     let dev_schema = root.join("manifests").join("apps.schema.json");
     if let Some(p) = dev_schema.parent() {
         if p.exists() {
-            let _ = fs::write(&dev_schema, &schema_json);
+            fs::write(&dev_schema, &schema_json)
+                .map_err(|e| format!("Failed to write schema '{}': {}", dev_schema.display(), e))?;
         }
     }
 

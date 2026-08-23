@@ -33,7 +33,13 @@ pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<
     pb.set_message(format!("  • Downloading {}", display_name));
 
     if let Some(parent) = dest_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create parent directory '{}': {}",
+                parent.display(),
+                e
+            )
+        })?;
     }
 
     let mut file = File::create(dest_path)

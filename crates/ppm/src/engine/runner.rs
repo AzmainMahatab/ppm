@@ -112,10 +112,14 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     let webview_data = home_dir.join("AppData").join("WebViewData");
     let documents_dir = home_dir.join("Documents");
 
-    let _ = fs::create_dir_all(&local_appdata);
-    let _ = fs::create_dir_all(&roaming_appdata);
-    let _ = fs::create_dir_all(&webview_data);
-    let _ = fs::create_dir_all(&documents_dir);
+    fs::create_dir_all(&local_appdata)
+        .map_err(|e| format!("Failed to create Home/AppData/Local at '{}': {}", local_appdata.display(), e))?;
+    fs::create_dir_all(&roaming_appdata)
+        .map_err(|e| format!("Failed to create Home/AppData/Roaming at '{}': {}", roaming_appdata.display(), e))?;
+    fs::create_dir_all(&webview_data)
+        .map_err(|e| format!("Failed to create Home/AppData/WebViewData at '{}': {}", webview_data.display(), e))?;
+    fs::create_dir_all(&documents_dir)
+        .map_err(|e| format!("Failed to create Home/Documents at '{}': {}", documents_dir.display(), e))?;
 
     env::set_var("USERPROFILE", &home_dir);
     env::set_var("HOME", &home_dir);

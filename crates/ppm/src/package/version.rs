@@ -32,8 +32,8 @@ pub fn detect_local_version(
         return Some(v);
     }
 
-    // 3. Fallback: file exists
-    Some("installed".to_string())
+    // 3. If binary exists but has no extractable PE version or package.json version
+    None
 }
 
 /// Fetches the latest upstream version and resolved download URL for a specific CPU architecture.

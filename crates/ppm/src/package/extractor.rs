@@ -203,7 +203,8 @@ pub fn extract_package(
         find_payload_root(&stage_dir)
     };
 
-    let _ = fs::create_dir_all(dest_dir);
+    fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed to create destination directory '{}': {}", dest_dir.display(), e))?;
     copy_dir_recursive(&source_root, dest_dir)?;
 
     let _ = fs::remove_dir_all(&stage_dir);
@@ -246,7 +247,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     }
 
     if src.is_dir() {
-        let _ = fs::create_dir_all(dst);
+        fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed to create directory '{}': {}", dst.display(), e))?;
         let entries = fs::read_dir(src)
             .map_err(|e| format!("Failed to read dir '{}': {}", src.display(), e))?;
 
@@ -257,11 +259,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
             if src_path.is_dir() {
                 copy_dir_recursive(&src_path, &dst_path)?;
             } else {
-                let _ = fs::copy(&src_path, &dst_path);
+                fs::copy(&src_path, &dst_path).map_err(|e| {
+                    format!(
+                        "Failed to copy '{}' to '{}': {}",
+                        src_path.display(),
+                        dst_path.display(),
+                        e
+                    )
+                })?;
             }
         }
     } else {
-        let _ = fs::copy(src, dst);
+        fs::copy(src, dst).map_err(|e| {
+            format!(
+                "Failed to copy file '{}' to '{}': {}",
+                src.display(),
+                dst.display(),
+                e
+            )
+        })?;
     }
 
     Ok(())
@@ -363,11 +379,11 @@ mod tests {
     #[test]
     fn test_find_7z_offset_detection() {
         let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let installer_path = temp_dir.path().join("fake_nsis.exe");
+        let installer_path = temp_dir.path().join("sample_nsis.exe");
 
-        let mut data = vec![0u8; 1024]; // NSIS stub
+        let mut data = vec![0u8; 1024]; // NSIS PE stub
         data.extend_from_slice(SEVENZ_SIGNATURE); // 7z magic signature
-        data.extend_from_slice(&[0x00, 0x01, 0x02, 0x03]); // dummy payload
+        data.extend_from_slice(&[0x00, 0x01, 0x02, 0x03]); // 7z stream payload bytes
 
         fs::write(&installer_path, &data).unwrap();
 

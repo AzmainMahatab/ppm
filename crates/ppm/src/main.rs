@@ -312,16 +312,21 @@ fn main() {
                     let local_v = package::version::detect_local_version(&root, app_def, target_arch);
                     let remote_res = package::version::check_remote_version(&app_def.version_check, target_arch);
 
-                    let local_display = local_v.as_deref().unwrap_or("Not Installed");
+                    let is_installed = app_def.is_installed_for_arch(&root, target_arch);
+                    let local_display = match (&local_v, is_installed) {
+                        (Some(v), _) => v.as_str(),
+                        (None, true) => "Installed (Unversioned)",
+                        (None, false) => "Not Installed",
+                    };
 
                     match remote_res {
                         Ok(remote) => {
-                            let status_cell = match &local_v {
-                                None => Cell::new("NOT INSTALLED").fg(Color::Yellow),
-                                Some(loc) if loc == &remote.version => {
+                            let status_cell = match (&local_v, is_installed) {
+                                (_, false) => Cell::new("NOT INSTALLED").fg(Color::Yellow),
+                                (Some(loc), true) if loc == &remote.version => {
                                     Cell::new("UP TO DATE").fg(Color::Green)
                                 }
-                                Some(_) => Cell::new("UPDATE AVAILABLE").fg(Color::Cyan),
+                                _ => Cell::new("UPDATE AVAILABLE").fg(Color::Cyan),
                             };
 
                             table.add_row(vec![
@@ -387,7 +392,10 @@ fn main() {
             }
 
             // Refresh batch launchers
-            let _ = engine::launcher::generate_launchers(&root, &manifests);
+            if let Err(e) = engine::launcher::generate_launchers(&root, &manifests) {
+                eprintln!("\n✗ Failed to generate launchers: {}", e);
+                std::process::exit(1);
+            }
             println!("\n✓ All requested installations completed successfully!");
         }
 
@@ -445,7 +453,10 @@ fn main() {
                 }
             }
 
-            let _ = engine::launcher::generate_launchers(&root, &manifests);
+            if let Err(e) = engine::launcher::generate_launchers(&root, &manifests) {
+                eprintln!("\n✗ Failed to generate launchers: {}", e);
+                std::process::exit(1);
+            }
             println!("\n✓ Update check and upgrade cycle complete!");
         }
 
@@ -532,13 +543,18 @@ fn main() {
                     }
 
                     let local_v = package::version::detect_local_version(&root, app_def, target_arch);
-                    let is_installed = if local_v.is_some() {
+                    let is_installed = app_def.is_installed_for_arch(&root, target_arch);
+                    let installed_cell = if is_installed {
                         Cell::new("YES").fg(Color::Green)
                     } else {
                         Cell::new("NO").fg(Color::Red)
                     };
 
-                    let version_str = local_v.unwrap_or_else(|| "-".to_string());
+                    let version_str = match (local_v, is_installed) {
+                        (Some(v), _) => v,
+                        (None, true) => "Unversioned".to_string(),
+                        (None, false) => "-".to_string(),
+                    };
 
                     let deps_str = app_def
                         .dependencies
@@ -556,7 +572,7 @@ fn main() {
                         Cell::new(&app_def.target_dir),
                         Cell::new(rel_exe_path),
                         Cell::new(deps_str),
-                        is_installed,
+                        installed_cell,
                     ]);
                 }
             }

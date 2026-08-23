@@ -114,8 +114,10 @@ impl CredentialVault {
                 let _ = fs::create_dir_all(parent);
             }
             let tmp_path = self.path.with_extension(format!("tmp.{}", std::process::id()));
-            if fs::write(&tmp_path, json_str).is_ok() {
-                let _ = fs::rename(&tmp_path, &self.path);
+            if let Err(e) = fs::write(&tmp_path, &json_str) {
+                tracing::error!("Failed to write credentials vault state to '{}': {}", tmp_path.display(), e);
+            } else if let Err(e) = fs::rename(&tmp_path, &self.path) {
+                tracing::error!("Failed to commit credentials vault state to '{}': {}", self.path.display(), e);
             }
         }
     }
