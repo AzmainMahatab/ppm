@@ -179,6 +179,15 @@ unsafe extern "system" fn hook_reg_open_key_ex_w(
                 return ERROR_FILE_NOT_FOUND as i32;
             }
 
+            if get_handle_table().is_synthetic(hkey as HANDLE) {
+                if !phk_result.is_null() && get_registry_store().key_exists(&full_path) {
+                    let vhandle = get_handle_table().register_virtual_handle(full_path);
+                    *phk_result = vhandle as HKEY;
+                    return ERROR_SUCCESS as i32;
+                }
+                return ERROR_FILE_NOT_FOUND as i32;
+            }
+
             let status = real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result);
             if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
                 get_handle_table().register_host_handle(*phk_result as HANDLE, full_path);
@@ -223,6 +232,17 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
 
             get_registry_store().create_key(&full_path);
             tracing::info!("RegCreateKeyExW: Virtual key created -> {}", full_path);
+
+            if get_handle_table().is_synthetic(hkey as HANDLE) {
+                if !phk_result.is_null() {
+                    let vhandle = get_handle_table().register_virtual_handle(full_path);
+                    *phk_result = vhandle as HKEY;
+                    if !lpdw_disposition.is_null() {
+                        *lpdw_disposition = 1;
+                    }
+                }
+                return ERROR_SUCCESS as i32;
+            }
 
             let status = real_fn(
                 hkey,

@@ -125,14 +125,9 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_data);
 
     // Auto-detect WebView2 engine if present under Apps/<run_arch>/WebView2
-    let webview2_exe = root
-        .join("Apps")
-        .join(run_arch.as_str())
-        .join("WebView2")
-        .join("msedge.exe");
-    if webview2_exe.is_file() {
-        let webview2_dir = webview2_exe.parent().unwrap();
-        env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", webview2_dir);
+    let webview2_dir = root.join("Apps").join(run_arch.as_str()).join("WebView2");
+    if webview2_dir.join("msedgewebview2.exe").is_file() || webview2_dir.join("msedge.exe").is_file() {
+        env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &webview2_dir);
     }
 
     env::set_var("PORTABLE_APP", "1");
@@ -185,7 +180,8 @@ fn launch_with_detours(
     use std::ffi::CString;
     use std::mem::zeroed;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, WaitForSingleObject, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+        GetExitCodeProcess, GetStartupInfoW, WaitForSingleObject, INFINITE, PROCESS_INFORMATION,
+        STARTUPINFOW,
     };
 
     let mut cmd_line_str = format!("\"{}\"", exe_path.display());
@@ -209,6 +205,7 @@ fn launch_with_detours(
     unsafe {
         let mut si: STARTUPINFOW = zeroed();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        GetStartupInfoW(&mut si);
         let mut pi: PROCESS_INFORMATION = zeroed();
 
         let success = DetourCreateProcessWithDllExW(
@@ -216,7 +213,7 @@ fn launch_with_detours(
             cmd_line_wide.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            0,
+            1,
             0,
             std::ptr::null_mut(),
             work_dir_wide.as_ptr(),

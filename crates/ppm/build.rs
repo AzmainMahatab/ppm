@@ -42,6 +42,7 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=../../vendor/detours/src");
+    println!("cargo:rerun-if-changed=../redirector/src");
     println!("cargo:rerun-if-changed=../../target/debug/redirector.dll");
     println!("cargo:rerun-if-changed=../../target/release/redirector.dll");
 }

@@ -75,6 +75,34 @@ type FnCreateProcessW = unsafe extern "system" fn(
 
 static mut REAL_CREATE_PROCESS_W: *mut c_void = std::ptr::null_mut();
 
+unsafe fn wide_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let slice = std::slice::from_raw_parts(ptr, len);
+    String::from_utf16_lossy(slice)
+}
+
+unsafe fn is_sandboxed_chromium_child(app_name: *const u16, cmd_line: *const u16) -> bool {
+    let mut check = String::new();
+    if !app_name.is_null() {
+        check.push_str(&wide_to_string(app_name));
+        check.push(' ');
+    }
+    if !cmd_line.is_null() {
+        check.push_str(&wide_to_string(cmd_line));
+    }
+    let lower = check.to_lowercase();
+    lower.contains("--type=")
+        || lower.contains("msedgewebview2.exe")
+        || lower.contains("msedge.exe")
+        || lower.contains("crashpad_handler.exe")
+}
+
 unsafe extern "system" fn hook_create_process_w(
     app_name: *const u16,
     cmd_line: *mut u16,
@@ -93,28 +121,30 @@ unsafe extern "system" fn hook_create_process_w(
             app_name, cmd_line, proc_attr, thread_attr, inherit, flags, env, curr_dir, startup_info, proc_info
         ),
         {
-            let cfg = crate::paths::init_paths();
-            let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
+            if !is_sandboxed_chromium_child(app_name, cmd_line) {
+                let cfg = crate::paths::init_paths();
+                let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
 
-            if dll_path.is_file() {
-                if let Ok(dll_cstr) = CString::new(dll_path.to_string_lossy().as_bytes()) {
-                    let res = DetourCreateProcessWithDllExW(
-                        app_name,
-                        cmd_line,
-                        proc_attr as *mut _,
-                        thread_attr as *mut _,
-                        inherit,
-                        flags,
-                        env as *mut _,
-                        curr_dir,
-                        startup_info as *mut _,
-                        proc_info as *mut _,
-                        dll_cstr.as_ptr(),
-                        std::ptr::null_mut(),
-                    );
-                    if res != 0 {
-                        tracing::info!("CreateProcess [Child Injected]: Injected redirector.dll into new child process");
-                        return TRUE;
+                if dll_path.is_file() {
+                    if let Ok(dll_cstr) = CString::new(dll_path.to_string_lossy().as_bytes()) {
+                        let res = DetourCreateProcessWithDllExW(
+                            app_name,
+                            cmd_line,
+                            proc_attr as *mut _,
+                            thread_attr as *mut _,
+                            inherit,
+                            flags,
+                            env as *mut _,
+                            curr_dir,
+                            startup_info as *mut _,
+                            proc_info as *mut _,
+                            dll_cstr.as_ptr(),
+                            std::ptr::null_mut(),
+                        );
+                        if res != 0 {
+                            tracing::info!("CreateProcess [Child Injected]: Injected redirector.dll into new child process");
+                            return TRUE;
+                        }
                     }
                 }
             }
