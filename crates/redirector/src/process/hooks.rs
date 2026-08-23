@@ -1,7 +1,7 @@
 use crate::detour::attach_detour;
+use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::{c_void, CString};
-use windows_sys::Win32::Foundation::{BOOL, TRUE};
 use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTUPINFOW,
 };

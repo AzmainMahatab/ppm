@@ -23,20 +23,20 @@ cc = "1.2"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.13", features = ["blocking", "json"] }
 indicatif = "0.18"
-comfy-table = "7.2"
+comfy-table = "8.0"
 sevenz-rust = "0.6"
-zip = "2.4"
+zip = "8.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
-schemars = "0.8"
-sha2 = "0.10"
+serde_yml = "0.0.13"
+schemars = "1.0"
+sha2 = "0.11"
 hex = "0.4"
 regex = "1.11"
 tempfile = "3.18"
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_Environment",

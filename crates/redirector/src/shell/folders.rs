@@ -1,8 +1,9 @@
 use crate::detour::attach_detour;
+use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
 use windows_sys::core::{GUID, HRESULT};
-use windows_sys::Win32::Foundation::{BOOL, HANDLE, HWND, S_OK, TRUE};
+use windows_sys::Win32::Foundation::{HANDLE, HWND, S_OK};
 
 #[allow(clippy::upper_case_acronyms)]
 type PWSTR = *mut u16;

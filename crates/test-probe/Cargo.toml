@@ -6,7 +6,7 @@ description = "Lightweight Win32 virtualization validation probe for ppm and red
 license = "MIT"
 
 [dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Registry",
     "Win32_Security_Credentials",

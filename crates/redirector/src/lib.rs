@@ -5,8 +5,12 @@ pub mod process;
 pub mod registry;
 pub mod shell;
 
+pub type BOOL = i32;
+pub const TRUE: BOOL = 1;
+pub const FALSE: BOOL = 0;
+
 use std::sync::atomic::{AtomicIsize, Ordering};
-use windows_sys::Win32::Foundation::{BOOL, HMODULE, TRUE};
+use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 
 pub static HMODULE_SELF: AtomicIsize = AtomicIsize::new(0);

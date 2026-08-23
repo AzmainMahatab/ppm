@@ -67,13 +67,13 @@ fn get_windows_pe_version(exe_path: &Path) -> Option<String> {
             u32,
             u32,
             *mut std::ffi::c_void,
-        ) -> windows_sys::Win32::Foundation::BOOL;
+        ) -> i32;
         type FnVerQueryValueW = unsafe extern "system" fn(
             *const std::ffi::c_void,
             *const u16,
             *mut *mut std::ffi::c_void,
             *mut u32,
-        ) -> windows_sys::Win32::Foundation::BOOL;
+        ) -> i32;
 
         let get_size_proc = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
             version_lib,

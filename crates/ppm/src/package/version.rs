@@ -65,7 +65,7 @@ pub fn check_remote_version(
                 .text()
                 .map_err(|e| format!("Failed to read manifest text: {}", e))?;
 
-            let yaml: serde_yaml::Value = serde_yaml::from_str(&text)
+            let yaml: serde_yml::Value = serde_yml::from_str(&text)
                 .map_err(|e| format!("Failed to parse YAML manifest: {}", e))?;
 
             let key_name = version_key.as_deref().unwrap_or("version");

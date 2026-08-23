@@ -1,8 +1,8 @@
 use crate::credentials::vault::get_vault;
 use crate::detour::attach_detour;
+use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
-use windows_sys::Win32::Foundation::{BOOL, TRUE};
 use windows_sys::Win32::Security::Credentials::CREDENTIALW;
 
 #[allow(clippy::upper_case_acronyms)]
