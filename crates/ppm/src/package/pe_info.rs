@@ -168,3 +168,20 @@ fn get_windows_pe_version(exe_path: &Path) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn test_extract_pe_version_from_system_binary() {
+        let kernel32_path = Path::new("C:\\Windows\\System32\\kernel32.dll");
+        if kernel32_path.is_file() {
+            let version = get_pe_product_version(kernel32_path);
+            assert!(version.is_some(), "Should extract version from kernel32.dll");
+            let ver_str = version.unwrap();
+            assert!(ver_str.starts_with("10.0") || ver_str.starts_with("6."), "Expected Windows version format, got: {}", ver_str);
+        }
+    }
+}

@@ -32,7 +32,7 @@ pub unsafe extern "system" fn DllMain(
             shell::init_hooks();
         }
         DLL_PROCESS_DETACH => {
-            tracing::info!("redirector.dll detached from process (PID: {})", std::process::id());
+            // Note: Keep DllMain clean on process detach to avoid TLS teardown issues
         }
         _ => {}
     }

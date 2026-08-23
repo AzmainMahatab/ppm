@@ -199,3 +199,45 @@ impl AppManifests {
             .map_err(|e| format!("Failed to write manifest file at '{}': {}", path.display(), e))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_manifests_json_roundtrip() {
+        let manifest_json = r#"{
+            "$schema": "./apps.schema.json",
+            "apps": {
+                "demo-app": {
+                    "name": "Demo Application",
+                    "target_dir": "DemoApp",
+                    "executable": "demo.exe",
+                    "version_check": {
+                        "type": "github_release",
+                        "repo": "owner/repo"
+                    },
+                    "package": {
+                        "type": "zip"
+                    },
+                    "description": "A demo application for testing"
+                }
+            }
+        }"#;
+
+        let parsed: AppManifests = serde_json::from_str(manifest_json).expect("Should parse valid manifest JSON");
+        assert_eq!(parsed.schema, Some("./apps.schema.json".to_string()));
+        assert!(parsed.apps.contains_key("demo-app"));
+
+        let demo = &parsed.apps["demo-app"];
+        assert_eq!(demo.name, "Demo Application");
+        assert_eq!(demo.target_dir, "DemoApp");
+        let exe = demo.executable_for_arch(Path::new("C:\\Root"), crate::core::arch::CpuArch::X64);
+        assert_eq!(exe, PathBuf::from("C:\\Root\\Apps\\x64\\DemoApp\\demo.exe"));
+
+        // Round-trip test
+        let serialized = serde_json::to_string_pretty(&parsed).expect("Should serialize back to JSON");
+        let reloaded: AppManifests = serde_json::from_str(&serialized).expect("Should reload serialized JSON");
+        assert_eq!(reloaded.schema, parsed.schema);
+    }
+}

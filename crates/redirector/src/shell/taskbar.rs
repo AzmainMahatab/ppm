@@ -12,17 +12,17 @@ static mut REAL_SET_APP_USER_MODEL_ID: *mut c_void = std::ptr::null_mut();
 
 unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRESULT {
     let real_fn: FnSetCurrentProcessExplicitAppUserModelID = std::mem::transmute(REAL_SET_APP_USER_MODEL_ID);
-    if IN_APP_ID_HOOK.with(|h| h.get()) {
+    if IN_APP_ID_HOOK.try_with(|h| h.get()).unwrap_or(false) {
         return real_fn(app_id);
     }
 
-    IN_APP_ID_HOOK.with(|h| h.set(true));
+    let _ = IN_APP_ID_HOOK.try_with(|h| h.set(true));
 
     // Force canonical portable application ID
     let portable_id = windows_sys::core::w!("Google.Antigravity.Portable");
     let res = real_fn(portable_id);
 
-    IN_APP_ID_HOOK.with(|h| h.set(false));
+    let _ = IN_APP_ID_HOOK.try_with(|h| h.set(false));
     res
 }
 

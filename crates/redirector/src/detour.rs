@@ -16,6 +16,12 @@ pub unsafe fn attach_detour(target_ptr: *mut *mut c_void, detour_fn: *mut c_void
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     let status = DetourAttach(target_ptr, detour_fn);
+    if status != 0 {
+        tracing::error!("DetourAttach failed with code {}", status);
+    }
     let commit_status = DetourTransactionCommit();
+    if commit_status != 0 {
+        tracing::error!("DetourTransactionCommit failed with code {}", commit_status);
+    }
     status == 0 && commit_status == 0
 }

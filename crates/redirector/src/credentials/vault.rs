@@ -29,8 +29,12 @@ static VAULT: OnceLock<CredentialVault> = OnceLock::new();
 pub fn get_vault() -> &'static CredentialVault {
     VAULT.get_or_init(|| {
         let cfg = crate::paths::init_paths();
-        let path = cfg.credentials_json.clone();
+        CredentialVault::new(cfg.credentials_json.clone())
+    })
+}
 
+impl CredentialVault {
+    pub fn new(path: PathBuf) -> Self {
         let data = if path.is_file() {
             if let Ok(content) = fs::read_to_string(&path) {
                 serde_json::from_str(&content).unwrap_or_default()
@@ -45,10 +49,8 @@ pub fn get_vault() -> &'static CredentialVault {
             path,
             data: RwLock::new(data),
         }
-    })
-}
+    }
 
-impl CredentialVault {
     fn normalize_target(target: &str) -> String {
         target.to_lowercase()
     }
@@ -113,5 +115,43 @@ impl CredentialVault {
             }
             let _ = fs::write(&self.path, json_str);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_credential_vault_crud() {
+        let temp_dir = std::env::temp_dir().join(format!("ppm_test_vault_{}", std::process::id()));
+        let vault_file = temp_dir.join("credentials.json");
+        let vault = CredentialVault::new(vault_file.clone());
+
+        // 1. Insert credential
+        let secret = b"super_secret_token";
+        vault.set(
+            "git:https://github.com".to_string(),
+            1,
+            "john_doe".to_string(),
+            secret,
+            1,
+        );
+
+        // 2. Query credential
+        let cred = vault.get("git:https://github.com");
+        assert!(cred.is_some());
+        let cred = cred.unwrap();
+        assert_eq!(cred.user_name, "john_doe");
+        let decoded = hex::decode(&cred.credential_blob_hex).unwrap();
+        assert_eq!(decoded, secret);
+
+        // 3. Delete credential
+        assert!(vault.delete("git:https://github.com"));
+        assert!(vault.get("git:https://github.com").is_none());
+
+        // Clean up
+        let _ = fs::remove_file(&vault_file);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

@@ -35,8 +35,12 @@ static REGISTRY_STORE: OnceLock<VirtualRegistry> = OnceLock::new();
 pub fn get_registry_store() -> &'static VirtualRegistry {
     REGISTRY_STORE.get_or_init(|| {
         let cfg = crate::paths::init_paths();
-        let path = cfg.registry_json.clone();
+        VirtualRegistry::new(cfg.registry_json.clone())
+    })
+}
 
+impl VirtualRegistry {
+    pub fn new(path: PathBuf) -> Self {
         let data = if path.is_file() {
             if let Ok(content) = fs::read_to_string(&path) {
                 serde_json::from_str(&content).unwrap_or_default()
@@ -51,10 +55,8 @@ pub fn get_registry_store() -> &'static VirtualRegistry {
             path,
             data: RwLock::new(data),
         }
-    })
-}
+    }
 
-impl VirtualRegistry {
     fn normalize_key(key: &str) -> String {
         key.trim_matches('\\').to_uppercase()
     }
@@ -139,6 +141,16 @@ impl VirtualRegistry {
         self.persist();
     }
 
+    pub fn key_exists(&self, key_path: &str) -> bool {
+        let norm_key = Self::normalize_key(key_path);
+        let data = self.data.read();
+        if let Some(node) = data.keys.get(&norm_key) {
+            !node.is_tombstone
+        } else {
+            false
+        }
+    }
+
     pub fn delete_key(&self, key_path: &str) {
         let norm_key = Self::normalize_key(key_path);
 
@@ -204,5 +216,41 @@ impl VirtualRegistry {
             }
             let _ = fs::write(&self.path, json_str);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_registry_store_set_get_value() {
+        let temp_dir = std::env::temp_dir().join(format!("ppm_test_reg_{}", std::process::id()));
+        let reg_file = temp_dir.join("registry.json");
+        let store = VirtualRegistry::new(reg_file.clone());
+
+        // Set value
+        let val_bytes = b"HelloVirtualWorld\0";
+        store.set_value("HKCU\\Software\\MyApp", "Greeting", 1, val_bytes);
+
+        // Get value
+        let res = store.get_value("HKCU\\Software\\MyApp", "Greeting");
+        assert!(res.is_some());
+        let (val_type, bytes) = res.unwrap().expect("Value should exist and not be tombstoned");
+        assert_eq!(val_type, 1);
+        assert_eq!(bytes, val_bytes);
+
+        // Delete value
+        store.delete_value("HKCU\\Software\\MyApp", "Greeting");
+        let res_deleted = store.get_value("HKCU\\Software\\MyApp", "Greeting");
+        assert_eq!(res_deleted, Some(Err(()))); // Tombstoned / masked
+
+        // Tombstone entire key
+        store.delete_key("HKCU\\Software\\MyApp");
+        assert!(store.is_key_tombstoned("HKCU\\Software\\MyApp"));
+
+        // Clean up
+        let _ = fs::remove_file(&reg_file);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

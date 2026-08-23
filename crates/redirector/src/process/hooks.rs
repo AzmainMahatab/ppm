@@ -13,15 +13,31 @@ thread_local! {
     static IN_PROC_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
+struct ProcHookGuard;
+
+impl ProcHookGuard {
+    fn enter() -> Option<Self> {
+        if IN_PROC_HOOK.try_with(|h| h.get()).unwrap_or(false) {
+            return None;
+        }
+        let _ = IN_PROC_HOOK.try_with(|h| h.set(true));
+        Some(ProcHookGuard)
+    }
+}
+
+impl Drop for ProcHookGuard {
+    fn drop(&mut self) {
+        let _ = IN_PROC_HOOK.try_with(|h| h.set(false));
+    }
+}
+
 macro_rules! guard_proc_hook {
     ($fallback:expr, $body:expr) => {{
-        if IN_PROC_HOOK.with(|h| h.get()) {
-            return $fallback;
-        }
-        IN_PROC_HOOK.with(|h| h.set(true));
-        let res = $body;
-        IN_PROC_HOOK.with(|h| h.set(false));
-        res
+        let _guard = match ProcHookGuard::enter() {
+            Some(g) => g,
+            None => return $fallback,
+        };
+        $body
     }};
 }
 

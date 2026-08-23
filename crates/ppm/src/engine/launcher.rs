@@ -63,3 +63,26 @@ pub fn generate_single_launcher(root: &Path, app_id: &str) -> Result<(), String>
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_single_launcher_content() {
+        let temp_dir = std::env::temp_dir().join(format!("ppm_test_launch_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        generate_single_launcher(&temp_dir, "myapp").expect("Should generate launcher");
+
+        let bat_path = temp_dir.join("myapp.bat");
+        assert!(bat_path.is_file(), "myapp.bat should be created");
+
+        let content = fs::read_to_string(&bat_path).unwrap();
+        assert!(content.contains("start \"\" \"%PPM_EXE%\" run myapp %*"));
+        assert!(content.contains("set \"ROOT_DIR=%~dp0\""));
+
+        let _ = fs::remove_file(&bat_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}

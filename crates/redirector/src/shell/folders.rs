@@ -10,15 +10,31 @@ thread_local! {
     static IN_SHELL_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
+struct ShellHookGuard;
+
+impl ShellHookGuard {
+    fn enter() -> Option<Self> {
+        if IN_SHELL_HOOK.try_with(|h| h.get()).unwrap_or(false) {
+            return None;
+        }
+        let _ = IN_SHELL_HOOK.try_with(|h| h.set(true));
+        Some(ShellHookGuard)
+    }
+}
+
+impl Drop for ShellHookGuard {
+    fn drop(&mut self) {
+        let _ = IN_SHELL_HOOK.try_with(|h| h.set(false));
+    }
+}
+
 macro_rules! guard_shell_hook {
     ($fallback:expr, $body:expr) => {{
-        if IN_SHELL_HOOK.with(|h| h.get()) {
-            return $fallback;
-        }
-        IN_SHELL_HOOK.with(|h| h.set(true));
-        let res = $body;
-        IN_SHELL_HOOK.with(|h| h.set(false));
-        res
+        let _guard = match ShellHookGuard::enter() {
+            Some(g) => g,
+            None => return $fallback,
+        };
+        $body
     }};
 }
 

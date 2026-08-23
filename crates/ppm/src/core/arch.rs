@@ -91,3 +91,29 @@ fn detect_windows_arch() -> CpuArch {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_arch_string_representation() {
+        assert_eq!(CpuArch::X64.as_str(), "x64");
+        assert_eq!(CpuArch::Arm64.as_str(), "arm64");
+        assert_eq!(format!("{}", CpuArch::X64), "x64");
+        assert_eq!(format!("{}", CpuArch::Arm64), "arm64");
+    }
+
+    #[test]
+    fn test_arch_target_resolution() {
+        assert_eq!(ArchTarget::X64.resolve(), vec![CpuArch::X64]);
+        assert_eq!(ArchTarget::Arm64.resolve(), vec![CpuArch::Arm64]);
+        assert_eq!(ArchTarget::All.resolve(), vec![CpuArch::X64, CpuArch::Arm64]);
+    }
+
+    #[test]
+    fn test_current_arch_detection() {
+        let current = CpuArch::current();
+        assert!(current == CpuArch::X64 || current == CpuArch::Arm64);
+    }
+}

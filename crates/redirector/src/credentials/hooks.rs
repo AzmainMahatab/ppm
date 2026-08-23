@@ -12,15 +12,31 @@ thread_local! {
     static IN_CRED_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
+struct CredHookGuard;
+
+impl CredHookGuard {
+    fn enter() -> Option<Self> {
+        if IN_CRED_HOOK.try_with(|h| h.get()).unwrap_or(false) {
+            return None;
+        }
+        let _ = IN_CRED_HOOK.try_with(|h| h.set(true));
+        Some(CredHookGuard)
+    }
+}
+
+impl Drop for CredHookGuard {
+    fn drop(&mut self) {
+        let _ = IN_CRED_HOOK.try_with(|h| h.set(false));
+    }
+}
+
 macro_rules! guard_cred_hook {
     ($fallback:expr, $body:expr) => {{
-        if IN_CRED_HOOK.with(|h| h.get()) {
-            return $fallback;
-        }
-        IN_CRED_HOOK.with(|h| h.set(true));
-        let res = $body;
-        IN_CRED_HOOK.with(|h| h.set(false));
-        res
+        let _guard = match CredHookGuard::enter() {
+            Some(g) => g,
+            None => return $fallback,
+        };
+        $body
     }};
 }
 

@@ -51,8 +51,15 @@ pub struct OBJECT_ATTRIBUTES {
 }
 
 // Key Value Information Classes
+pub const KEY_VALUE_BASIC_INFORMATION_CLASS: u32 = 0;
+pub const KEY_VALUE_FULL_INFORMATION_CLASS: u32 = 1;
+pub const KEY_VALUE_PARTIAL_INFORMATION_CLASS: u32 = 2;
+
+#[allow(non_upper_case_globals)]
 pub const KeyValueBasicInformation: u32 = 0;
+#[allow(non_upper_case_globals)]
 pub const KeyValueFullInformation: u32 = 1;
+#[allow(non_upper_case_globals)]
 pub const KeyValuePartialInformation: u32 = 2;
 
 #[repr(C)]
