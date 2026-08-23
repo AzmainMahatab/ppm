@@ -1,0 +1,3 @@
+LIBRARY redirector
+EXPORTS
+    DetourFinishHelperProcess @1

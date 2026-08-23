@@ -1,0 +1,60 @@
+{
+  "$schema": "./apps.schema.json",
+  "apps": {
+    "antigravity": {
+      "name": "Google Antigravity IDE",
+      "description": "Advanced Agentic Coding IDE",
+      "target_dir": "Apps/Antigravity",
+      "executable": "Antigravity.exe",
+      "default_args": [
+        "--user-data-dir=Home/AppData/Roaming/Antigravity"
+      ],
+      "version_check": {
+        "type": "electron_manifest",
+        "url": "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-x64-win.yml",
+        "version_key": "version",
+        "url_template": "https://storage.googleapis.com/antigravity-public/antigravity-hub/{version}-6512087774658560/windows-x64/Antigravity-x64.exe"
+      },
+      "package": {
+        "type": "nsis_7z"
+      },
+      "post_install": {
+        "remove_files": [
+          "resources/app-update.yml"
+        ]
+      }
+    },
+    "antigravity-manager": {
+      "name": "Antigravity Tools Manager",
+      "description": "Account & Workspace Manager for Antigravity",
+      "target_dir": "Apps/AntigravityManager",
+      "executable": "Antigravity Tools.exe",
+      "dependencies": [
+        "webview2"
+      ],
+      "version_check": {
+        "type": "github_release",
+        "repo": "lbjlaq/Antigravity-Manager",
+        "asset_pattern": ".*_x64-setup\\.exe"
+      },
+      "package": {
+        "type": "nsis_7z"
+      }
+    },
+    "webview2": {
+      "name": "Microsoft Edge Enterprise Runtime",
+      "description": "Embedded WebView2 browser engine for host-independent GUI execution",
+      "target_dir": "Apps/WebView2",
+      "executable": "msedge.exe",
+      "version_check": {
+        "type": "json_api",
+        "url": "https://edgeupdates.microsoft.com/api/products?view=enterprise",
+        "version_key": "/2/Releases/2/ProductVersion",
+        "url_key": "/2/Releases/2/Artifacts/0/Location"
+      },
+      "package": {
+        "type": "msi"
+      }
+    }
+  }
+}

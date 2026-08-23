@@ -1,0 +1,379 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AppManifests",
+  "type": "object",
+  "required": [
+    "apps"
+  ],
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "apps": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/AppDefinition"
+      }
+    }
+  },
+  "definitions": {
+    "AppDefinition": {
+      "type": "object",
+      "required": [
+        "executable",
+        "name",
+        "package",
+        "target_dir",
+        "version_check"
+      ],
+      "properties": {
+        "default_args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "dependencies": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "executable": {
+          "type": "string"
+        },
+        "homepage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "package": {
+          "$ref": "#/definitions/PackageConfig"
+        },
+        "post_install": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PostInstallConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_dir": {
+          "type": "string"
+        },
+        "version_check": {
+          "$ref": "#/definitions/VersionCheckConfig"
+        }
+      }
+    },
+    "PackageConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "nsis_7z"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "zip"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tar"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "7z"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "cab"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "extract_subpath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "msi"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "binary"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "PostInstallConfig": {
+      "type": "object",
+      "properties": {
+        "remove_dirs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "remove_files": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "VersionCheckConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "electron_manifest"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "url_template": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "repo",
+            "type"
+          ],
+          "properties": {
+            "asset_pattern": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "repo": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "github_release"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url",
+            "version_key"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "json_api"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "url_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url_template": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version_key": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "regex",
+            "type",
+            "url",
+            "url_template"
+          ],
+          "properties": {
+            "regex": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "regex_url"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "url_template": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
