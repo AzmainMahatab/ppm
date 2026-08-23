@@ -1,4 +1,4 @@
-use crate::arch::CpuArch;
+use crate::core::arch::CpuArch;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

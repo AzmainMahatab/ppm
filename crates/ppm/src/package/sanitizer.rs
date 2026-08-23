@@ -1,4 +1,4 @@
-use crate::config::PostInstallConfig;
+use crate::core::config::PostInstallConfig;
 use std::fs;
 use std::path::Path;
 

@@ -6,14 +6,14 @@ This document provides a comprehensive technical overview of the **`ppm` (Portab
 
 ## 1. Executive Summary
 
-`ppm` is a 100% native Rust, zero-dependency master runner and multi-architecture package manager distributed as a **pure single executable (`ppm.exe`)**. It eliminates host file-system pollution, host registry tampering, and process interference by implementing **canonical Windows NT user profile virtualization** combined with **inline API detours** and **declarative multi-architecture package management**.
+`ppm` is a 100% native Rust, zero-dependency master runner and multi-architecture package manager distributed as a **pure single executable (`ppm.exe`)**. It eliminates host file-system pollution, host registry tampering, and process interference by implementing **canonical Windows NT user profile virtualization** combined with **lowest-boundary system call detours** and **declarative multi-architecture package management**.
 
 ```mermaid
 graph TD
     subgraph Single Binary Distribution Product (USB Flash Drive)
         PPM[ppm.exe - Master Binary at Root]
-        PPMDir[".ppm/ (redirector.dll, apps.json, logs/)"]
-        HomeDir["Home/ (Shared %USERPROFILE% & %HOME% for all architectures)"]
+        PPMDir[".ppm/ (apps.json, system/, lib/, cache/, logs/)"]
+        HomeDir["Home/ (Pure %USERPROFILE% & %HOME% - Zero .ppm files)"]
         BatLaunchers["Clean Root .bat Shortcuts (antigravity.bat, antigravity-manager.bat)"]
 
         subgraph Apps/ Top-Level Architecture
@@ -25,141 +25,161 @@ graph TD
     PPM -->|ppm init| PPMDir & X64Dir & ARM64Dir & HomeDir & BatLaunchers
     PPM -->|ppm install <app>| DepResolver[Resolves Dependencies via DAG -> Installs to Apps/arch/target_dir]
     PPM -->|ppm run <app>| HostDetect[Detects Host CPU via GetNativeSystemInfo]
-    HostDetect -->|Routes to Apps/host_arch/target_dir| Virtualize[Injects .ppm/redirector.dll & Spawns Target App]
+    HostDetect -->|Routes to Apps/host_arch/target_dir| Virtualize[Injects .ppm/lib/redirector.dll & Spawns Target App]
     PPM -->|ppm link| BatLaunchers
 ```
 
 ---
 
-## 2. The Multi-Architecture Directory Model
-
-Every path is calculated dynamically relative to the drive root where `ppm.exe` resides:
+## 2. The Directory Model
 
 ```
 <USB_ROOT>/
-├── ppm.exe                             # Master CLI & Virtualized Runner (Single Binary)
-├── antigravity.bat                     # 1-Click IDE Shortcut (@start "" "%~dp0ppm.exe" run antigravity)
-├── antigravity-manager.bat             # 1-Click Manager Shortcut (@start "" "%~dp0ppm.exe" run antigravity-manager)
+├── ppm.exe                             # Master CLI & Runner (Single Standalone Binary ~4.7 MB)
+├── antigravity.bat                     # 1-Click Launchers (@start "" "%~dp0ppm.exe" run antigravity)
+├── antigravity-manager.bat
 │
-├── .ppm/                               # [INTERNAL TOOL ASSETS, CONFIG & LOGS]
-│   ├── redirector.dll                  # Native API Detours & Badging Hook
-│   ├── apps.json                       # Declarative Application Manifest
-│   ├── apps.schema.json                # Auto-Generated JSON Schema (via schemars)
-│   ├── state.json                      # Local installation state ledger
-│   └── logs/                           # [PPM TOOL DIAGNOSTIC LOGS HUB]
+├── .ppm/                               # [PPM INTERNAL MACHINERY & ENGINE DATA]
+│   ├── apps.json                       # Declarative application manifest (Root config for easy access)
+│   ├── apps.schema.json                # Auto-Generated JSON Schema
+│   │
+│   ├── system/                         # [VIRTUAL SYSTEM OVERLAYS]
+│   │   ├── registry.json               # Virtual Copy-on-Write Registry Hive (Zero Host Writes)
+│   │   └── credentials.json            # Virtual Windows Credential Vault (Encrypted)
+│   │
+│   ├── lib/                            # [INTERNAL ENGINE BINARIES]
+│   │   └── redirector.dll              # Injected Win32 Virtualization & Detours Engine
+│   │
+│   ├── cache/                          # [TEMPORARY DOWNLOAD ARTIFACTS]
+│   │   └── (Auto-cleaned temporary download archives during install/update)
+│   │
+│   └── logs/                           # [DIAGNOSTIC LOG HUB]
 │       ├── ppm.log                     # Package Manager & Downloader Log
 │       └── redirector.log              # Real-Time Win32 API Interception Trace
 │
-├── Apps/                               # [ALL MANAGED PACKAGES & BINARIES]
-│   ├── x64/                            # [INTEL / AMD 64-BIT ARCHITECTURE]
+├── Apps/                               # [TOP-LEVEL MULTI-ARCHITECTURE APPLICATION BINARIES]
+│   ├── x64/                            # [INTEL / AMD 64-BIT BINARIES]
 │   │   ├── Antigravity/                # Google Antigravity IDE (Antigravity.exe)
 │   │   ├── AntigravityManager/         # Antigravity Tools Manager (Antigravity Tools.exe)
-│   │   └── WebView2/                   # Microsoft Edge WebView2 Fixed Version (msedge.exe)
-│   └── arm64/                          # [QUALCOMM SNAPDRAGON / SURFACE ARM64 ARCHITECTURE]
+│   │   └── WebView2/                   # Microsoft Edge WebView2 (msedge.exe)
+│   └── arm64/                          # [QUALCOMM SNAPDRAGON / SURFACE ARM64 BINARIES]
 │       ├── Antigravity/                # Native ARM64 Antigravity IDE
-│       └── WebView2/                   # Native ARM64 WebView2 Browser Engine
+│       └── WebView2/                   # Native ARM64 WebView2
 │
-└── Home/                               # [CANONICAL PORTABLE USER PROFILE: %USERPROFILE% & %HOME%]
+└── Home/                               # [100% PURE USER PROFILE - ZERO PPM INTERNAL FILES]
     ├── AppData/
-    │   ├── Local/                      # %LOCALAPPDATA% (Caches, local app data)
-    │   ├── Roaming/                    # %APPDATA% (Roaming configs)
-    │   │   └── credentials.json        # Virtualized Windows Credential Vault
-    │   └── WebViewData/                # %WEBVIEW2_USER_DATA_FOLDER% (IndexedDB, cookies)
-    ├── Documents/                      # Standard user documents folder
-    └── ...                             # User dotfiles (.gitconfig, .ssh), projects, and code workspaces
+    │   ├── Local/                      # %LOCALAPPDATA% (App caches, GPU shaders, LevelDB)
+    │   ├── Roaming/                    # %APPDATA% (Antigravity user settings, extensions)
+    │   └── WebViewData/                # %WEBVIEW2_USER_DATA_FOLDER%
+    ├── Documents/                      # User documents folder
+    └── ...                             # User code workspaces, git repos, dotfiles (.gitconfig, .ssh)
 ```
 
 ---
 
-## 3. Host Architecture Auto-Detection & Routing
+## 3. Lowest-Boundary User-Mode Virtualization Matrix (`redirector.dll`)
 
-When `ppm.exe run <app>` or a `.bat` launcher executes:
-1. `ppm.exe` invokes Win32 `GetNativeSystemInfo()` to inspect `SYSTEM_INFO.wProcessorArchitecture`.
-2. It detects if the physical machine is `PROCESSOR_ARCHITECTURE_ARM64 (12)` or `PROCESSOR_ARCHITECTURE_AMD64 (9)`, even when running under emulation.
-3. Automatically routes the spawn target to `Apps/<host_arch>/<target_dir>/<executable>`.
-4. Sets `%WEBVIEW2_BROWSER_EXECUTABLE_FOLDER%` pointing to `Apps/<host_arch>/WebView2` if present.
+```
+┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 THE LOWEST-LEVEL BOUNDARY MAP                                     │
+├──────────────────────┬───────────────────────────────┬────────────────────────────────────────────┤
+│ Subsystem            │ Lowest User-Mode Boundary     │ Why This is the Absolute Lowest Point      │
+├──────────────────────┼───────────────────────────────┼────────────────────────────────────────────┤
+│ 1. Registry (CoW)    │ ntdll.dll (Nt*Key)            │ The single user-mode chokepoint to kernel  │
+│ 2. Process Spawning  │ kernelbase.dll (CreateProcInternalW) │ Catches CreateProcessA/W/AsUser/Tokens     │
+│ 3. Credentials       │ advapi32.dll / vaultcli.dll   │ Chokepoint before leaving process via ALPC │
+│ 4. Shell Paths       │ shell32.dll + ntdll.dll       │ COM Shell cache + NT Registry User Shell   │
+│ 5. Taskbar Identity  │ shell32.dll                   │ User-mode Application Frame Host boundary  │
+└──────────────────────┴───────────────────────────────┴────────────────────────────────────────────┘
+```
 
----
-
-## 4. Win32 API Interception & Virtualization Matrix (`redirector.dll`)
-
-| Target Win32 API | Interception Strategy | Portable Redirection Target |
+| Target API | Interception Layer | CoW Virtualization Role |
 | :--- | :--- | :--- |
-| `SHGetKnownFolderPath` | Inline Detour Hook (`retour`) | Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` to `<root>\Home\...` |
-| `SHGetFolderPathW` | Inline Detour Hook (`retour`) | Redirects `CSIDL_PROFILE`, `CSIDL_LOCAL_APPDATA`, `CSIDL_APPDATA`, `CSIDL_PERSONAL` to `<root>\Home\...` |
-| `GetUserProfileDirectoryW` | Inline Detour Hook (`retour`) | Writes `<root>\Home` into the destination buffer |
-| `CredReadW` | Win32 Hook | Reads credentials from `<root>\Home\AppData\Roaming\credentials.json` |
-| `CredWriteW` | Win32 Hook | Encrypts & persists credentials into `<root>\Home\AppData\Roaming\credentials.json` |
-| `CredDeleteW` | Win32 Hook | Deletes key from `<root>\Home\AppData\Roaming\credentials.json` |
-| `SetCurrentProcessExplicitAppUserModelID` | Win32 Hook | Forces AppUserModelID to `Google.Antigravity.Portable` |
+| **`NtOpenKey` / `NtOpenKeyEx`** | `ntdll.dll` | Normalizes NT object paths (`\Registry\User\...`, `\Registry\Machine\...`); registers handle in `VirtualHandleTable`. |
+| **`NtCreateKey`** | `ntdll.dll` | Creates key in portable overlay; registers virtual handle. |
+| **`NtQueryValueKey`** | `ntdll.dll` | Checks virtual overlay and tombstones; falls back to host OS for pass-through reads. |
+| **`NtSetValueKey`** | `ntdll.dll` | **The CoW Engine**: Stores typed value in memory, persists to `.ppm/system/registry.json`, returns `STATUS_SUCCESS` with **zero host registry write**. |
+| **`NtDeleteValueKey` / `NtDeleteKey`** | `ntdll.dll` | Records tombstones in virtual store; masks host key/value. |
+| **`NtClose`** | `ntdll.dll` | Cleans up synthetic handles from `VirtualHandleTable`. |
+| **`CreateProcessW` / `CreateProcessInternalW`** | `kernelbase.dll` | Injects `redirector.dll` into 100% of child processes via Microsoft Detours. |
+| **`CredReadW`, `CredWriteW`, `CredDeleteW`** | `advapi32.dll` | In-process ALPC credential interception; saves to `.ppm/system/credentials.json`. |
+| **`SHGetKnownFolderPath`** | `shell32.dll` | Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` to `<root>\Home\...`. |
+| **`GetUserProfileDirectoryW`** | `userenv.dll` | Writes `<root>\Home` into the destination buffer. |
+| **`SetCurrentProcessExplicitAppUserModelID`** | `shell32.dll` | Forces AppUserModelID to `Google.Antigravity.Portable`. |
 
 ---
 
-## 5. Declarative Multi-Arch Manifest (`apps.json`)
+## 4. Dynamic Presence-Based Version Engine
 
-```json
-{
-  "$schema": "./apps.schema.json",
-  "apps": {
-    "antigravity": {
-      "name": "Google Antigravity IDE",
-      "description": "Next-generation agentic AI development environment",
-      "homepage": "https://antigravity.google.com",
-      "target_dir": "Antigravity",
-      "executable": "Antigravity.exe",
-      "version_check": {
-        "type": "electron_manifest",
-        "url": "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-{arch}-win.yml",
-        "url_template": "https://storage.googleapis.com/antigravity-public/antigravity-hub/{version}-6512087774658560/windows-{arch}/Antigravity-{arch}.exe"
-      },
-      "package": {
-        "type": "nsis_7z"
-      },
-      "post_install": {
-        "remove_files": [
-          "resources/app-update.yml"
-        ]
-      }
-    },
-    "antigravity-manager": {
-      "name": "Antigravity Tools Manager",
-      "description": "Central management console for Antigravity tools and local runtime dependencies",
-      "homepage": "https://github.com/lbjlaq/Antigravity-Manager",
-      "target_dir": "AntigravityManager",
-      "executable": "Antigravity Tools.exe",
-      "supported_arch": [
-        "x64"
-      ],
-      "dependencies": [
-        "webview2"
-      ],
-      "version_check": {
-        "type": "github_release",
-        "repo": "lbjlaq/Antigravity-Manager",
-        "asset_pattern": ".*_{arch}-setup\\.exe"
-      },
-      "package": {
-        "type": "nsis_7z"
-      }
-    },
-    "webview2": {
-      "name": "Microsoft Edge Enterprise Runtime",
-      "description": "Embedded WebView2 browser engine for host-independent GUI execution",
-      "homepage": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
-      "target_dir": "WebView2",
-      "executable": "msedge.exe",
-      "version_check": {
-        "type": "json_api",
-        "url": "https://edgeupdates.microsoft.com/api/products?view=enterprise",
-        "version_key": "/0/Releases[Platform=Windows,Architecture={arch}]/ProductVersion",
-        "url_key": "/0/Releases[Platform=Windows,Architecture={arch}]/Artifacts/0/Location"
-      },
-      "package": {
-        "type": "cab"
-      }
-    }
-  }
-}
+We completely eliminate `state.json`. `ppm` inspects local executables on disk dynamically:
+
+```mermaid
+graph TD
+    Inspect[AppDefinition.executable_for_arch] --> Exists{File exists on disk?}
+    Exists -->|No| NotInstalled[Status: NOT INSTALLED]
+    Exists -->|Yes| Win32PE[Call Win32 GetFileVersionInfoW & VerQueryValueW]
+    Win32PE -->|Found VS_VERSIONINFO| ReadPE[Read ProductVersion directly from PE Header e.g. 2.9.1]
+    Win32PE -->|No PE Header| PkgJson[Check resources/app/package.json for Electron]
+    PkgJson -->|Found| ReadPkg[Read version from package.json]
+    PkgJson -->|Not Found| FoundFallback[Status: INSTALLED]
+```
+
+---
+
+## 5. Domain-Driven Modular Source Tree
+
+### A. `crates/redirector/src/`
+```
+crates/redirector/src/
+├── lib.rs                          # DLL Entrypoint & Hook Lifecycle Orchestration
+├── paths.rs                        # Canonical Path Configurations (Home/, .ppm/logs/, .ppm/system/)
+│
+├── registry/                       # [PILLAR 1: ntdll.dll Copy-on-Write Registry]
+│   ├── mod.rs                      # Registry module export & initialization
+│   ├── nt_types.rs                 # UNICODE_STRING, OBJECT_ATTRIBUTES, KeyInfo, NTSTATUS
+│   ├── store.rs                    # In-Memory Virtual Hive & Atomic JSON Persistence (.ppm/system/registry.json)
+│   ├── handle_table.rs             # Thread-Safe Virtual HKEY Handle Table
+│   └── hooks.rs                    # ntdll.dll System Call Detours (Nt*Key, NtClose)
+│
+├── process/                        # [PILLAR 2: kernelbase.dll Process Spawning]
+│   ├── mod.rs                      # Process module export & initialization
+│   └── hooks.rs                    # CreateProcessInternalW & CreateProcessW Detours
+│
+├── credentials/                    # [PILLAR 3: advapi32.dll Pre-ALPC Credentials]
+│   ├── mod.rs                      # Credentials module export & initialization
+│   ├── vault.rs                    # Encrypted JSON Credential Vault (.ppm/system/credentials.json)
+│   └── hooks.rs                    # CredReadW, CredWriteW, CredDeleteW, CredFree Detours
+│
+└── shell/                          # [PILLAR 4: shell32.dll / userenv.dll Shell & Taskbar]
+    ├── mod.rs                      # Shell module export & initialization
+    ├── folders.rs                  # SHGetKnownFolderPath, GetUserProfileDirectoryW
+    └── taskbar.rs                  # SetCurrentProcessExplicitAppUserModelID & ARGB "P" Icon
+```
+
+### B. `crates/ppm/src/`
+```
+crates/ppm/src/
+├── main.rs                         # CLI Entrypoint & Subcommand Dispatch
+│
+├── core/                           # [CORE DOMAIN]
+│   ├── mod.rs
+│   ├── arch.rs                     # CpuArch, ArchTarget & Win32 CPU Detection (GetNativeSystemInfo)
+│   ├── config.rs                   # AppManifests, AppDefinition, ArchString (serde/schemars)
+│   └── assets.rs                   # Embedded redirector.dll & default apps.json
+│
+├── engine/                         # [ENGINE DOMAIN]
+│   ├── mod.rs
+│   ├── init.rs                     # Scaffolding (.ppm/system, .ppm/lib, .ppm/cache, .ppm/logs, Apps/, Home/)
+│   ├── runner.rs                   # Detours process runner & environment injection
+│   └── launcher.rs                 # Dynamic root .bat launcher generator
+│
+└── package/                        # [PACKAGE DOMAIN]
+    ├── mod.rs
+    ├── pe_info.rs                  # Dynamic Win32 PE version extractor (GetFileVersionInfoW)
+    ├── version.rs                  # Remote version checker & dynamic presence resolver (Zero state.json)
+    ├── downloader.rs               # Streaming HTTP downloader with progress bar
+    ├── extractor.rs                # NSIS 7z, 7z, Zip, Cab, MSI, Tar, Binary unpacker
+    └── sanitizer.rs                # Post-install auto-updater removal & cleanup
 ```
 
 ---
@@ -173,4 +193,4 @@ To compile the entire suite and produce the single-binary release artifact:
 cargo build --release
 ```
 
-**Build Output**: `target/release/ppm.exe` (~4.7 MB). This single binary is the only file required for end-user distribution. It self-provisions `.ppm/`, extracts embedded `redirector.dll`, and scaffolds the entire portable multi-architecture environment upon running `ppm.exe init`.
+**Build Output**: `target/release/ppm.exe` (~4.7 MB). This single binary is the only file required for end-user distribution. It self-provisions `.ppm/`, extracts embedded `redirector.dll`, and scaffolds the entire portable environment upon running `ppm.exe init`.
