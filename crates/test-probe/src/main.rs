@@ -247,6 +247,16 @@ fn main() {
         std::process::exit(0);
     }
 
+    if args.iter().any(|a| a == "--echo-args") {
+        println!("[ARGS_ECHO] {:?}", &args[1..]);
+        std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("[PROBE_HELP] Custom test probe help output");
+        std::process::exit(0);
+    }
+
     println!("=== PPM Virtualization Test Probe ===");
     if let Err(e) = test_registry_cow() {
         eprintln!("[FAIL] {}", e);
