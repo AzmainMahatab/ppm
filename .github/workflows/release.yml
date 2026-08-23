@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version Bump Type (auto inspects conventional commits)"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - "auto"
+          - "patch"
+          - "minor"
+          - "major"
+      draft:
+        description: "Create release as draft"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark release as pre-release"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # STAGE 1: Automated Semantic Version Resolution & Tagging
+  # ─────────────────────────────────────────────────────────────────────────────
+  version:
+    name: Determine Version & Generate Changelog
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve_version.outputs.tag }}
+      changelog: ${{ steps.resolve_version.outputs.changelog }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Dynamic Version & Changelog
+        id: resolve_version
+        uses: mathieudutour/github-tag-action@v6.2
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: ${{ github.event.inputs.bump_type == 'auto' && 'minor' || github.event.inputs.bump_type }}
+          release_branches: main
+          create_annotated_tag: true
+
+      - name: Fallback to Pushed Git Tag
+        if: github.event_name == 'push'
+        run: |
+          echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "changelog=" >> $GITHUB_OUTPUT
+
+      - name: Export Workflow Outputs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "tag=${{ steps.resolve_version.outputs.new_tag }}" >> $GITHUB_OUTPUT
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ steps.resolve_version.outputs.changelog }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # STAGE 2: Multi-Architecture Build Matrix (x64 & ARM64)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: version
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+            msvc_arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+            msvc_arch: amd64_arm64
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup MSVC Cross-Compilation Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Setup Rust Stable Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Compile Release Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Release Archive
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.version.outputs.tag }}"
+          $zipName = "ppm-$tag-windows-${{ matrix.arch }}.zip"
+          $stagingDir = "staging_${{ matrix.arch }}"
+          
+          New-Item -ItemType Directory -Path $stagingDir -Force
+          Copy-Item "target/${{ matrix.target }}/release/ppm.exe" "$stagingDir/ppm.exe"
+          Copy-Item "README.md" "$stagingDir/README.md"
+          Copy-Item "ARCHITECTURE.md" "$stagingDir/ARCHITECTURE.md"
+          
+          Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipName -Force
+          
+          $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ASCII
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppm-artifact-${{ matrix.arch }}
+          path: |
+            ppm-*-windows-${{ matrix.arch }}.zip
+            ppm-*-windows-${{ matrix.arch }}.zip.sha256
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # STAGE 3: Publish GitHub Release & Checksums
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish GitHub Release
+    needs: [version, build]
+    runs-on: windows-latest
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Consolidate SHA256 Checksums
+        shell: pwsh
+        run: |
+          Get-Content release_assets/*.sha256 | Out-File -FilePath release_assets/SHA256SUMS.txt -Encoding ASCII
+          Remove-Item release_assets/*.sha256 -Force
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: "ppm ${{ needs.version.outputs.tag }}"
+          body: ${{ needs.version.outputs.changelog }}
+          generate_release_notes: true
+          draft: ${{ github.event.inputs.draft == 'true' }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          files: |
+            release_assets/ppm-*.zip
+            release_assets/SHA256SUMS.txt
+          token: ${{ secrets.GITHUB_TOKEN }}

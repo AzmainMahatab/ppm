@@ -1,0 +1,26 @@
+changelog:
+  categories:
+    - title: "🚀 Features & Virtualization Subsystems"
+      labels:
+        - "feat"
+        - "feature"
+        - "enhancement"
+    - title: "🐛 Bug Fixes & Isolation Hardening"
+      labels:
+        - "fix"
+        - "bug"
+    - title: "⚡ Performance & Build Optimization"
+      labels:
+        - "perf"
+        - "build"
+        - "ci"
+    - title: "📚 Documentation & Architectural Guides"
+      labels:
+        - "docs"
+        - "documentation"
+    - title: "🧹 Refactoring & Maintenance"
+      labels:
+        - "refactor"
+        - "chore"
+        - "style"
+        - "test"
