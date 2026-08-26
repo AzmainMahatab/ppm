@@ -1,9 +1,10 @@
 [package]
 name = "ppm"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Lightweight user-mode Windows virtualization engine and multi-architecture portable package manager"
-license = "MIT"
 readme = "../../README.md"
 keywords = [
     "portable",
@@ -30,19 +31,25 @@ sevenz-rust = "0.6"
 zip = "8.6"
 cab = "0.6"
 msi = "0.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde.workspace = true
+serde_json.workspace = true
 serde_yml = "0.0.13"
 schemars = "1.0"
 sha2 = "0.11"
-hex = "0.4"
+hex.workspace = true
 regex = "1.11"
 tempfile = "3.18"
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_Environment",
     "Win32_System_SystemInformation",
     "Win32_System_LibraryLoader"
 ] }
-color-eyre = "0.6"
+anyhow = "1"
+# Intention: Build-ordering edge only; the rlib is never linked into the binary.
+# Why: Guarantees redirector.dll is fully compiled before ppm's build script embeds it.
+redirector = { path = "../redirector" }
+
+[lints]
+workspace = true

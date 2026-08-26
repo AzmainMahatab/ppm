@@ -19,7 +19,7 @@ pub static HMODULE_SELF: AtomicIsize = AtomicIsize::new(0);
 ///
 /// # Safety
 /// Must only be invoked by Windows runtime loader in accordance with standard Win32 `DllMain` ABI contracts.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllMain(
     h_inst_dll: HMODULE,
     fdw_reason: u32,

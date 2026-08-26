@@ -87,8 +87,8 @@ pub fn init_logger() {
         let file_appender = tracing_appender::rolling::never(&cfg.logs_dir, "redirector.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
 
         let _ = tracing_subscriber::fmt()
             .with_writer(non_blocking)
@@ -118,7 +118,8 @@ fn resolve_root() -> PathBuf {
 
         unsafe {
             let mut buf = [0u16; 1024];
-            let hmodule = crate::HMODULE_SELF.load(std::sync::atomic::Ordering::SeqCst) as windows_sys::Win32::Foundation::HMODULE;
+            let hmodule = crate::HMODULE_SELF.load(std::sync::atomic::Ordering::SeqCst)
+                as windows_sys::Win32::Foundation::HMODULE;
             let len = GetModuleFileNameW(hmodule, buf.as_mut_ptr(), 1024);
             if len > 0 {
                 let dll_path = String::from_utf16_lossy(&buf[..len as usize]);
@@ -126,16 +127,16 @@ fn resolve_root() -> PathBuf {
                 if let Some(parent) = p.parent() {
                     // If DLL is in .ppm/lib/, walk up 2 levels
                     let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if parent_name == "lib" || parent_name == ".ppm" {
-                        if let Some(ppm_parent) = parent.parent() {
-                            let ppm_name = ppm_parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            if ppm_name == ".ppm" {
-                                if let Some(root) = ppm_parent.parent() {
-                                    return root.to_path_buf();
-                                }
-                            }
-                            return ppm_parent.to_path_buf();
+                    if (parent_name == "lib" || parent_name == ".ppm")
+                        && let Some(ppm_parent) = parent.parent()
+                    {
+                        let ppm_name = ppm_parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if ppm_name == ".ppm"
+                            && let Some(root) = ppm_parent.parent()
+                        {
+                            return root.to_path_buf();
                         }
+                        return ppm_parent.to_path_buf();
                     }
                     return parent.to_path_buf();
                 }

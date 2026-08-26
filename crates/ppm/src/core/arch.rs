@@ -72,9 +72,7 @@ impl ArchTarget {
 #[cfg(windows)]
 fn detect_windows_arch() -> CpuArch {
     use std::mem::zeroed;
-    use windows_sys::Win32::System::SystemInformation::{
-        GetNativeSystemInfo, SYSTEM_INFO,
-    };
+    use windows_sys::Win32::System::SystemInformation::{GetNativeSystemInfo, SYSTEM_INFO};
 
     const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
     const PROCESSOR_ARCHITECTURE_ARM64: u16 = 12;

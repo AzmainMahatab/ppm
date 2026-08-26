@@ -4,7 +4,7 @@
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows_x64%20%7C%20arm64-blue.svg)](https://microsoft.com)
 [![Virtualization: Win32 CoW](https://img.shields.io/badge/Virtualization-Win32%20Registry%20CoW-green.svg)](#)
 [![Isolation: Pre--ALPC Vault](https://img.shields.io/badge/Isolation-Pre--ALPC%20Vault-teal.svg)](#)
-[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
 
 A lightweight, single-binary portable application runner, virtualization engine, and multi-architecture package manager for Windows.
 

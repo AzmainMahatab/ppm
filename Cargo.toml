@@ -6,6 +6,28 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.98"
+
+# Intention: Single-source shared dependency versions so the three crates can never drift.
+# Why: windows-sys feature sets stay per-crate (additive); only the version is centralized.
+[workspace.dependencies]
+windows-sys = { version = "0.61" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = "warn"
+perf = "warn"
+
 [profile.release]
 opt-level = 3
 lto = true

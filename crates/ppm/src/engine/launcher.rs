@@ -1,5 +1,5 @@
 use crate::core::config::AppManifests;
-use color_eyre::eyre::Result;
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 

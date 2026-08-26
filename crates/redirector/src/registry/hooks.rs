@@ -31,7 +31,7 @@ impl Drop for RegHookGuard {
 }
 
 macro_rules! guard_reg_hook {
-    ($fallback:expr, $body:expr) => {{
+    ($fallback:expr_2021, $body:expr_2021) => {{
         let _guard = match RegHookGuard::enter() {
             Some(g) => g,
             None => return $fallback,
@@ -41,21 +41,34 @@ macro_rules! guard_reg_hook {
 }
 
 unsafe fn wide_to_string(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
+    unsafe {
+        if ptr.is_null() {
+            return String::new();
+        }
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        String::from_utf16_lossy(slice)
     }
-    let mut len = 0;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-    let slice = std::slice::from_raw_parts(ptr, len);
-    String::from_utf16_lossy(slice)
 }
 
 // Function pointer type definitions for Win32 Registry APIs
 type FnRegOpenKeyExW = unsafe extern "system" fn(HKEY, *const u16, u32, u32, *mut HKEY) -> i32;
-type FnRegCreateKeyExW = unsafe extern "system" fn(HKEY, *const u16, u32, *mut u16, u32, u32, *const c_void, *mut HKEY, *mut u32) -> i32;
-type FnRegQueryValueExW = unsafe extern "system" fn(HKEY, *const u16, *mut u32, *mut u32, *mut u8, *mut u32) -> i32;
+type FnRegCreateKeyExW = unsafe extern "system" fn(
+    HKEY,
+    *const u16,
+    u32,
+    *mut u16,
+    u32,
+    u32,
+    *const c_void,
+    *mut HKEY,
+    *mut u32,
+) -> i32;
+type FnRegQueryValueExW =
+    unsafe extern "system" fn(HKEY, *const u16, *mut u32, *mut u32, *mut u8, *mut u32) -> i32;
 type FnRegSetValueExW = unsafe extern "system" fn(HKEY, *const u16, u32, u32, *const u8, u32) -> i32;
 type FnRegDeleteValueW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
 type FnRegDeleteKeyW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
@@ -78,10 +91,9 @@ unsafe extern "system" fn hook_reg_open_key_ex_w(
     sam_desired: u32,
     phk_result: *mut HKEY,
 ) -> i32 {
-    let real_fn: FnRegOpenKeyExW = std::mem::transmute(REAL_REG_OPEN_KEY_EX_W);
-    guard_reg_hook!(
-        real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result),
-        {
+    unsafe {
+        let real_fn: FnRegOpenKeyExW = std::mem::transmute(REAL_REG_OPEN_KEY_EX_W);
+        guard_reg_hook!(real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result), {
             let base_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
             let subkey_str = wide_to_string(lp_sub_key);
             let full_path = if !base_path.is_empty() && !subkey_str.is_empty() {
@@ -118,8 +130,8 @@ unsafe extern "system" fn hook_reg_open_key_ex_w(
             }
 
             status
-        }
-    )
+        })
+    }
 }
 
 unsafe extern "system" fn hook_reg_create_key_ex_w(
@@ -133,35 +145,10 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
     phk_result: *mut HKEY,
     lpdw_disposition: *mut u32,
 ) -> i32 {
-    let real_fn: FnRegCreateKeyExW = std::mem::transmute(REAL_REG_CREATE_KEY_EX_W);
-    guard_reg_hook!(
-        real_fn(hkey, lp_sub_key, reserved, lp_class, dw_options, sam_desired, lp_security_attributes, phk_result, lpdw_disposition),
-        {
-            let base_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
-            let subkey_str = wide_to_string(lp_sub_key);
-            let full_path = if !base_path.is_empty() && !subkey_str.is_empty() {
-                format!("{}\\{}", base_path, subkey_str.trim_start_matches('\\'))
-            } else if !subkey_str.is_empty() {
-                subkey_str
-            } else {
-                base_path
-            };
-
-            get_registry_store().create_key(&full_path);
-            tracing::info!("RegCreateKeyExW: Virtual key created -> {}", full_path);
-
-            if get_handle_table().is_synthetic(hkey as HANDLE) {
-                if !phk_result.is_null() {
-                    let vhandle = get_handle_table().register_virtual_handle(full_path);
-                    *phk_result = vhandle as HKEY;
-                    if !lpdw_disposition.is_null() {
-                        *lpdw_disposition = 1;
-                    }
-                }
-                return ERROR_SUCCESS as i32;
-            }
-
-            let status = real_fn(
+    unsafe {
+        let real_fn: FnRegCreateKeyExW = std::mem::transmute(REAL_REG_CREATE_KEY_EX_W);
+        guard_reg_hook!(
+            real_fn(
                 hkey,
                 lp_sub_key,
                 reserved,
@@ -170,26 +157,63 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
                 sam_desired,
                 lp_security_attributes,
                 phk_result,
-                lpdw_disposition,
-            );
+                lpdw_disposition
+            ),
+            {
+                let base_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
+                let subkey_str = wide_to_string(lp_sub_key);
+                let full_path = if !base_path.is_empty() && !subkey_str.is_empty() {
+                    format!("{}\\{}", base_path, subkey_str.trim_start_matches('\\'))
+                } else if !subkey_str.is_empty() {
+                    subkey_str
+                } else {
+                    base_path
+                };
 
-            if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
-                get_handle_table().register_host_handle(*phk_result as HANDLE, full_path);
-                return status;
-            }
+                get_registry_store().create_key(&full_path);
+                tracing::info!("RegCreateKeyExW: Virtual key created -> {}", full_path);
 
-            if !phk_result.is_null() {
-                let vhandle = get_handle_table().register_virtual_handle(full_path);
-                *phk_result = vhandle as HKEY;
-                if !lpdw_disposition.is_null() {
-                    *lpdw_disposition = 1;
+                if get_handle_table().is_synthetic(hkey as HANDLE) {
+                    if !phk_result.is_null() {
+                        let vhandle = get_handle_table().register_virtual_handle(full_path);
+                        *phk_result = vhandle as HKEY;
+                        if !lpdw_disposition.is_null() {
+                            *lpdw_disposition = 1;
+                        }
+                    }
+                    return ERROR_SUCCESS as i32;
                 }
-                return ERROR_SUCCESS as i32;
-            }
 
-            status
-        }
-    )
+                let status = real_fn(
+                    hkey,
+                    lp_sub_key,
+                    reserved,
+                    lp_class,
+                    dw_options,
+                    sam_desired,
+                    lp_security_attributes,
+                    phk_result,
+                    lpdw_disposition,
+                );
+
+                if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
+                    get_handle_table().register_host_handle(*phk_result as HANDLE, full_path);
+                    return status;
+                }
+
+                if !phk_result.is_null() {
+                    let vhandle = get_handle_table().register_virtual_handle(full_path);
+                    *phk_result = vhandle as HKEY;
+                    if !lpdw_disposition.is_null() {
+                        *lpdw_disposition = 1;
+                    }
+                    return ERROR_SUCCESS as i32;
+                }
+
+                status
+            }
+        )
+    }
 }
 
 unsafe extern "system" fn hook_reg_query_value_ex_w(
@@ -200,53 +224,59 @@ unsafe extern "system" fn hook_reg_query_value_ex_w(
     lp_data: *mut u8,
     lpcb_data: *mut u32,
 ) -> i32 {
-    let real_fn: FnRegQueryValueExW = std::mem::transmute(REAL_REG_QUERY_VALUE_EX_W);
-    guard_reg_hook!(
-        real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data),
-        {
-            let key_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
-            let val_name = wide_to_string(lp_value_name);
+    unsafe {
+        let real_fn: FnRegQueryValueExW = std::mem::transmute(REAL_REG_QUERY_VALUE_EX_W);
+        guard_reg_hook!(
+            real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data),
+            {
+                let key_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
+                let val_name = wide_to_string(lp_value_name);
 
-            if let Some(query_res) = get_registry_store().get_value(&key_path, &val_name) {
-                match query_res {
-                    Err(()) => {
-                        tracing::debug!("RegQueryValueExW [Tombstoned Value]: {}\\{}", key_path, val_name);
-                        return ERROR_FILE_NOT_FOUND as i32;
-                    }
-                    Ok((val_type, data)) => {
-                        if !lp_type.is_null() {
-                            *lp_type = val_type;
+                if let Some(query_res) = get_registry_store().get_value(&key_path, &val_name) {
+                    match query_res {
+                        Err(()) => {
+                            tracing::debug!(
+                                "RegQueryValueExW [Tombstoned Value]: {}\\{}",
+                                key_path,
+                                val_name
+                            );
+                            return ERROR_FILE_NOT_FOUND as i32;
                         }
-
-                        let req_size = data.len() as u32;
-                        if !lpcb_data.is_null() {
-                            let provided_size = *lpcb_data;
-                            *lpcb_data = req_size;
-
-                            if lp_data.is_null() {
-                                return ERROR_SUCCESS as i32;
+                        Ok((val_type, data)) => {
+                            if !lp_type.is_null() {
+                                *lp_type = val_type;
                             }
 
-                            if provided_size < req_size {
-                                return ERROR_MORE_DATA as i32;
+                            let req_size = data.len() as u32;
+                            if !lpcb_data.is_null() {
+                                let provided_size = *lpcb_data;
+                                *lpcb_data = req_size;
+
+                                if lp_data.is_null() {
+                                    return ERROR_SUCCESS as i32;
+                                }
+
+                                if provided_size < req_size {
+                                    return ERROR_MORE_DATA as i32;
+                                }
+
+                                std::ptr::copy_nonoverlapping(data.as_ptr(), lp_data, data.len());
                             }
 
-                            std::ptr::copy_nonoverlapping(data.as_ptr(), lp_data, data.len());
+                            tracing::debug!("RegQueryValueExW [Virtual Hit]: {}\\{}", key_path, val_name);
+                            return ERROR_SUCCESS as i32;
                         }
-
-                        tracing::debug!("RegQueryValueExW [Virtual Hit]: {}\\{}", key_path, val_name);
-                        return ERROR_SUCCESS as i32;
                     }
                 }
-            }
 
-            if get_handle_table().is_synthetic(hkey as HANDLE) {
-                return ERROR_FILE_NOT_FOUND as i32;
-            }
+                if get_handle_table().is_synthetic(hkey as HANDLE) {
+                    return ERROR_FILE_NOT_FOUND as i32;
+                }
 
-            real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data)
-        }
-    )
+                real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data)
+            }
+        )
+    }
 }
 
 unsafe extern "system" fn hook_reg_set_value_ex_w(
@@ -257,45 +287,51 @@ unsafe extern "system" fn hook_reg_set_value_ex_w(
     lp_data: *const u8,
     cb_data: u32,
 ) -> i32 {
-    let real_fn: FnRegSetValueExW = std::mem::transmute(REAL_REG_SET_VALUE_EX_W);
-    guard_reg_hook!(
-        real_fn(hkey, lp_value_name, reserved, dw_type, lp_data, cb_data),
-        {
-            let key_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
-            let val_name = wide_to_string(lp_value_name);
+    unsafe {
+        let real_fn: FnRegSetValueExW = std::mem::transmute(REAL_REG_SET_VALUE_EX_W);
+        guard_reg_hook!(
+            real_fn(hkey, lp_value_name, reserved, dw_type, lp_data, cb_data),
+            {
+                let key_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
+                let val_name = wide_to_string(lp_value_name);
 
-            let data_slice = if !lp_data.is_null() && cb_data > 0 {
-                std::slice::from_raw_parts(lp_data, cb_data as usize)
-            } else {
-                &[]
-            };
+                let data_slice = if !lp_data.is_null() && cb_data > 0 {
+                    std::slice::from_raw_parts(lp_data, cb_data as usize)
+                } else {
+                    &[]
+                };
 
-            tracing::debug!("RegSetValueExW [CoW Virtual Store]: {}\\{} (type: {}, bytes: {})", key_path, val_name, dw_type, cb_data);
-            get_registry_store().set_value(&key_path, &val_name, dw_type, data_slice);
-            ERROR_SUCCESS as i32
-        }
-    )
+                tracing::debug!(
+                    "RegSetValueExW [CoW Virtual Store]: {}\\{} (type: {}, bytes: {})",
+                    key_path,
+                    val_name,
+                    dw_type,
+                    cb_data
+                );
+                get_registry_store().set_value(&key_path, &val_name, dw_type, data_slice);
+                ERROR_SUCCESS as i32
+            }
+        )
+    }
 }
 
 unsafe extern "system" fn hook_reg_delete_value_w(hkey: HKEY, lp_value_name: *const u16) -> i32 {
-    let real_fn: FnRegDeleteValueW = std::mem::transmute(REAL_REG_DELETE_VALUE_W);
-    guard_reg_hook!(
-        real_fn(hkey, lp_value_name),
-        {
+    unsafe {
+        let real_fn: FnRegDeleteValueW = std::mem::transmute(REAL_REG_DELETE_VALUE_W);
+        guard_reg_hook!(real_fn(hkey, lp_value_name), {
             let key_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
             let val_name = wide_to_string(lp_value_name);
             get_registry_store().delete_value(&key_path, &val_name);
             tracing::info!("RegDeleteValueW [CoW Mask]: {}\\{}", key_path, val_name);
             ERROR_SUCCESS as i32
-        }
-    )
+        })
+    }
 }
 
 unsafe extern "system" fn hook_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u16) -> i32 {
-    let real_fn: FnRegDeleteKeyW = std::mem::transmute(REAL_REG_DELETE_KEY_W);
-    guard_reg_hook!(
-        real_fn(hkey, lp_sub_key),
-        {
+    unsafe {
+        let real_fn: FnRegDeleteKeyW = std::mem::transmute(REAL_REG_DELETE_KEY_W);
+        guard_reg_hook!(real_fn(hkey, lp_sub_key), {
             let base_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
             let subkey_str = wide_to_string(lp_sub_key);
             let full_path = if !base_path.is_empty() && !subkey_str.is_empty() {
@@ -309,23 +345,22 @@ unsafe extern "system" fn hook_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u
             get_registry_store().delete_key(&full_path);
             tracing::info!("RegDeleteKeyW [CoW Tombstone]: {}", full_path);
             ERROR_SUCCESS as i32
-        }
-    )
+        })
+    }
 }
 
 unsafe extern "system" fn hook_reg_close_key(hkey: HKEY) -> i32 {
-    let real_fn: FnRegCloseKey = std::mem::transmute(REAL_REG_CLOSE_KEY);
-    guard_reg_hook!(
-        real_fn(hkey),
-        {
-            if let Some(entry) = get_handle_table().close_handle(hkey as HANDLE) {
-                if entry.is_synthetic {
-                    return ERROR_SUCCESS as i32;
-                }
+    unsafe {
+        let real_fn: FnRegCloseKey = std::mem::transmute(REAL_REG_CLOSE_KEY);
+        guard_reg_hook!(real_fn(hkey), {
+            if let Some(entry) = get_handle_table().close_handle(hkey as HANDLE)
+                && entry.is_synthetic
+            {
+                return ERROR_SUCCESS as i32;
             }
             real_fn(hkey)
-        }
-    )
+        })
+    }
 }
 
 pub fn init_hooks() {
@@ -345,37 +380,55 @@ pub fn init_hooks() {
         if !reg_mod.is_null() {
             if let Some(proc) = GetProcAddress(reg_mod, c"RegOpenKeyExW".as_ptr().cast()) {
                 REAL_REG_OPEN_KEY_EX_W = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_OPEN_KEY_EX_W, hook_reg_open_key_ex_w as *mut c_void);
+                let ok = attach_detour(
+                    &raw mut REAL_REG_OPEN_KEY_EX_W,
+                    hook_reg_open_key_ex_w as *mut c_void,
+                );
                 tracing::info!("Hook RegOpenKeyExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegCreateKeyExW".as_ptr().cast()) {
                 REAL_REG_CREATE_KEY_EX_W = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_CREATE_KEY_EX_W, hook_reg_create_key_ex_w as *mut c_void);
+                let ok = attach_detour(
+                    &raw mut REAL_REG_CREATE_KEY_EX_W,
+                    hook_reg_create_key_ex_w as *mut c_void,
+                );
                 tracing::info!("Hook RegCreateKeyExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegQueryValueExW".as_ptr().cast()) {
                 REAL_REG_QUERY_VALUE_EX_W = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_QUERY_VALUE_EX_W, hook_reg_query_value_ex_w as *mut c_void);
+                let ok = attach_detour(
+                    &raw mut REAL_REG_QUERY_VALUE_EX_W,
+                    hook_reg_query_value_ex_w as *mut c_void,
+                );
                 tracing::info!("Hook RegQueryValueExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegSetValueExW".as_ptr().cast()) {
                 REAL_REG_SET_VALUE_EX_W = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_SET_VALUE_EX_W, hook_reg_set_value_ex_w as *mut c_void);
+                let ok = attach_detour(
+                    &raw mut REAL_REG_SET_VALUE_EX_W,
+                    hook_reg_set_value_ex_w as *mut c_void,
+                );
                 tracing::info!("Hook RegSetValueExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegDeleteValueW".as_ptr().cast()) {
                 REAL_REG_DELETE_VALUE_W = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_DELETE_VALUE_W, hook_reg_delete_value_w as *mut c_void);
+                let ok = attach_detour(
+                    &raw mut REAL_REG_DELETE_VALUE_W,
+                    hook_reg_delete_value_w as *mut c_void,
+                );
                 tracing::info!("Hook RegDeleteValueW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegDeleteKeyW".as_ptr().cast()) {
                 REAL_REG_DELETE_KEY_W = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_DELETE_KEY_W, hook_reg_delete_key_w as *mut c_void);
+                let ok = attach_detour(
+                    &raw mut REAL_REG_DELETE_KEY_W,
+                    hook_reg_delete_key_w as *mut c_void,
+                );
                 tracing::info!("Hook RegDeleteKeyW: {}", ok);
             }
 

@@ -1,67 +1,92 @@
 use crate::core::assets::{DEFAULT_APPS_JSON, EMBEDDED_REDIRECTOR_DLL};
 use crate::core::config::AppManifests;
-use color_eyre::eyre::Result;
+use anyhow::{Context, bail};
 use std::fs;
 use std::path::Path;
 
-pub fn init_environment(root: &Path, force: bool) -> Result<()> {
-    // 1. Scaffold semantic .ppm directories
+pub fn init_environment(root: &Path) -> anyhow::Result<()> {
+    scaffold_directories(root)?;
+    extract_redirector_dll(root)?;
+    ensure_default_config(root)?;
+    regenerate_schema(root)?;
+
+    Ok(())
+}
+
+fn scaffold_directories(root: &Path) -> anyhow::Result<()> {
     let ppm_dir = root.join(".ppm");
-    let system_dir = ppm_dir.join("system");
-    let lib_dir = ppm_dir.join("lib");
-    let cache_dir = ppm_dir.join("cache");
-    let logs_dir = ppm_dir.join("logs");
-
-    fs::create_dir_all(&system_dir)?;
-    fs::create_dir_all(&lib_dir)?;
-    fs::create_dir_all(&cache_dir)?;
-    fs::create_dir_all(&logs_dir)?;
-
-    // 2. Scaffold Multi-Arch Apps/ directories
-    let apps_x64 = root.join("Apps").join("x64");
-    let apps_arm64 = root.join("Apps").join("arm64");
-    fs::create_dir_all(&apps_x64)?;
-    fs::create_dir_all(&apps_arm64)?;
-
-    // 3. Scaffold 100% Pure Home/ directories (Zero .ppm files)
     let home_dir = root.join("Home");
-    let appdata_local = home_dir.join("AppData").join("Local");
-    let appdata_roaming = home_dir.join("AppData").join("Roaming");
-    let appdata_webview = home_dir.join("AppData").join("WebViewData");
-    let documents_dir = home_dir.join("Documents");
 
-    fs::create_dir_all(&appdata_local)?;
-    fs::create_dir_all(&appdata_roaming)?;
-    fs::create_dir_all(&appdata_webview)?;
-    fs::create_dir_all(&documents_dir)?;
+    let directories = [
+        ppm_dir.join("system"),
+        ppm_dir.join("lib"),
+        ppm_dir.join("cache"),
+        ppm_dir.join("logs"),
+        root.join("Apps").join("x64"),
+        root.join("Apps").join("arm64"),
+        home_dir.join("AppData").join("Local"),
+        home_dir.join("AppData").join("Roaming"),
+        home_dir.join("AppData").join("WebViewData"),
+        home_dir.join("Documents"),
+    ];
 
-    // 4. Extract embedded redirector.dll to .ppm/lib/redirector.dll
-    let redirector_dll_path = lib_dir.join("redirector.dll");
-    if force || !redirector_dll_path.exists() {
-        fs::write(&redirector_dll_path, EMBEDDED_REDIRECTOR_DLL)?;
-        println!("  ✓ Extracted .ppm/lib/redirector.dll");
+    for directory in &directories {
+        fs::create_dir_all(directory)
+            .with_context(|| format!("Failed to scaffold directory '{}'", directory.display()))?;
     }
 
-    // 5. Initialize .ppm/apps.json
-    let apps_json_path = ppm_dir.join("apps.json");
-    if force || !apps_json_path.exists() {
-        fs::write(&apps_json_path, DEFAULT_APPS_JSON)?;
-        println!("  ✓ Initialized .ppm/apps.json (Default configuration)");
+    Ok(())
+}
+
+// Intention: Unconditionally deploy a fresh copy of the virtualization engine DLL.
+// Why: A previously extracted 0-byte or stale DLL must never survive an `init`; the embedded
+//      artifact is rebuilt by Cargo on every redirector change and always reflects ground truth.
+fn extract_redirector_dll(root: &Path) -> anyhow::Result<()> {
+    if EMBEDDED_REDIRECTOR_DLL.is_empty() {
+        bail!("Embedded redirector.dll is empty; the build did not capture a valid redirector artifact");
     }
 
-    // 6. Generate JSON schema (.ppm/apps.schema.json)
+    let dll_path = root.join(".ppm").join("lib").join("redirector.dll");
+    fs::write(&dll_path, EMBEDDED_REDIRECTOR_DLL)
+        .with_context(|| format!("Failed to deploy '{}'", dll_path.display()))?;
+
+    println!("  ✓ Deployed .ppm/lib/redirector.dll");
+
+    Ok(())
+}
+
+// Intention: Seed configuration exactly once; user-authored manifests are authoritative.
+fn ensure_default_config(root: &Path) -> anyhow::Result<()> {
+    let apps_json_path = root.join(".ppm").join("apps.json");
+    let config_is_absent = !apps_json_path.exists();
+
+    if config_is_absent {
+        fs::write(&apps_json_path, DEFAULT_APPS_JSON)
+            .with_context(|| format!("Failed to initialize '{}'", apps_json_path.display()))?;
+        println!("  ✓ Initialized .ppm/apps.json (default configuration)");
+    }
+
+    Ok(())
+}
+
+// Intention: Always regenerate schema artifacts so they can never drift from the code-defined model.
+fn regenerate_schema(root: &Path) -> anyhow::Result<()> {
     let schema = schemars::schema_for!(AppManifests);
-    let schema_json = serde_json::to_string_pretty(&schema)?;
-    let schema_path = ppm_dir.join("apps.schema.json");
-    fs::write(&schema_path, &schema_json)?;
+    let schema_json = serde_json::to_string_pretty(&schema).context("Failed to serialize apps schema")?;
 
-    // Also update dev manifests/apps.schema.json if manifests/ exists
-    let dev_schema = root.join("manifests").join("apps.schema.json");
-    if let Some(p) = dev_schema.parent() {
-        if p.exists() {
-            fs::write(&dev_schema, &schema_json)?;
+    let schema_targets = [
+        root.join(".ppm").join("apps.schema.json"),
+        root.join("manifests").join("apps.schema.json"),
+    ];
+
+    for target in &schema_targets {
+        if target.parent().is_some_and(|parent| parent.is_dir()) {
+            fs::write(target, &schema_json)
+                .with_context(|| format!("Failed to write '{}'", target.display()))?;
         }
     }
+
+    println!("  ✓ Regenerated apps.schema.json");
 
     Ok(())
 }

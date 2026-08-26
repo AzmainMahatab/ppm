@@ -1,10 +1,8 @@
 use crate::detour::attach_detour;
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
-use std::ffi::{c_void, CString};
-use windows_sys::Win32::System::Threading::{
-    PROCESS_INFORMATION, STARTUPINFOW,
-};
+use std::ffi::{CString, c_void};
+use windows_sys::Win32::System::Threading::{PROCESS_INFORMATION, STARTUPINFOW};
 
 #[allow(clippy::upper_case_acronyms)]
 type LPSTARTUPINFOW = *mut STARTUPINFOW;
@@ -34,7 +32,7 @@ impl Drop for ProcHookGuard {
 }
 
 macro_rules! guard_proc_hook {
-    ($fallback:expr, $body:expr) => {{
+    ($fallback:expr_2021, $body:expr_2021) => {{
         let _guard = match ProcHookGuard::enter() {
             Some(g) => g,
             None => return $fallback,
@@ -43,7 +41,7 @@ macro_rules! guard_proc_hook {
     }};
 }
 
-extern "C" {
+unsafe extern "C" {
     fn DetourCreateProcessWithDllExW(
         lpApplicationName: *const u16,
         lpCommandLine: *mut u16,
@@ -76,31 +74,35 @@ type FnCreateProcessW = unsafe extern "system" fn(
 static mut REAL_CREATE_PROCESS_W: *mut c_void = std::ptr::null_mut();
 
 unsafe fn wide_to_string(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
+    unsafe {
+        if ptr.is_null() {
+            return String::new();
+        }
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        String::from_utf16_lossy(slice)
     }
-    let mut len = 0;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-    let slice = std::slice::from_raw_parts(ptr, len);
-    String::from_utf16_lossy(slice)
 }
 
 unsafe fn is_sandboxed_chromium_child(app_name: *const u16, cmd_line: *const u16) -> bool {
-    let mut check = String::new();
-    if !app_name.is_null() {
-        check.push_str(&wide_to_string(app_name));
-        check.push(' ');
+    unsafe {
+        let mut check = String::new();
+        if !app_name.is_null() {
+            check.push_str(&wide_to_string(app_name));
+            check.push(' ');
+        }
+        if !cmd_line.is_null() {
+            check.push_str(&wide_to_string(cmd_line));
+        }
+        let lower = check.to_lowercase();
+        lower.contains("--type=")
+            || lower.contains("msedgewebview2.exe")
+            || lower.contains("msedge.exe")
+            || lower.contains("crashpad_handler.exe")
     }
-    if !cmd_line.is_null() {
-        check.push_str(&wide_to_string(cmd_line));
-    }
-    let lower = check.to_lowercase();
-    lower.contains("--type=")
-        || lower.contains("msedgewebview2.exe")
-        || lower.contains("msedge.exe")
-        || lower.contains("crashpad_handler.exe")
 }
 
 unsafe extern "system" fn hook_create_process_w(
@@ -115,18 +117,29 @@ unsafe extern "system" fn hook_create_process_w(
     startup_info: LPSTARTUPINFOW,
     proc_info: LpprocessInformation,
 ) -> BOOL {
-    let real_fn: FnCreateProcessW = std::mem::transmute(REAL_CREATE_PROCESS_W);
-    guard_proc_hook!(
-        real_fn(
-            app_name, cmd_line, proc_attr, thread_attr, inherit, flags, env, curr_dir, startup_info, proc_info
-        ),
-        {
-            if !is_sandboxed_chromium_child(app_name, cmd_line) {
-                let cfg = crate::paths::init_paths();
-                let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
+    unsafe {
+        let real_fn: FnCreateProcessW = std::mem::transmute(REAL_CREATE_PROCESS_W);
+        guard_proc_hook!(
+            real_fn(
+                app_name,
+                cmd_line,
+                proc_attr,
+                thread_attr,
+                inherit,
+                flags,
+                env,
+                curr_dir,
+                startup_info,
+                proc_info
+            ),
+            {
+                if !is_sandboxed_chromium_child(app_name, cmd_line) {
+                    let cfg = crate::paths::init_paths();
+                    let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
 
-                if dll_path.is_file() {
-                    if let Ok(dll_cstr) = CString::new(dll_path.to_string_lossy().as_bytes()) {
+                    if dll_path.is_file()
+                        && let Ok(dll_cstr) = CString::new(dll_path.to_string_lossy().as_bytes())
+                    {
                         let res = DetourCreateProcessWithDllExW(
                             app_name,
                             cmd_line,
@@ -142,18 +155,29 @@ unsafe extern "system" fn hook_create_process_w(
                             std::ptr::null_mut(),
                         );
                         if res != 0 {
-                            tracing::info!("CreateProcess [Child Injected]: Injected redirector.dll into new child process");
+                            tracing::info!(
+                                "CreateProcess [Child Injected]: Injected redirector.dll into new child process"
+                            );
                             return TRUE;
                         }
                     }
                 }
-            }
 
-            real_fn(
-                app_name, cmd_line, proc_attr, thread_attr, inherit, flags, env, curr_dir, startup_info, proc_info
-            )
-        }
-    )
+                real_fn(
+                    app_name,
+                    cmd_line,
+                    proc_attr,
+                    thread_attr,
+                    inherit,
+                    flags,
+                    env,
+                    curr_dir,
+                    startup_info,
+                    proc_info,
+                )
+            }
+        )
+    }
 }
 
 pub fn init_hooks() {
@@ -166,22 +190,26 @@ pub fn init_hooks() {
         let mut target_proc = None;
 
         // 1. Try kernelbase.dll!CreateProcessW
-        if !kernelbase.is_null() {
-            if let Some(proc) = GetProcAddress(kernelbase, c"CreateProcessW".as_ptr().cast()) {
-                target_proc = Some(proc);
-            }
+        if !kernelbase.is_null()
+            && let Some(proc) = GetProcAddress(kernelbase, c"CreateProcessW".as_ptr().cast())
+        {
+            target_proc = Some(proc);
         }
 
         // 2. Fallback kernel32.dll!CreateProcessW
-        if target_proc.is_none() && !kernel32.is_null() {
-            if let Some(proc) = GetProcAddress(kernel32, c"CreateProcessW".as_ptr().cast()) {
-                target_proc = Some(proc);
-            }
+        if target_proc.is_none()
+            && !kernel32.is_null()
+            && let Some(proc) = GetProcAddress(kernel32, c"CreateProcessW".as_ptr().cast())
+        {
+            target_proc = Some(proc);
         }
 
         if let Some(proc) = target_proc {
             REAL_CREATE_PROCESS_W = proc as *mut c_void;
-            attach_detour(&raw mut REAL_CREATE_PROCESS_W, hook_create_process_w as *mut c_void);
+            attach_detour(
+                &raw mut REAL_CREATE_PROCESS_W,
+                hook_create_process_w as *mut c_void,
+            );
         }
     }
 }

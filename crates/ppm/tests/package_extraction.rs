@@ -23,7 +23,9 @@ fn test_zip_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_zip");
 
-    let config = PackageConfig::Zip { extract_subpath: None };
+    let config = PackageConfig::Zip {
+        extract_subpath: None,
+    };
     let res = extract_package(&fixture_path, &config, &dest_dir);
     assert!(res.is_ok(), "Zip extraction must succeed: {:?}", res);
 
@@ -38,7 +40,9 @@ fn test_sevenz_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_7z");
 
-    let config = PackageConfig::SevenZ { extract_subpath: None };
+    let config = PackageConfig::SevenZ {
+        extract_subpath: None,
+    };
     let res = extract_package(&fixture_path, &config, &dest_dir);
     assert!(res.is_ok(), "7-Zip extraction must succeed: {:?}", res);
 
@@ -53,7 +57,9 @@ fn test_cab_pure_rust_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_cab");
 
-    let config = PackageConfig::Cab { extract_subpath: None };
+    let config = PackageConfig::Cab {
+        extract_subpath: None,
+    };
     let res = extract_package(&fixture_path, &config, &dest_dir);
     assert!(res.is_ok(), "CAB pure Rust extraction must succeed: {:?}", res);
 
@@ -68,9 +74,15 @@ fn test_msi_embedded_pure_rust_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_msi_embedded");
 
-    let config = PackageConfig::Msi { extract_subpath: None };
+    let config = PackageConfig::Msi {
+        extract_subpath: None,
+    };
     let res = extract_package(&fixture_path, &config, &dest_dir);
-    assert!(res.is_ok(), "MSI embedded pure Rust extraction must succeed: {:?}", res);
+    assert!(
+        res.is_ok(),
+        "MSI embedded pure Rust extraction must succeed: {:?}",
+        res
+    );
 
     assert!(dest_dir.is_dir());
     let mut entries = fs::read_dir(&dest_dir).unwrap();
@@ -83,9 +95,15 @@ fn test_msi_external_cab_pure_rust_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_msi_external");
 
-    let config = PackageConfig::Msi { extract_subpath: None };
+    let config = PackageConfig::Msi {
+        extract_subpath: None,
+    };
     let res = extract_package(&fixture_path, &config, &dest_dir);
-    assert!(res.is_ok(), "MSI external cab pure Rust extraction must succeed: {:?}", res);
+    assert!(
+        res.is_ok(),
+        "MSI external cab pure Rust extraction must succeed: {:?}",
+        res
+    );
 
     assert!(dest_dir.is_dir());
     let mut entries = fs::read_dir(&dest_dir).unwrap();
@@ -117,14 +135,19 @@ fn test_staging_directory_raii_cleanup_on_failure() {
     fs::write(&invalid_file, b"corrupted_non_zip_header").unwrap();
 
     let dest_dir = temp_dir.path().join("test_app_dir");
-    let config = PackageConfig::Zip { extract_subpath: None };
+    let config = PackageConfig::Zip {
+        extract_subpath: None,
+    };
 
     let res = extract_package(&invalid_file, &config, &dest_dir);
     assert!(res.is_err(), "Corrupted package extraction must fail");
 
     // Staging directory __stage_extract must be completely cleaned up by RAII guard
     let stage_dir = dest_dir.join("__stage_extract");
-    assert!(!stage_dir.exists(), "Staging directory must not remain on failure");
+    assert!(
+        !stage_dir.exists(),
+        "Staging directory must not remain on failure"
+    );
 }
 
 #[test]
@@ -136,7 +159,11 @@ fn test_post_install_sanitization_rules() {
     fs::create_dir_all(target_dir.join("resources")).unwrap();
     fs::create_dir_all(target_dir.join("unwanted_dir")).unwrap();
     fs::write(target_dir.join("app.exe"), b"executable").unwrap();
-    fs::write(target_dir.join("resources").join("app-update.yml"), b"version: 1.0.0").unwrap();
+    fs::write(
+        target_dir.join("resources").join("app-update.yml"),
+        b"version: 1.0.0",
+    )
+    .unwrap();
     fs::write(target_dir.join("unwanted.log"), b"log_data").unwrap();
     fs::write(target_dir.join("unwanted_dir").join("trash.tmp"), b"temp").unwrap();
 

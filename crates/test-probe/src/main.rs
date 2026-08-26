@@ -2,21 +2,19 @@ use std::env;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, S_OK};
 use windows_sys::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE_GENERIC,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_SZ,
+    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
+    RegQueryValueExW, RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, WaitForSingleObject, INFINITE, PROCESS_INFORMATION,
-    STARTUPINFOW,
+    CreateProcessW, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+use windows_sys::core::GUID;
 
 const FOLDERID_PROFILE: GUID = GUID {
     data1: 0x5e6c858f,
@@ -30,15 +28,17 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 unsafe fn from_wide_ptr(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
+    unsafe {
+        if ptr.is_null() {
+            return String::new();
+        }
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        String::from_utf16_lossy(slice)
     }
-    let mut len = 0;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-    let slice = std::slice::from_raw_parts(ptr, len);
-    String::from_utf16_lossy(slice)
 }
 
 fn test_registry_cow() -> Result<(), String> {
@@ -101,7 +101,10 @@ fn test_registry_cow() -> Result<(), String> {
         let read_str = from_wide_ptr(buf.as_ptr());
         if read_str != "VirtualSuccess123" {
             let _ = RegCloseKey(hkey);
-            return Err(format!("RegQueryValueExW returned unexpected data: '{}'", read_str));
+            return Err(format!(
+                "RegQueryValueExW returned unexpected data: '{}'",
+                read_str
+            ));
         }
 
         // Delete value
@@ -130,7 +133,10 @@ fn test_shell_redirection() -> Result<(), String> {
         println!("  -> Resolved FOLDERID_Profile: '{}'", folder_path);
 
         if !folder_path.replace('\\', "/").ends_with("Home") && !folder_path.contains("Home") {
-            return Err(format!("Profile path was not redirected to Home: '{}'", folder_path));
+            return Err(format!(
+                "Profile path was not redirected to Home: '{}'",
+                folder_path
+            ));
         }
     }
     println!("  -> Shell Known Folder Redirection PASSED!");
@@ -175,7 +181,10 @@ fn test_credentials_vault() -> Result<(), String> {
 
         if read_user != "PPMUser" || read_blob != secret_bytes {
             CredFree(read_cred_ptr as *const _);
-            return Err(format!("CredReadW returned invalid data: user '{}', blob {:?}", read_user, read_blob));
+            return Err(format!(
+                "CredReadW returned invalid data: user '{}', blob {:?}",
+                read_user, read_blob
+            ));
         }
 
         CredFree(read_cred_ptr as *const _);

@@ -23,14 +23,13 @@ pub fn get_electron_package_version(exe_path: &Path) -> Option<String> {
     ];
 
     for path in &candidate_paths {
-        if path.file_name()? == "package.json" && path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(ver) = json.get("version").and_then(|v| v.as_str()) {
-                        return Some(ver.to_string());
-                    }
-                }
-            }
+        if path.file_name()? == "package.json"
+            && path.is_file()
+            && let Ok(content) = std::fs::read_to_string(path)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(ver) = json.get("version").and_then(|v| v.as_str())
+        {
+            return Some(ver.to_string());
         }
     }
 
@@ -54,20 +53,15 @@ fn get_windows_pe_version(exe_path: &Path) -> Option<String> {
 
     unsafe {
         // Dynamically load version.dll
-        let version_lib = windows_sys::Win32::System::LibraryLoader::LoadLibraryW(
-            windows_sys::core::w!("version.dll"),
-        );
+        let version_lib =
+            windows_sys::Win32::System::LibraryLoader::LoadLibraryW(windows_sys::core::w!("version.dll"));
         if version_lib.is_null() {
             return None;
         }
 
         type FnGetFileVersionInfoSizeW = unsafe extern "system" fn(*const u16, *mut u32) -> u32;
-        type FnGetFileVersionInfoW = unsafe extern "system" fn(
-            *const u16,
-            u32,
-            u32,
-            *mut std::ffi::c_void,
-        ) -> i32;
+        type FnGetFileVersionInfoW =
+            unsafe extern "system" fn(*const u16, u32, u32, *mut std::ffi::c_void) -> i32;
         type FnVerQueryValueW = unsafe extern "system" fn(
             *const std::ffi::c_void,
             *const u16,
@@ -181,7 +175,11 @@ mod tests {
             let version = get_pe_product_version(kernel32_path);
             assert!(version.is_some(), "Should extract version from kernel32.dll");
             let ver_str = version.unwrap();
-            assert!(ver_str.starts_with("10.0") || ver_str.starts_with("6."), "Expected Windows version format, got: {}", ver_str);
+            assert!(
+                ver_str.starts_with("10.0") || ver_str.starts_with("6."),
+                "Expected Windows version format, got: {}",
+                ver_str
+            );
         }
     }
 }

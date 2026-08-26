@@ -33,7 +33,7 @@ impl Drop for CredHookGuard {
 }
 
 macro_rules! guard_cred_hook {
-    ($fallback:expr, $body:expr) => {{
+    ($fallback:expr_2021, $body:expr_2021) => {{
         let _guard = match CredHookGuard::enter() {
             Some(g) => g,
             None => return $fallback,
@@ -42,7 +42,7 @@ macro_rules! guard_cred_hook {
     }};
 }
 
-extern "system" {
+unsafe extern "system" {
     fn CoTaskMemAlloc(cb: usize) -> *mut c_void;
     fn CoTaskMemFree(pv: *mut c_void);
 }
@@ -58,24 +58,28 @@ static mut REAL_CRED_DELETE_W: *mut c_void = std::ptr::null_mut();
 static mut REAL_CRED_FREE: *mut c_void = std::ptr::null_mut();
 
 unsafe fn utf16_ptr_to_string(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
+    unsafe {
+        if ptr.is_null() {
+            return String::new();
+        }
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        String::from_utf16_lossy(slice)
     }
-    let mut len = 0;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-    let slice = std::slice::from_raw_parts(ptr, len);
-    String::from_utf16_lossy(slice)
 }
 
 unsafe fn alloc_cotask_wide_string(w_str: &[u16]) -> PWSTR {
-    let byte_len = w_str.len() * 2;
-    let mem = CoTaskMemAlloc(byte_len);
-    if !mem.is_null() {
-        std::ptr::copy_nonoverlapping(w_str.as_ptr(), mem as *mut u16, w_str.len());
+    unsafe {
+        let byte_len = w_str.len() * 2;
+        let mem = CoTaskMemAlloc(byte_len);
+        if !mem.is_null() {
+            std::ptr::copy_nonoverlapping(w_str.as_ptr(), mem as *mut u16, w_str.len());
+        }
+        mem as PWSTR
     }
-    mem as PWSTR
 }
 
 unsafe extern "system" fn hook_cred_read_w(
@@ -84,10 +88,9 @@ unsafe extern "system" fn hook_cred_read_w(
     flags: u32,
     credential_out: *mut PCREDENTIALW,
 ) -> BOOL {
-    let real_fn: FnCredReadW = std::mem::transmute(REAL_CRED_READ_W);
-    guard_cred_hook!(
-        real_fn(target_name, cred_type, flags, credential_out),
-        {
+    unsafe {
+        let real_fn: FnCredReadW = std::mem::transmute(REAL_CRED_READ_W);
+        guard_cred_hook!(real_fn(target_name, cred_type, flags, credential_out), {
             if !target_name.is_null() && !credential_out.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
 
@@ -100,8 +103,8 @@ unsafe extern "system" fn hook_cred_read_w(
                         cred_struct.Flags = 0;
                         cred_struct.Type = cred.cred_type;
 
-                        use std::os::windows::ffi::OsStrExt;
                         use std::ffi::OsStr;
+                        use std::os::windows::ffi::OsStrExt;
 
                         let target_w: Vec<u16> = OsStr::new(&cred.target_name)
                             .encode_wide()
@@ -119,7 +122,11 @@ unsafe extern "system" fn hook_cred_read_w(
                         if !blob_bytes.is_empty() {
                             let blob_mem = CoTaskMemAlloc(blob_bytes.len()) as *mut u8;
                             if !blob_mem.is_null() {
-                                std::ptr::copy_nonoverlapping(blob_bytes.as_ptr(), blob_mem, blob_bytes.len());
+                                std::ptr::copy_nonoverlapping(
+                                    blob_bytes.as_ptr(),
+                                    blob_mem,
+                                    blob_bytes.len(),
+                                );
                                 cred_struct.CredentialBlob = blob_mem;
                             } else {
                                 cred_struct.CredentialBlob = std::ptr::null_mut();
@@ -135,25 +142,24 @@ unsafe extern "system" fn hook_cred_read_w(
                         cred_struct.Comment = std::ptr::null_mut();
 
                         *credential_out = cred_mem;
-                        tracing::trace!("CredReadW [Vault Hit]: target '{}' read from virtual store", target_str);
+                        tracing::trace!(
+                            "CredReadW [Vault Hit]: target '{}' read from virtual store",
+                            target_str
+                        );
                         return TRUE;
                     }
                 }
             }
 
             real_fn(target_name, cred_type, flags, credential_out)
-        }
-    )
+        })
+    }
 }
 
-unsafe extern "system" fn hook_cred_write_w(
-    credential: PCREDENTIALW,
-    flags: u32,
-) -> BOOL {
-    let real_fn: FnCredWriteW = std::mem::transmute(REAL_CRED_WRITE_W);
-    guard_cred_hook!(
-        real_fn(credential, flags),
-        {
+unsafe extern "system" fn hook_cred_write_w(credential: PCREDENTIALW, flags: u32) -> BOOL {
+    unsafe {
+        let real_fn: FnCredWriteW = std::mem::transmute(REAL_CRED_WRITE_W);
+        guard_cred_hook!(real_fn(credential, flags), {
             if !credential.is_null() {
                 let cred = &*credential;
                 let target_name = utf16_ptr_to_string(cred.TargetName);
@@ -165,43 +171,50 @@ unsafe extern "system" fn hook_cred_write_w(
                     &[]
                 };
 
-                get_vault().set(target_name.clone(), cred.Type, user_name.clone(), blob, cred.Persist);
-                tracing::debug!("CredWriteW [Vault Intercept]: target '{}' (user: '{}') saved to virtual store", target_name, user_name);
+                get_vault().set(
+                    target_name.clone(),
+                    cred.Type,
+                    user_name.clone(),
+                    blob,
+                    cred.Persist,
+                );
+                tracing::debug!(
+                    "CredWriteW [Vault Intercept]: target '{}' (user: '{}') saved to virtual store",
+                    target_name,
+                    user_name
+                );
                 return TRUE;
             }
 
             real_fn(credential, flags)
-        }
-    )
+        })
+    }
 }
 
-unsafe extern "system" fn hook_cred_delete_w(
-    target_name: *const u16,
-    cred_type: u32,
-    flags: u32,
-) -> BOOL {
-    let real_fn: FnCredDeleteW = std::mem::transmute(REAL_CRED_DELETE_W);
-    guard_cred_hook!(
-        real_fn(target_name, cred_type, flags),
-        {
+unsafe extern "system" fn hook_cred_delete_w(target_name: *const u16, cred_type: u32, flags: u32) -> BOOL {
+    unsafe {
+        let real_fn: FnCredDeleteW = std::mem::transmute(REAL_CRED_DELETE_W);
+        guard_cred_hook!(real_fn(target_name, cred_type, flags), {
             if !target_name.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
                 if get_vault().delete(&target_str) {
-                    tracing::debug!("CredDeleteW [Vault Intercept]: target '{}' removed from virtual store", target_str);
+                    tracing::debug!(
+                        "CredDeleteW [Vault Intercept]: target '{}' removed from virtual store",
+                        target_str
+                    );
                     return TRUE;
                 }
             }
 
             real_fn(target_name, cred_type, flags)
-        }
-    )
+        })
+    }
 }
 
 unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
-    let real_fn: FnCredFree = std::mem::transmute(REAL_CRED_FREE);
-    guard_cred_hook!(
-        real_fn(buffer),
-        {
+    unsafe {
+        let real_fn: FnCredFree = std::mem::transmute(REAL_CRED_FREE);
+        guard_cred_hook!(real_fn(buffer), {
             if !buffer.is_null() {
                 let cred_ptr = buffer as *mut CREDENTIALW;
                 let cred = &*cred_ptr;
@@ -218,8 +231,8 @@ unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
                 return;
             }
             real_fn(buffer);
-        }
-    )
+        })
+    }
 }
 
 pub fn init_hooks() {

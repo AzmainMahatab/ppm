@@ -2,6 +2,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const SINGLE_PROBE_MANIFEST: &str = r#"{
+        "$schema": "./apps.schema.json",
+        "apps": {
+            "test-probe": {
+                "name": "Virtualization Test Probe",
+                "target_dir": "TestProbe",
+                "executable": "test-probe.exe",
+                "version_check": {
+                    "type": "github_release",
+                    "repo": "owner/repo"
+                },
+                "package": {
+                    "type": "zip"
+                }
+            }
+        }
+    }"#;
+
 #[cfg(windows)]
 struct TestEnvironment {
     temp_dir: tempfile::TempDir,
@@ -29,37 +47,37 @@ impl TestEnvironment {
         assert!(status.success(), "cargo build -p test-probe must succeed");
 
         assert!(ppm_exe.is_file(), "ppm.exe must exist at {:?}", ppm_exe);
-        assert!(test_probe_exe.is_file(), "test-probe.exe must exist at {:?}", test_probe_exe);
+        assert!(
+            test_probe_exe.is_file(),
+            "test-probe.exe must exist at {:?}",
+            test_probe_exe
+        );
 
         // Copy ppm.exe to root
         fs::copy(&ppm_exe, root.join("ppm.exe")).expect("Failed to copy ppm.exe to test root");
 
-        // Run ppm init
+        // PPM_ROOT pins root resolution even if the host exports one.
         let status = Command::new(root.join("ppm.exe"))
             .arg("init")
             .current_dir(root)
+            .env("PPM_ROOT", root)
             .status()
             .expect("Failed to run ppm init");
         assert!(status.success(), "ppm init should succeed");
 
-        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+        // Regression guard: init must deploy a real (non-empty) embedded engine DLL.
+        let extracted_dll = fs::read(root.join(".ppm").join("lib").join("redirector.dll"))
+            .expect("init must deploy .ppm/lib/redirector.dll");
+        assert!(
+            !extracted_dll.is_empty(),
+            "embedded redirector.dll must not be empty"
+        );
 
-        // Copy redirector.dll if present in target dirs
-        let mut search_dir = ppm_exe.parent();
-        let mut found_dll = None;
-        while let Some(d) = search_dir {
-            let candidate = d.join("redirector.dll");
-            if candidate.is_file() {
-                found_dll = Some(candidate);
-                break;
-            }
-            search_dir = d.parent();
-        }
-
-        if let Some(dll) = found_dll {
-            fs::copy(&dll, root.join(".ppm").join("lib").join("redirector.dll"))
-                .expect("Failed to copy redirector.dll");
-        }
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x64"
+        };
 
         Self {
             temp_dir,
@@ -82,8 +100,7 @@ impl TestEnvironment {
     }
 
     fn write_manifest(&self, apps_json: &str) {
-        fs::write(self.root().join(".ppm").join("apps.json"), apps_json)
-            .expect("Failed to write apps.json");
+        fs::write(self.root().join(".ppm").join("apps.json"), apps_json).expect("Failed to write apps.json");
     }
 }
 
@@ -92,29 +109,13 @@ impl TestEnvironment {
 fn test_e2e_virtualization_with_probe() {
     let env = TestEnvironment::new();
     env.deploy_binary("TestProbe", "test-probe.exe");
-
-    let apps_json = r#"{
-        "$schema": "./apps.schema.json",
-        "apps": {
-            "test-probe": {
-                "name": "Virtualization Test Probe",
-                "target_dir": "TestProbe",
-                "executable": "test-probe.exe",
-                "version_check": {
-                    "type": "github_release",
-                    "repo": "owner/repo"
-                },
-                "package": {
-                    "type": "zip"
-                }
-            }
-        }
-    }"#;
+    let apps_json = SINGLE_PROBE_MANIFEST;
     env.write_manifest(apps_json);
 
     let output = Command::new(env.root().join("ppm.exe"))
         .args(["run", "test-probe"])
         .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
         .output()
         .expect("Failed to run ppm run test-probe");
 
@@ -138,7 +139,10 @@ fn test_e2e_virtualization_with_probe() {
     );
 
     let cred_json = env.root().join(".ppm").join("system").join("credentials.json");
-    assert!(cred_json.is_file(), "credentials.json should exist in .ppm/system");
+    assert!(
+        cred_json.is_file(),
+        "credentials.json should exist in .ppm/system"
+    );
 }
 
 #[test]
@@ -146,30 +150,14 @@ fn test_e2e_virtualization_with_probe() {
 fn test_e2e_cli_argument_and_help_passthrough() {
     let env = TestEnvironment::new();
     env.deploy_binary("TestProbe", "test-probe.exe");
-
-    let apps_json = r#"{
-        "$schema": "./apps.schema.json",
-        "apps": {
-            "test-probe": {
-                "name": "Virtualization Test Probe",
-                "target_dir": "TestProbe",
-                "executable": "test-probe.exe",
-                "version_check": {
-                    "type": "github_release",
-                    "repo": "owner/repo"
-                },
-                "package": {
-                    "type": "zip"
-                }
-            }
-        }
-    }"#;
+    let apps_json = SINGLE_PROBE_MANIFEST;
     env.write_manifest(apps_json);
 
     // 1. Test passing --help flag directly through to child app without clap swallowing it
     let help_output = Command::new(env.root().join("ppm.exe"))
         .args(["run", "test-probe", "--help"])
         .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
         .output()
         .expect("Failed to run ppm run test-probe --help");
 
@@ -188,6 +176,7 @@ fn test_e2e_cli_argument_and_help_passthrough() {
     let args_output = Command::new(env.root().join("ppm.exe"))
         .args(["run", "test-probe", "--echo-args", "--custom-param", "42"])
         .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
         .output()
         .expect("Failed to run ppm run with custom args");
 
@@ -254,6 +243,7 @@ fn test_e2e_dependency_resolution_and_enforcement() {
     let fail_output = Command::new(env.root().join("ppm.exe"))
         .args(["run", "main-app"])
         .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
         .output()
         .expect("Failed to execute ppm run main-app");
 
@@ -278,6 +268,7 @@ fn test_e2e_dependency_resolution_and_enforcement() {
     let success_output = Command::new(env.root().join("ppm.exe"))
         .args(["run", "main-app", "--echo-args"])
         .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
         .output()
         .expect("Failed to execute ppm run main-app after dependency deployment");
 
@@ -296,24 +287,7 @@ fn test_e2e_dependency_resolution_and_enforcement() {
 fn test_e2e_cross_directory_invocation() {
     let env = TestEnvironment::new();
     env.deploy_binary("TestProbe", "test-probe.exe");
-
-    let apps_json = r#"{
-        "$schema": "./apps.schema.json",
-        "apps": {
-            "test-probe": {
-                "name": "Virtualization Test Probe",
-                "target_dir": "TestProbe",
-                "executable": "test-probe.exe",
-                "version_check": {
-                    "type": "github_release",
-                    "repo": "owner/repo"
-                },
-                "package": {
-                    "type": "zip"
-                }
-            }
-        }
-    }"#;
+    let apps_json = SINGLE_PROBE_MANIFEST;
     env.write_manifest(apps_json);
 
     // Invoke ppm_exe directly from its build output directory (without copying to test root)
@@ -321,6 +295,7 @@ fn test_e2e_cross_directory_invocation() {
     let output = Command::new(&env.ppm_exe)
         .args(["run", "test-probe", "--echo-args", "--cross-dir-test"])
         .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
         .output()
         .expect("Failed to run ppm from build path");
 

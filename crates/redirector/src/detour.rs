@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use windows_sys::Win32::System::Threading::GetCurrentThread;
 
-extern "system" {
+unsafe extern "system" {
     pub fn DetourTransactionBegin() -> i32;
     pub fn DetourUpdateThread(hThread: windows_sys::Win32::Foundation::HANDLE) -> i32;
     pub fn DetourAttach(ppPointer: *mut *mut c_void, pDetour: *mut c_void) -> i32;
@@ -17,15 +17,17 @@ extern "system" {
 /// Caller must ensure `target_ptr` points to a valid function pointer in executable memory
 /// and `detour_fn` has a signature matching the target ABI.
 pub unsafe fn attach_detour(target_ptr: *mut *mut c_void, detour_fn: *mut c_void) -> bool {
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    let status = DetourAttach(target_ptr, detour_fn);
-    if status != 0 {
-        tracing::error!("DetourAttach failed with code {}", status);
+    unsafe {
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+        let status = DetourAttach(target_ptr, detour_fn);
+        if status != 0 {
+            tracing::error!("DetourAttach failed with code {}", status);
+        }
+        let commit_status = DetourTransactionCommit();
+        if commit_status != 0 {
+            tracing::error!("DetourTransactionCommit failed with code {}", commit_status);
+        }
+        status == 0 && commit_status == 0
     }
-    let commit_status = DetourTransactionCommit();
-    if commit_status != 0 {
-        tracing::error!("DetourTransactionCommit failed with code {}", commit_status);
-    }
-    status == 0 && commit_status == 0
 }

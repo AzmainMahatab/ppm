@@ -80,10 +80,10 @@ impl VirtualRegistry {
             return Some(Err(()));
         }
 
-        if let Some(val) = key_node.values.get(&norm_val) {
-            if let Ok(bytes) = hex::decode(&val.data_hex) {
-                return Some(Ok((val.val_type, bytes)));
-            }
+        if let Some(val) = key_node.values.get(&norm_val)
+            && let Ok(bytes) = hex::decode(&val.data_hex)
+        {
+            return Some(Ok((val.val_type, bytes)));
         }
 
         None
@@ -96,24 +96,17 @@ impl VirtualRegistry {
 
         {
             let mut reg_data = self.data.write();
-            let key_node = reg_data
-                .keys
-                .entry(norm_key)
-                .or_insert_with(|| SerializedKey {
-                    values: HashMap::new(),
-                    deleted_values: HashSet::new(),
-                    is_tombstone: false,
-                });
+            let key_node = reg_data.keys.entry(norm_key).or_insert_with(|| SerializedKey {
+                values: HashMap::new(),
+                deleted_values: HashSet::new(),
+                is_tombstone: false,
+            });
 
             key_node.is_tombstone = false;
             key_node.deleted_values.remove(&norm_val);
-            key_node.values.insert(
-                norm_val,
-                SerializedValue {
-                    val_type,
-                    data_hex,
-                },
-            );
+            key_node
+                .values
+                .insert(norm_val, SerializedValue { val_type, data_hex });
         }
 
         self.persist();
@@ -125,14 +118,11 @@ impl VirtualRegistry {
 
         {
             let mut reg_data = self.data.write();
-            let key_node = reg_data
-                .keys
-                .entry(norm_key)
-                .or_insert_with(|| SerializedKey {
-                    values: HashMap::new(),
-                    deleted_values: HashSet::new(),
-                    is_tombstone: false,
-                });
+            let key_node = reg_data.keys.entry(norm_key).or_insert_with(|| SerializedKey {
+                values: HashMap::new(),
+                deleted_values: HashSet::new(),
+                is_tombstone: false,
+            });
 
             key_node.values.remove(&norm_val);
             key_node.deleted_values.insert(norm_val);
@@ -165,14 +155,11 @@ impl VirtualRegistry {
                 }
             }
 
-            let key_node = reg_data
-                .keys
-                .entry(norm_key)
-                .or_insert_with(|| SerializedKey {
-                    values: HashMap::new(),
-                    deleted_values: HashSet::new(),
-                    is_tombstone: true,
-                });
+            let key_node = reg_data.keys.entry(norm_key).or_insert_with(|| SerializedKey {
+                values: HashMap::new(),
+                deleted_values: HashSet::new(),
+                is_tombstone: true,
+            });
             key_node.is_tombstone = true;
         }
 
@@ -184,14 +171,11 @@ impl VirtualRegistry {
 
         {
             let mut reg_data = self.data.write();
-            let key_node = reg_data
-                .keys
-                .entry(norm_key)
-                .or_insert_with(|| SerializedKey {
-                    values: HashMap::new(),
-                    deleted_values: HashSet::new(),
-                    is_tombstone: false,
-                });
+            let key_node = reg_data.keys.entry(norm_key).or_insert_with(|| SerializedKey {
+                values: HashMap::new(),
+                deleted_values: HashSet::new(),
+                is_tombstone: false,
+            });
             key_node.is_tombstone = false;
         }
 
@@ -215,7 +199,11 @@ impl VirtualRegistry {
                 let _ = fs::create_dir_all(parent);
             }
             if let Err(e) = fs::write(&self.path, &json_str) {
-                tracing::error!("Failed to write virtual registry state to '{}': {}", self.path.display(), e);
+                tracing::error!(
+                    "Failed to write virtual registry state to '{}': {}",
+                    self.path.display(),
+                    e
+                );
             }
         }
     }

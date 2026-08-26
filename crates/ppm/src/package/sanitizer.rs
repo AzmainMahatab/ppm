@@ -1,12 +1,9 @@
 use crate::core::config::PostInstallConfig;
-use color_eyre::eyre::Result;
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-pub fn sanitize_package(
-    target_dir: &Path,
-    post_install: Option<&PostInstallConfig>,
-) -> Result<()> {
+pub fn sanitize_package(target_dir: &Path, post_install: Option<&PostInstallConfig>) -> Result<()> {
     // 1. Universal portable sanitization: remove auto-updater manifest
     let auto_updater_yml = target_dir.join("resources").join("app-update.yml");
     if auto_updater_yml.exists() {

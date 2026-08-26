@@ -61,14 +61,7 @@ impl CredentialVault {
         data.credentials.get(&key).cloned()
     }
 
-    pub fn set(
-        &self,
-        target_name: String,
-        cred_type: u32,
-        user_name: String,
-        blob: &[u8],
-        persist: u32,
-    ) {
+    pub fn set(&self, target_name: String, cred_type: u32, user_name: String, blob: &[u8], persist: u32) {
         let key = Self::normalize_target(&target_name);
         let blob_hex = hex::encode(blob);
 
@@ -114,7 +107,11 @@ impl CredentialVault {
                 let _ = fs::create_dir_all(parent);
             }
             if let Err(e) = fs::write(&self.path, &json_str) {
-                tracing::error!("Failed to write credentials vault state to '{}': {}", self.path.display(), e);
+                tracing::error!(
+                    "Failed to write credentials vault state to '{}': {}",
+                    self.path.display(),
+                    e
+                );
             }
         }
     }

@@ -19,9 +19,7 @@ impl ArchString {
     pub fn resolve(&self, arch: CpuArch) -> Option<String> {
         match self {
             ArchString::Single(s) => Some(s.replace("{arch}", arch.as_str())),
-            ArchString::PerArch(map) => map
-                .get(arch.as_str())
-                .map(|s| s.replace("{arch}", arch.as_str())),
+            ArchString::PerArch(map) => map.get(arch.as_str()).map(|s| s.replace("{arch}", arch.as_str())),
         }
     }
 }
@@ -137,28 +135,52 @@ pub enum VersionCheckConfig {
 pub enum PackageConfig {
     #[serde(rename = "nsis_7z")]
     Nsis7z {
-        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "extract_subpath",
+            alias = "subpath",
+            skip_serializing_if = "Option::is_none"
+        )]
         extract_subpath: Option<String>,
     },
     #[serde(rename = "7z", alias = "seven_z")]
     SevenZ {
-        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "extract_subpath",
+            alias = "subpath",
+            skip_serializing_if = "Option::is_none"
+        )]
         extract_subpath: Option<String>,
     },
     Zip {
-        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "extract_subpath",
+            alias = "subpath",
+            skip_serializing_if = "Option::is_none"
+        )]
         extract_subpath: Option<String>,
     },
     Cab {
-        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "extract_subpath",
+            alias = "subpath",
+            skip_serializing_if = "Option::is_none"
+        )]
         extract_subpath: Option<String>,
     },
     Msi {
-        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "extract_subpath",
+            alias = "subpath",
+            skip_serializing_if = "Option::is_none"
+        )]
         extract_subpath: Option<String>,
     },
     Tar {
-        #[serde(rename = "extract_subpath", alias = "subpath", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "extract_subpath",
+            alias = "subpath",
+            skip_serializing_if = "Option::is_none"
+        )]
         extract_subpath: Option<String>,
     },
     Binary,
@@ -175,14 +197,14 @@ pub struct PostInstallConfig {
 }
 
 impl AppManifests {
-    pub fn load_from_file(path: &Path) -> color_eyre::Result<Self> {
+    pub fn load_from_file(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let manifests: Self = serde_json::from_str(&content)?;
         Ok(manifests)
     }
 
     #[allow(dead_code)]
-    pub fn save_to_file(&self, path: &Path) -> color_eyre::Result<()> {
+    pub fn save_to_file(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -217,7 +239,8 @@ mod tests {
             }
         }"#;
 
-        let parsed: AppManifests = serde_json::from_str(manifest_json).expect("Should parse valid manifest JSON");
+        let parsed: AppManifests =
+            serde_json::from_str(manifest_json).expect("Should parse valid manifest JSON");
         assert_eq!(parsed.schema, Some("./apps.schema.json".to_string()));
         assert!(parsed.apps.contains_key("demo-app"));
 
@@ -229,7 +252,8 @@ mod tests {
 
         // Round-trip test
         let serialized = serde_json::to_string_pretty(&parsed).expect("Should serialize back to JSON");
-        let reloaded: AppManifests = serde_json::from_str(&serialized).expect("Should reload serialized JSON");
+        let reloaded: AppManifests =
+            serde_json::from_str(&serialized).expect("Should reload serialized JSON");
         assert_eq!(reloaded.schema, parsed.schema);
     }
 }

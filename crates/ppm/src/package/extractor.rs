@@ -1,5 +1,5 @@
 use crate::core::config::PackageConfig;
-use color_eyre::eyre::{bail, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
@@ -10,9 +10,14 @@ const SEVENZ_SIGNATURE: &[u8] = &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
 struct StagingGuard<'a>(&'a Path);
 
-impl<'a> Drop for StagingGuard<'a> {
+impl Drop for StagingGuard<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(self.0);
+        if let Err(error) = fs::remove_dir_all(self.0) {
+            eprintln!(
+                "Warning: failed to clean staging directory '{}': {error}",
+                self.0.display()
+            );
+        }
     }
 }
 
@@ -70,7 +75,12 @@ pub fn extract_7z_stream(archive_path: &Path, offset: u64, dest_dir: &Path) -> R
     drop(temp_file);
 
     let res = sevenz_rust::decompress_file(&temp_7z, dest_dir);
-    let _ = fs::remove_file(&temp_7z);
+    if let Err(error) = fs::remove_file(&temp_7z) {
+        eprintln!(
+            "Warning: failed to remove temporary archive '{}': {error}",
+            temp_7z.display()
+        );
+    }
     if let Err(e) = res {
         bail!(
             "7-Zip decompression failed for '{}': {}",
@@ -95,10 +105,10 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         if entry.is_dir() {
             fs::create_dir_all(&outpath)?;
         } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p)?;
-                }
+            if let Some(p) = outpath.parent()
+                && !p.exists()
+            {
+                fs::create_dir_all(p)?;
             }
             let mut outfile = File::create(&outpath)?;
             std::io::copy(&mut entry, &mut outfile)?;
@@ -121,33 +131,35 @@ pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             .arg("-F:*")
             .arg(&abs_dest)
             .status()
+            && status.success()
         {
-            if status.success() {
-                return Ok(());
-            }
+            return Ok(());
         }
     }
 
-    if let Ok(file) = File::open(archive_path) {
-        if let Ok(mut cabinet) = cab::Cabinet::new(file) {
-            let file_names: Vec<String> = cabinet
-                .folder_entries()
-                .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
-                .collect();
+    if let Ok(file) = File::open(archive_path)
+        && let Ok(mut cabinet) = cab::Cabinet::new(file)
+    {
+        let file_names: Vec<String> = cabinet
+            .folder_entries()
+            .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
+            .collect();
 
-            for name in file_names {
-                if let Ok(mut reader) = cabinet.read_file(&name) {
-                    let out_path = dest_dir.join(&name);
-                    if let Some(parent) = out_path.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    if let Ok(mut out_file) = File::create(&out_path) {
-                        let _ = std::io::copy(&mut reader, &mut out_file);
-                    }
-                }
+        for name in file_names {
+            let Some(mut reader) = cabinet.read_file(&name).ok() else {
+                bail!("CAB entry '{name}' could not be opened for reading");
+            };
+            let out_path = dest_dir.join(&name);
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
             }
-            return Ok(());
+            let mut out_file = File::create(&out_path)
+                .with_context(|| format!("Failed to create '{}'", out_path.display()))?;
+            std::io::copy(&mut reader, &mut out_file)
+                .with_context(|| format!("Failed to extract CAB entry '{name}'"))?;
         }
+        return Ok(());
     }
 
     bail!("Failed to extract CAB package '{}'", archive_path.display())
@@ -155,92 +167,94 @@ pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 
 pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
     // 1. Pure-Rust extraction for standard WiX/MSI relational packages
-    if let Ok(file) = File::open(msi_path) {
-        if let Ok(mut package) = msi::Package::open(file) {
-            let mut file_map: HashMap<String, String> = HashMap::new();
-            if let Ok(file_rows) = package.select_rows(msi::Select::table("File")) {
-                for row in file_rows {
-                    let file_key = row[0].as_str().unwrap_or("").to_string();
-                    let raw_name = row[2].as_str().unwrap_or("");
-                    let clean_name = if let Some((_, long_name)) = raw_name.split_once('|') {
-                        long_name
-                    } else {
-                        raw_name
-                    };
-                    if !file_key.is_empty() && !clean_name.is_empty() {
-                        file_map.insert(file_key, clean_name.to_string());
-                    }
-                }
-            }
-
-            let stream_names: Vec<String> = package.streams().map(|s| s.to_string()).collect();
-            let mut extracted_any = false;
-
-            for stream_name in &stream_names {
-                let mut stream_reader = match package.read_stream(stream_name) {
-                    Ok(r) => r,
-                    Err(_) => continue,
+    if let Ok(file) = File::open(msi_path)
+        && let Ok(mut package) = msi::Package::open(file)
+    {
+        let mut file_map: HashMap<String, String> = HashMap::new();
+        if let Ok(file_rows) = package.select_rows(msi::Select::table("File")) {
+            for row in file_rows {
+                let file_key = row[0].as_str().unwrap_or("").to_string();
+                let raw_name = row[2].as_str().unwrap_or("");
+                let clean_name = if let Some((_, long_name)) = raw_name.split_once('|') {
+                    long_name
+                } else {
+                    raw_name
                 };
-
-                let mut stream_bytes = Vec::new();
-                if stream_reader.read_to_end(&mut stream_bytes).is_err() {
-                    continue;
+                if !file_key.is_empty() && !clean_name.is_empty() {
+                    file_map.insert(file_key, clean_name.to_string());
                 }
+            }
+        }
 
-                if stream_bytes.starts_with(b"MSCF") {
-                    if let Ok(mut cabinet) = cab::Cabinet::new(Cursor::new(stream_bytes)) {
-                        let cab_entries: Vec<String> = cabinet
-                            .folder_entries()
-                            .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
-                            .collect();
+        let stream_names: Vec<String> = package.streams().map(|s| s.to_string()).collect();
+        let mut extracted_any = false;
 
-                        for cab_file_key in cab_entries {
-                            if let Ok(mut reader) = cabinet.read_file(&cab_file_key) {
-                                let target_name = file_map
-                                    .get(&cab_file_key)
-                                    .cloned()
-                                    .unwrap_or_else(|| cab_file_key.clone());
+        for stream_name in &stream_names {
+            let mut stream_reader = match package.read_stream(stream_name) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
 
-                                let out_file_path = dest_dir.join(&target_name);
-                                if let Some(parent) = out_file_path.parent() {
-                                    let _ = fs::create_dir_all(parent);
-                                }
+            let mut stream_bytes = Vec::new();
+            if stream_reader.read_to_end(&mut stream_bytes).is_err() {
+                continue;
+            }
 
-                                if let Ok(mut out_file) = File::create(&out_file_path) {
-                                    if std::io::copy(&mut reader, &mut out_file).is_ok() {
-                                        extracted_any = true;
-                                    }
-                                }
-                            }
+            if stream_bytes.starts_with(b"MSCF")
+                && let Ok(mut cabinet) = cab::Cabinet::new(Cursor::new(stream_bytes))
+            {
+                let cab_entries: Vec<String> = cabinet
+                    .folder_entries()
+                    .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
+                    .collect();
+
+                for cab_file_key in cab_entries {
+                    if let Ok(mut reader) = cabinet.read_file(&cab_file_key) {
+                        let target_name = file_map
+                            .get(&cab_file_key)
+                            .cloned()
+                            .unwrap_or_else(|| cab_file_key.clone());
+
+                        let out_file_path = dest_dir.join(&target_name);
+                        if let Some(parent) = out_file_path.parent() {
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("Failed to create directory '{}'", parent.display())
+                            })?;
                         }
+
+                        let mut out_file = File::create(&out_file_path)
+                            .with_context(|| format!("Failed to create '{}'", out_file_path.display()))?;
+                        std::io::copy(&mut reader, &mut out_file).with_context(|| {
+                            format!("Failed to extract MSI stream entry '{cab_file_key}'")
+                        })?;
+                        extracted_any = true;
                     }
                 }
             }
+        }
 
-            // Check external CAB files if referenced
-            if !extracted_any {
-                if let Some(parent_dir) = msi_path.parent() {
-                    if let Ok(entries) = fs::read_dir(parent_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_file()
-                                && path
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .map(|e| e.eq_ignore_ascii_case("cab"))
-                                    .unwrap_or(false)
-                                && extract_cab(&path, dest_dir).is_ok()
-                            {
-                                extracted_any = true;
-                            }
-                        }
-                    }
+        // Check external CAB files if referenced
+        if !extracted_any
+            && let Some(parent_dir) = msi_path.parent()
+            && let Ok(entries) = fs::read_dir(parent_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("cab"))
+                        .unwrap_or(false)
+                    && extract_cab(&path, dest_dir).is_ok()
+                {
+                    extracted_any = true;
                 }
             }
+        }
 
-            if extracted_any {
-                return Ok(());
-            }
+        if extracted_any {
+            return Ok(());
         }
     }
 
@@ -269,8 +283,9 @@ pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
                     .and_then(|e| e.to_str())
                     .map(|e| e.eq_ignore_ascii_case("msi"))
                     .unwrap_or(false)
+                && let Err(error) = fs::remove_file(&p)
             {
-                let _ = fs::remove_file(&p);
+                eprintln!("Warning: failed to remove stray msi '{}': {error}", p.display());
             }
         }
     }
@@ -278,13 +293,14 @@ pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn extract_package(
-    archive_path: &Path,
-    package_config: &PackageConfig,
-    dest_dir: &Path,
-) -> Result<()> {
+pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest_dir: &Path) -> Result<()> {
     let stage_dir = dest_dir.join("__stage_extract");
-    let _ = fs::remove_dir_all(&stage_dir);
+    if let Err(error) = fs::remove_dir_all(&stage_dir) {
+        eprintln!(
+            "Warning: failed to clear stale staging directory '{}': {error}",
+            stage_dir.display()
+        );
+    }
     fs::create_dir_all(&stage_dir)?;
 
     let _guard = StagingGuard(&stage_dir);
@@ -297,7 +313,11 @@ pub fn extract_package(
         }
         PackageConfig::SevenZ { extract_subpath } => {
             if let Err(e) = sevenz_rust::decompress_file(archive_path, &stage_dir) {
-                bail!("7-Zip decompression failed for '{}': {}", archive_path.display(), e);
+                bail!(
+                    "7-Zip decompression failed for '{}': {}",
+                    archive_path.display(),
+                    e
+                );
             }
             extract_subpath.as_deref()
         }
@@ -355,12 +375,12 @@ fn find_payload_root(dir: &Path) -> PathBuf {
     for prefix in &["PFiles", "Program Files", "Program Files (x86)"] {
         let p = dir.join(prefix);
         if p.is_dir() {
-            if let Ok(mut entries) = fs::read_dir(&p) {
-                if let Some(Ok(child)) = entries.next() {
-                    let child_path = child.path();
-                    if child_path.is_dir() {
-                        return child_path;
-                    }
+            if let Ok(mut entries) = fs::read_dir(&p)
+                && let Some(Ok(child)) = entries.next()
+            {
+                let child_path = child.path();
+                if child_path.is_dir() {
+                    return child_path;
                 }
             }
             return p;

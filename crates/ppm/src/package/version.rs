@@ -1,7 +1,7 @@
 use crate::core::arch::CpuArch;
 use crate::core::config::{AppDefinition, VersionCheckConfig};
 use crate::package::pe_info::{get_electron_package_version, get_pe_product_version};
-use color_eyre::eyre::{bail, eyre, Result};
+use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 use serde_json::Value;
 use std::path::Path;
@@ -13,11 +13,7 @@ pub struct RemoteRelease {
 
 /// Dynamically detects the local version directly from the executable on disk.
 /// Zero static state files; 100% presence-based.
-pub fn detect_local_version(
-    root: &Path,
-    app_def: &AppDefinition,
-    arch: CpuArch,
-) -> Option<String> {
+pub fn detect_local_version(root: &Path, app_def: &AppDefinition, arch: CpuArch) -> Option<String> {
     let exe_path = app_def.executable_for_arch(root, arch);
     if !exe_path.is_file() {
         return None;
@@ -38,10 +34,7 @@ pub fn detect_local_version(
 }
 
 /// Fetches the latest upstream version and resolved download URL for a specific CPU architecture.
-pub fn check_remote_version(
-    config: &VersionCheckConfig,
-    arch: CpuArch,
-) -> Result<RemoteRelease> {
+pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
         VersionCheckConfig::ElectronManifest {
             url,
@@ -50,7 +43,7 @@ pub fn check_remote_version(
         } => {
             let manifest_url = url
                 .resolve(arch)
-                .ok_or_else(|| eyre!("No manifest URL configured for arch '{}'", arch.as_str()))?;
+                .ok_or_else(|| anyhow!("No manifest URL configured for arch '{}'", arch.as_str()))?;
 
             let client = reqwest::blocking::Client::builder()
                 .user_agent("ppm-portable-package-manager/0.1")
@@ -65,13 +58,13 @@ pub fn check_remote_version(
             let version_val = yaml
                 .get(key_name)
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| eyre!("Key '{}' not found in YAML manifest", key_name))?
+                .ok_or_else(|| anyhow!("Key '{}' not found in YAML manifest", key_name))?
                 .to_string();
 
             let download_url = if let Some(tpl) = url_template {
-                let resolved_tpl = tpl.resolve(arch).ok_or_else(|| {
-                    eyre!("No URL template configured for arch '{}'", arch.as_str())
-                })?;
+                let resolved_tpl = tpl
+                    .resolve(arch)
+                    .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
                 resolved_tpl
                     .replace("{version}", &version_val)
                     .replace("{arch}", arch.as_str())
@@ -80,7 +73,7 @@ pub fn check_remote_version(
                     .first()
                     .and_then(|f| f.get("url"))
                     .and_then(|u| u.as_str())
-                    .ok_or_else(|| eyre!("No file URL found in Electron manifest files array"))?;
+                    .ok_or_else(|| anyhow!("No file URL found in Electron manifest files array"))?;
 
                 if first_file.starts_with("http://") || first_file.starts_with("https://") {
                     first_file.to_string()
@@ -119,19 +112,19 @@ pub fn check_remote_version(
             let tag_name = json
                 .get("tag_name")
                 .and_then(|t| t.as_str())
-                .ok_or_else(|| eyre!("Missing tag_name in GitHub release"))?;
+                .ok_or_else(|| anyhow!("Missing tag_name in GitHub release"))?;
 
             let version = tag_name.strip_prefix('v').unwrap_or(tag_name).to_string();
 
             let assets = json
                 .get("assets")
                 .and_then(|a| a.as_array())
-                .ok_or_else(|| eyre!("Missing assets array in GitHub release"))?;
+                .ok_or_else(|| anyhow!("Missing assets array in GitHub release"))?;
 
             let pattern_str = match asset_pattern {
-                Some(p) => p.resolve(arch).ok_or_else(|| {
-                    eyre!("No asset pattern defined for arch '{}'", arch.as_str())
-                })?,
+                Some(p) => p
+                    .resolve(arch)
+                    .ok_or_else(|| anyhow!("No asset pattern defined for arch '{}'", arch.as_str()))?,
                 None => format!(".*{}.*\\.zip", arch.as_str()),
             };
 
@@ -140,18 +133,20 @@ pub fn check_remote_version(
             let mut matched_url = None;
             for asset in assets {
                 let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                if re.is_match(name) {
-                    if let Some(dl_url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
-                        matched_url = Some(dl_url.to_string());
-                        break;
-                    }
+                if re.is_match(name)
+                    && let Some(dl_url) = asset.get("browser_download_url").and_then(|u| u.as_str())
+                {
+                    matched_url = Some(dl_url.to_string());
+                    break;
                 }
             }
 
             let download_url = matched_url.ok_or_else(|| {
-                eyre!(
+                anyhow!(
                     "No asset matching pattern '{}' found in GitHub release {} for arch '{}'",
-                    pattern_str, tag_name, arch.as_str()
+                    pattern_str,
+                    tag_name,
+                    arch.as_str()
                 )
             })?;
 
@@ -169,11 +164,11 @@ pub fn check_remote_version(
         } => {
             let api_url = url
                 .resolve(arch)
-                .ok_or_else(|| eyre!("No JSON API URL configured for arch '{}'", arch.as_str()))?;
+                .ok_or_else(|| anyhow!("No JSON API URL configured for arch '{}'", arch.as_str()))?;
 
-            let v_key = version_key.resolve(arch).ok_or_else(|| {
-                eyre!("No version_key configured for arch '{}'", arch.as_str())
-            })?;
+            let v_key = version_key
+                .resolve(arch)
+                .ok_or_else(|| anyhow!("No version_key configured for arch '{}'", arch.as_str()))?;
 
             let client = reqwest::blocking::Client::builder()
                 .user_agent("ppm-portable-package-manager/0.1")
@@ -184,23 +179,23 @@ pub fn check_remote_version(
 
             let version = resolve_json_query(&json, &v_key)?
                 .as_str()
-                .ok_or_else(|| eyre!("Value at '{}' is not a string in JSON", v_key))?
+                .ok_or_else(|| anyhow!("Value at '{}' is not a string in JSON", v_key))?
                 .to_string();
 
             let download_url = if let Some(tpl) = url_template {
-                let resolved_tpl = tpl.resolve(arch).ok_or_else(|| {
-                    eyre!("No URL template configured for arch '{}'", arch.as_str())
-                })?;
+                let resolved_tpl = tpl
+                    .resolve(arch)
+                    .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
                 resolved_tpl
                     .replace("{version}", &version)
                     .replace("{arch}", arch.as_str())
             } else if let Some(uk) = url_key {
-                let resolved_uk = uk.resolve(arch).ok_or_else(|| {
-                    eyre!("No url_key configured for arch '{}'", arch.as_str())
-                })?;
+                let resolved_uk = uk
+                    .resolve(arch)
+                    .ok_or_else(|| anyhow!("No url_key configured for arch '{}'", arch.as_str()))?;
                 resolve_json_query(&json, &resolved_uk)?
                     .as_str()
-                    .ok_or_else(|| eyre!("Value at '{}' is not a string in JSON", resolved_uk))?
+                    .ok_or_else(|| anyhow!("Value at '{}' is not a string in JSON", resolved_uk))?
                     .to_string()
             } else {
                 bail!("Either url_key or url_template must be provided for json_api");
@@ -219,15 +214,15 @@ pub fn check_remote_version(
         } => {
             let scrape_url = url
                 .resolve(arch)
-                .ok_or_else(|| eyre!("No scrape URL configured for arch '{}'", arch.as_str()))?;
+                .ok_or_else(|| anyhow!("No scrape URL configured for arch '{}'", arch.as_str()))?;
 
             let regex_str = regex
                 .resolve(arch)
-                .ok_or_else(|| eyre!("No regex configured for arch '{}'", arch.as_str()))?;
+                .ok_or_else(|| anyhow!("No regex configured for arch '{}'", arch.as_str()))?;
 
             let tpl_str = url_template
                 .resolve(arch)
-                .ok_or_else(|| eyre!("No URL template configured for arch '{}'", arch.as_str()))?;
+                .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
 
             let client = reqwest::blocking::Client::builder()
                 .user_agent("ppm-portable-package-manager/0.1")
@@ -240,7 +235,7 @@ pub fn check_remote_version(
 
             let caps = re
                 .captures(&body)
-                .ok_or_else(|| eyre!("Regex '{}' did not match body of '{}'", regex_str, scrape_url))?;
+                .ok_or_else(|| anyhow!("Regex '{}' did not match body of '{}'", regex_str, scrape_url))?;
 
             let matched_url = caps
                 .get(0)
@@ -250,7 +245,7 @@ pub fn check_remote_version(
             let version = caps
                 .get(1)
                 .map(|m| m.as_str().to_string())
-                .ok_or_else(|| eyre!("Regex did not capture group 1 for version"))?;
+                .ok_or_else(|| anyhow!("Regex did not capture group 1 for version"))?;
 
             let download_url = if tpl_str.contains("{url}") || tpl_str == "{0}" {
                 tpl_str
@@ -282,14 +277,14 @@ fn resolve_json_query<'a>(mut current: &'a Value, query: &str) -> Result<&'a Val
         if let Some((array_name, predicate_str)) = part.split_once('[') {
             let predicate = predicate_str.trim_end_matches(']');
             if !array_name.is_empty() {
-                current = current.get(array_name).ok_or_else(|| {
-                    eyre!("Key '{}' not found in JSON object", array_name)
-                })?;
+                current = current
+                    .get(array_name)
+                    .ok_or_else(|| anyhow!("Key '{}' not found in JSON object", array_name))?;
             }
 
-            let array = current.as_array().ok_or_else(|| {
-                eyre!("Expected array at '{}' but found other JSON type", part)
-            })?;
+            let array = current
+                .as_array()
+                .ok_or_else(|| anyhow!("Expected array at '{}' but found other JSON type", part))?;
 
             let mut matched = None;
             let conditions: Vec<(&str, &str)> = predicate
@@ -312,20 +307,16 @@ fn resolve_json_query<'a>(mut current: &'a Value, query: &str) -> Result<&'a Val
                 }
             }
 
-            current = matched.ok_or_else(|| {
-                eyre!(
-                    "No element matching predicate '[{}]' found in array",
-                    predicate
-                )
-            })?;
+            current = matched
+                .ok_or_else(|| anyhow!("No element matching predicate '[{}]' found in array", predicate))?;
         } else if let Ok(idx) = part.parse::<usize>() {
-            current = current.get(idx).ok_or_else(|| {
-                eyre!("Index {} out of bounds in JSON array", idx)
-            })?;
+            current = current
+                .get(idx)
+                .ok_or_else(|| anyhow!("Index {} out of bounds in JSON array", idx))?;
         } else {
-            current = current.get(part).ok_or_else(|| {
-                eyre!("Key '{}' not found in JSON object", part)
-            })?;
+            current = current
+                .get(part)
+                .ok_or_else(|| anyhow!("Key '{}' not found in JSON object", part))?;
         }
     }
 

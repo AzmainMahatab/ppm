@@ -1,4 +1,4 @@
-use color_eyre::eyre::{bail, Result};
+use anyhow::{Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::Write;
@@ -12,10 +12,7 @@ pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<
     let mut response = client.get(url).send()?;
 
     if !response.status().is_success() {
-        bail!(
-            "Download failed with HTTP status code: {}",
-            response.status()
-        );
+        bail!("Download failed with HTTP status code: {}", response.status());
     }
 
     let total_size = response.content_length().unwrap_or(0);

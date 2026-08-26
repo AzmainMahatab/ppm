@@ -1,10 +1,12 @@
+use anyhow::Context;
+use anyhow::anyhow;
+use clap::{Parser, Subcommand};
+use comfy_table::presets::UTF8_FULL;
+use comfy_table::{Cell, Color, Table};
 use ppm::core::arch::{ArchTarget, CpuArch};
 use ppm::core::config::{AppDefinition, AppManifests};
 use ppm::engine;
 use ppm::package;
-use clap::{Parser, Subcommand};
-use comfy_table::presets::UTF8_FULL;
-use comfy_table::{Cell, Color, Table};
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -23,11 +25,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize the portable environment and scaffold directories
-    Init {
-        /// Force re-initialization and overwrite files
-        #[arg(short, long)]
-        force: bool,
-    },
+    Init,
 
     /// Launch an application with virtualization and taskbar badging
     #[command(disable_help_flag = true)]
@@ -99,20 +97,17 @@ fn resolve_root() -> PathBuf {
     }
 
     // 2. If current working directory has a portable environment (.ppm/apps.json or manifests/apps.json)
-    if let Ok(cwd) = env::current_dir() {
-        if cwd.join(".ppm").join("apps.json").is_file() || cwd.join("manifests").join("apps.json").is_file() {
-            return cwd;
-        }
+    if let Ok(cwd) = env::current_dir()
+        && (cwd.join(".ppm").join("apps.json").is_file() || cwd.join("manifests").join("apps.json").is_file())
+    {
+        return cwd;
     }
 
     // 3. Fallback to executable location
     let current_exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("ppm.exe"));
     let exe_dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
 
-    let last_comp = exe_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let last_comp = exe_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     if matches!(last_comp, ".ppm" | "Engine" | "lib" | "dist") {
         exe_dir.parent().unwrap_or(exe_dir).to_path_buf()
@@ -127,7 +122,7 @@ fn resolve_root() -> PathBuf {
     }
 }
 
-fn load_manifest(root: &Path) -> color_eyre::Result<AppManifests> {
+fn load_manifest(root: &Path) -> anyhow::Result<AppManifests> {
     let apps_json_path = root.join(".ppm").join("apps.json");
     if apps_json_path.exists() {
         AppManifests::load_from_file(&apps_json_path)
@@ -136,7 +131,7 @@ fn load_manifest(root: &Path) -> color_eyre::Result<AppManifests> {
         if dev_manifest.exists() {
             AppManifests::load_from_file(&dev_manifest)
         } else {
-            color_eyre::eyre::bail!(
+            anyhow::bail!(
                 "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
                 apps_json_path.display()
             );
@@ -144,10 +139,7 @@ fn load_manifest(root: &Path) -> color_eyre::Result<AppManifests> {
     }
 }
 
-fn resolve_install_order(
-    manifests: &AppManifests,
-    target_app_id: &str,
-) -> color_eyre::Result<Vec<String>> {
+fn resolve_install_order(manifests: &AppManifests, target_app_id: &str) -> anyhow::Result<Vec<String>> {
     let mut order = Vec::new();
     let mut visited = HashSet::new();
     let mut visiting = HashSet::new();
@@ -158,9 +150,9 @@ fn resolve_install_order(
         order: &mut Vec<String>,
         visited: &mut HashSet<String>,
         visiting: &mut HashSet<String>,
-    ) -> color_eyre::Result<()> {
+    ) -> anyhow::Result<()> {
         if visiting.contains(app_id) {
-            color_eyre::eyre::bail!("Circular dependency detected involving '{}'", app_id);
+            anyhow::bail!("Circular dependency detected involving '{}'", app_id);
         }
         if visited.contains(app_id) {
             return Ok(());
@@ -171,7 +163,7 @@ fn resolve_install_order(
         let app_def = manifests
             .apps
             .get(app_id)
-            .ok_or_else(|| color_eyre::eyre::eyre!("Dependency '{}' not defined in apps.json", app_id))?;
+            .ok_or_else(|| anyhow!("Dependency '{}' not defined in apps.json", app_id))?;
 
         if let Some(deps) = &app_def.dependencies {
             for dep in deps {
@@ -193,30 +185,28 @@ fn resolve_install_order(
             }
         }
     } else {
-        dfs(
-            target_app_id,
-            manifests,
-            &mut order,
-            &mut visited,
-            &mut visiting,
-        )?;
+        dfs(target_app_id, manifests, &mut order, &mut visited, &mut visiting)?;
     }
 
     Ok(order)
 }
 
-fn perform_install(
-    root: &Path,
-    app_id: &str,
-    app_def: &AppDefinition,
-    arch: CpuArch,
-) -> color_eyre::Result<()> {
+fn perform_install(root: &Path, app_id: &str, app_def: &AppDefinition, arch: CpuArch) -> anyhow::Result<()> {
     if !app_def.is_supported_on_arch(arch) {
-        println!("  • Skipping '{}' (Not supported on {})", app_def.name, arch.as_str());
+        println!(
+            "  • Skipping '{}' (Not supported on {})",
+            app_def.name,
+            arch.as_str()
+        );
         return Ok(());
     }
 
-    println!("\n▶ Processing '{}' ({}) for architecture [{}]", app_def.name, app_id, arch.as_str());
+    println!(
+        "\n▶ Processing '{}' ({}) for architecture [{}]",
+        app_def.name,
+        app_id,
+        arch.as_str()
+    );
 
     // 1. Fetch remote release metadata
     println!("  • Checking online release for {}...", arch.as_str());
@@ -228,17 +218,27 @@ fn perform_install(
 
     // 2. Download archive to isolated .ppm/cache/
     let temp_cache_dir = root.join(".ppm").join("cache");
-    let _ = std::fs::create_dir_all(&temp_cache_dir);
+    std::fs::create_dir_all(&temp_cache_dir)?;
 
     let ext = release
         .download_url
         .rsplit_once('.')
         .map(|(_, e)| e)
         .unwrap_or("pkg");
-    let temp_archive = temp_cache_dir.join(format!("{}_{}_{}.{}", app_id, arch.as_str(), release.version, ext));
+    let temp_archive = temp_cache_dir.join(format!(
+        "{}_{}_{}.{}",
+        app_id,
+        arch.as_str(),
+        release.version,
+        ext
+    ));
 
     println!("  • Downloading package...");
-    package::downloader::download_file(&release.download_url, &temp_archive, &format!("{} ({})", app_def.name, arch.as_str()))?;
+    package::downloader::download_file(
+        &release.download_url,
+        &temp_archive,
+        &format!("{} ({})", app_def.name, arch.as_str()),
+    )?;
 
     // 3. Extract to target directory: Apps/<arch>/<target_dir>
     let target_dir = app_def.app_dir_for_arch(root, arch);
@@ -250,25 +250,31 @@ fn perform_install(
     package::sanitizer::sanitize_package(&target_dir, app_def.post_install.as_ref())?;
 
     // 5. Clean temporary download
-    let _ = std::fs::remove_file(&temp_archive);
+    if let Err(error) = std::fs::remove_file(&temp_archive) {
+        eprintln!(
+            "Warning: failed to remove cached archive '{}': {error}",
+            temp_archive.display()
+        );
+    }
 
     println!(
         "  ✓ Successfully installed {} [{}] (v{})",
-        app_def.name, arch.as_str(), release.version
+        app_def.name,
+        arch.as_str(),
+        release.version
     );
 
     Ok(())
 }
 
-fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let root = resolve_root();
 
     match cli.command {
-        Commands::Init { force } => {
+        Commands::Init => {
             println!("⚡ Initializing Portable Environment in '{}'...", root.display());
-            engine::init::init_environment(&root, force)?;
+            engine::init::init_environment(&root)?;
             println!("\n✓ Portable environment initialized successfully!");
         }
 
@@ -279,7 +285,10 @@ fn main() -> color_eyre::Result<()> {
 
         Commands::Check { arch } => {
             let target_archs = arch.resolve();
-            println!("🔍 Checking configured applications for architectures {:?}...\n", target_archs.iter().map(|a| a.as_str()).collect::<Vec<_>>());
+            println!(
+                "🔍 Checking configured applications for architectures {:?}...\n",
+                target_archs.iter().map(|a| a.as_str()).collect::<Vec<_>>()
+            );
             let manifests = load_manifest(&root)?;
 
             let mut table = Table::new();
@@ -310,7 +319,8 @@ fn main() -> color_eyre::Result<()> {
 
                     // 100% Dynamic presence-based local version detection from PE header
                     let local_v = package::version::detect_local_version(&root, app_def, target_arch);
-                    let remote_res = package::version::check_remote_version(&app_def.version_check, target_arch);
+                    let remote_res =
+                        package::version::check_remote_version(&app_def.version_check, target_arch);
 
                     let is_installed = app_def.is_installed_for_arch(&root, target_arch);
                     let local_display = match (&local_v, is_installed) {
@@ -399,13 +409,23 @@ fn main() -> color_eyre::Result<()> {
                             continue;
                         }
 
-                        println!("\n▶ Checking update for '{}' [{}]...", app_def.name, target_arch.as_str());
+                        println!(
+                            "\n▶ Checking update for '{}' [{}]...",
+                            app_def.name,
+                            target_arch.as_str()
+                        );
                         let local_v = package::version::detect_local_version(&root, app_def, target_arch);
-                        let remote_res = package::version::check_remote_version(&app_def.version_check, target_arch);
+                        let remote_res =
+                            package::version::check_remote_version(&app_def.version_check, target_arch);
 
                         match (local_v, remote_res) {
                             (Some(loc), Ok(remote)) if loc == remote.version => {
-                                println!("  ✓ {} [{}] is already up to date (v{})", app_def.name, target_arch.as_str(), loc);
+                                println!(
+                                    "  ✓ {} [{}] is already up to date (v{})",
+                                    app_def.name,
+                                    target_arch.as_str(),
+                                    loc
+                                );
                             }
                             (_, Ok(_)) => {
                                 perform_install(&root, app_id, app_def, target_arch)?;
@@ -435,7 +455,7 @@ fn main() -> color_eyre::Result<()> {
                 engine::launcher::generate_single_launcher(&root, &app)?;
                 println!("✓ Generated root launcher: {}.bat", app);
             } else {
-                color_eyre::eyre::bail!("App '{}' not found in apps.json", app);
+                anyhow::bail!("App '{}' not found in apps.json", app);
             }
         }
 
@@ -483,7 +503,7 @@ fn main() -> color_eyre::Result<()> {
                     let is_installed = app_def.is_installed_for_arch(&root, target_arch);
                     let installed_cell = if is_installed {
                         Cell::new("YES").fg(Color::Green)
-                      } else {
+                    } else {
                         Cell::new("NO").fg(Color::Red)
                     };
 
@@ -499,7 +519,12 @@ fn main() -> color_eyre::Result<()> {
                         .map(|d| d.join(", "))
                         .unwrap_or_else(|| "-".to_string());
 
-                    let rel_exe_path = format!("Apps/{}/{}/{}", target_arch.as_str(), app_def.target_dir, app_def.executable);
+                    let rel_exe_path = format!(
+                        "Apps/{}/{}/{}",
+                        target_arch.as_str(),
+                        app_def.target_dir,
+                        app_def.executable
+                    );
 
                     table.add_row(vec![
                         Cell::new(app_id),
@@ -521,20 +546,20 @@ fn main() -> color_eyre::Result<()> {
             let schema = schemars::schema_for!(AppManifests);
             let schema_json = serde_json::to_string_pretty(&schema)?;
 
-            let schema_path = root.join(".ppm").join("apps.schema.json");
-            if let Some(p) = schema_path.parent() {
-                let _ = std::fs::create_dir_all(p);
+            let schema_targets = [
+                root.join(".ppm").join("apps.schema.json"),
+                root.join("manifests").join("apps.schema.json"),
+            ];
+            for target in &schema_targets {
+                std::fs::write(target, &schema_json)
+                    .with_context(|| format!("Failed to write '{}'", target.display()))?;
             }
 
-            let _ = std::fs::write(&schema_path, &schema_json);
-
-            let ref_schema = root.join("manifests").join("apps.schema.json");
-            if let Some(p) = ref_schema.parent() {
-                let _ = std::fs::create_dir_all(p);
-                let _ = std::fs::write(&ref_schema, &schema_json);
-            }
-
-            println!("✓ JSON Schema generated at '{}'", schema_path.display());
+            println!(
+                "✓ JSON Schema generated at '{}' and '{}'",
+                schema_targets[0].display(),
+                schema_targets[1].display()
+            );
         }
 
         Commands::Validate => {

@@ -9,8 +9,23 @@ on:
       - main
 
 jobs:
-  test:
-    name: Test & Lint Suite
+  format:
+    name: Formatting
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Verify Formatting
+        run: cargo fmt --all --check
+
+  build:
+    name: Lint & Test Suite
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
@@ -21,16 +36,19 @@ jobs:
       - name: Setup MSVC Environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Setup Rust Stable Toolchain
+      - name: Setup Rust Toolchain (pinned via rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Restore Build Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Build All Targets
         run: cargo build --workspace --all-targets
 
       - name: Static Analysis & Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Workspace Tests
         run: cargo test --workspace

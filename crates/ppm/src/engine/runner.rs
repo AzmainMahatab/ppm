@@ -1,6 +1,7 @@
 use crate::core::arch::CpuArch;
 use crate::core::config::AppManifests;
-use color_eyre::eyre::{bail, eyre, Result};
+use anyhow::{Result, bail};
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -9,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[cfg(windows)]
-extern "C" {
+unsafe extern "C" {
     fn DetourCreateProcessWithDllExW(
         lpApplicationName: *const u16,
         lpCommandLine: *mut u16,
@@ -26,76 +27,66 @@ extern "C" {
     ) -> i32;
 }
 
+type EnvironmentOverrides = [(String, String)];
+
+// Intention: Merge app-specific overrides into an explicit child environment.
+// Why: Edition 2024 makes mutating the parent process environment unsafe and racy; handing the
+//      child a dedicated block keeps ppm's own process pristine and the launch reproducible.
+fn build_child_environment(overrides: &EnvironmentOverrides) -> Vec<(String, String)> {
+    let override_keys: HashSet<String> = overrides.iter().map(|(key, _)| key.to_uppercase()).collect();
+
+    // Ex: A variable that cannot be represented as UTF-8 is excluded rather than aborting the
+    //     launch; Windows environment blocks are UTF-16 and such names are pathological.
+    let inherited = env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(key, _)| !override_keys.contains(&key.to_uppercase()));
+
+    let mut merged: Vec<(String, String)> = inherited.collect();
+    merged.extend(overrides.iter().cloned());
+    merged.sort_by_key(|(key, _)| key.to_uppercase());
+
+    merged
+}
+
+fn to_utf16_environment_block(entries: &[(String, String)]) -> Vec<u16> {
+    let mut block = Vec::new();
+    for (key, value) in entries {
+        let entry = format!("{key}={value}");
+        let entry_wide = OsStr::new(&entry).encode_wide().chain(std::iter::once(0));
+        block.extend(entry_wide);
+    }
+
+    block.push(0);
+
+    block
+}
+
 pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Result<i32> {
     let host_arch = CpuArch::current();
 
     // 1. Resolve executable and target directory
-    let (exe_path, app_dir, extra_env, default_args, run_arch) = if app_name_or_path.ends_with(".exe")
-        || app_name_or_path.contains('\\')
-        || app_name_or_path.contains('/')
-    {
+    let resolved = if is_direct_executable_path(app_name_or_path) {
         let raw_path = Path::new(app_name_or_path);
-        let resolved = if raw_path.is_absolute() {
-            raw_path.to_path_buf()
-        } else {
-            root.join(raw_path)
-        };
-        let dir = resolved.parent().unwrap_or(root).to_path_buf();
-        (resolved, dir, None, None, host_arch)
-    } else {
-        let manifest_path = root.join(".ppm").join("apps.json");
-        let dev_manifest_path = root.join("manifests").join("apps.json");
-        let path_to_load = if manifest_path.exists() {
-            manifest_path
-        } else {
-            dev_manifest_path
-        };
-
-        let manifests = AppManifests::load_from_file(&path_to_load)?;
-        let app_def = manifests
-            .apps
-            .get(app_name_or_path)
-            .ok_or_else(|| eyre!("Application '{}' not found in apps.json", app_name_or_path))?;
-
-        // Determine effective architecture: prefer native host arch, fallback to x64 on ARM64 if available
-        let effective_arch = if app_def.is_installed_for_arch(root, host_arch) {
-            host_arch
-        } else if host_arch == CpuArch::Arm64 && app_def.is_installed_for_arch(root, CpuArch::X64) {
-            println!(
-                "[INFO] Native ARM64 binary not found for '{}'. Launching x64 version via Windows ARM64 emulation...",
-                app_def.name
-            );
-            CpuArch::X64
-        } else {
-            host_arch
-        };
-
-        // Verify dependencies
-        if let Some(deps) = &app_def.dependencies {
-            for dep in deps {
-                if let Some(dep_def) = manifests.apps.get(dep) {
-                    if !dep_def.is_installed_for_arch(root, effective_arch) {
-                        bail!(
-                            "Required dependency '{}' is not installed for [{}]. Run 'ppm install {}' first.",
-                            dep_def.name,
-                            effective_arch.as_str(),
-                            dep
-                        );
-                    }
-                }
-            }
+        let exe = resolve_executable_path(root, raw_path);
+        let dir = exe.parent().unwrap_or(root).to_path_buf();
+        ResolvedApp {
+            exe_path: exe,
+            app_dir: dir,
+            env: None,
+            default_args: None,
+            arch: host_arch,
         }
-
-        let exe = app_def.executable_for_arch(root, effective_arch);
-        let dir = app_def.app_dir_for_arch(root, effective_arch);
-        (
-            exe,
-            dir,
-            app_def.env.clone(),
-            app_def.default_args.clone(),
-            effective_arch,
-        )
+    } else {
+        resolve_managed_app(root, app_name_or_path, host_arch)?
     };
+
+    let ResolvedApp {
+        exe_path,
+        app_dir,
+        env: extra_env,
+        default_args,
+        arch: run_arch,
+    } = resolved;
 
     if !exe_path.exists() {
         bail!(
@@ -118,31 +109,42 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     fs::create_dir_all(&webview_data)?;
     fs::create_dir_all(&documents_dir)?;
 
-    env::set_var("USERPROFILE", &home_dir);
-    env::set_var("HOME", &home_dir);
-    env::set_var("LOCALAPPDATA", &local_appdata);
-    env::set_var("APPDATA", &roaming_appdata);
-    env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_data);
+    let mut overrides: Vec<(String, String)> = vec![
+        ("USERPROFILE".into(), path_to_env_value(&home_dir)),
+        ("HOME".into(), path_to_env_value(&home_dir)),
+        ("LOCALAPPDATA".into(), path_to_env_value(&local_appdata)),
+        ("APPDATA".into(), path_to_env_value(&roaming_appdata)),
+        (
+            "WEBVIEW2_USER_DATA_FOLDER".into(),
+            path_to_env_value(&webview_data),
+        ),
+        ("PORTABLE_APP".into(), "1".into()),
+        ("ELECTRON_ENABLE_LOGGING".into(), "true".into()),
+        ("PPM_ROOT".into(), path_to_env_value(root)),
+    ];
 
     // Auto-detect WebView2 engine if present under Apps/<run_arch>/WebView2
     let webview2_dir = root.join("Apps").join(run_arch.as_str()).join("WebView2");
-    if webview2_dir.join("msedgewebview2.exe").is_file() || webview2_dir.join("msedge.exe").is_file() {
-        env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &webview2_dir);
+    let webview2_engine_present =
+        webview2_dir.join("msedgewebview2.exe").is_file() || webview2_dir.join("msedge.exe").is_file();
+    if webview2_engine_present {
+        overrides.push((
+            "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".into(),
+            path_to_env_value(&webview2_dir),
+        ));
     }
 
-    env::set_var("PORTABLE_APP", "1");
-    env::set_var("ELECTRON_ENABLE_LOGGING", "true");
-    env::set_var("PPM_ROOT", root);
-
     if let Some(extra) = extra_env {
-        for (k, v) in extra {
-            let expanded = v
+        for (key, value) in extra {
+            let expanded = value
                 .replace("{root}", &root.to_string_lossy())
                 .replace("{home}", &home_dir.to_string_lossy())
                 .replace("{arch}", run_arch.as_str());
-            env::set_var(k, expanded);
+            overrides.push((key, expanded));
         }
     }
+
+    let child_environment = build_child_environment(&overrides);
 
     // 3. Prepare arguments
     let mut final_args = Vec::new();
@@ -157,7 +159,13 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     #[cfg(windows)]
     {
         if redirector_dll.exists() {
-            return launch_with_detours(&exe_path, &app_dir, &final_args, &redirector_dll);
+            return launch_with_detours(
+                &exe_path,
+                &app_dir,
+                &final_args,
+                &redirector_dll,
+                &child_environment,
+            );
         }
     }
 
@@ -165,9 +173,106 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     let mut cmd = Command::new(&exe_path);
     cmd.current_dir(&app_dir);
     cmd.args(&final_args);
+    cmd.envs(
+        child_environment
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
 
     let status = cmd.status()?;
     Ok(status.code().unwrap_or(0))
+}
+
+fn path_to_env_value(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+struct ResolvedApp {
+    exe_path: std::path::PathBuf,
+    app_dir: std::path::PathBuf,
+    env: Option<std::collections::HashMap<String, String>>,
+    default_args: Option<Vec<String>>,
+    arch: CpuArch,
+}
+
+fn is_direct_executable_path(app_name_or_path: &str) -> bool {
+    app_name_or_path.ends_with(".exe") || app_name_or_path.contains("\\") || app_name_or_path.contains('/')
+}
+
+fn resolve_executable_path(root: &Path, raw_path: &Path) -> std::path::PathBuf {
+    if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        root.join(raw_path)
+    }
+}
+
+fn resolve_managed_app(root: &Path, app_id: &str, host_arch: CpuArch) -> Result<ResolvedApp> {
+    let manifest_path = root.join(".ppm").join("apps.json");
+    let dev_manifest_path = root.join("manifests").join("apps.json");
+    let path_to_load = if manifest_path.exists() {
+        manifest_path
+    } else {
+        dev_manifest_path
+    };
+
+    let manifests = AppManifests::load_from_file(&path_to_load)?;
+    let Some(app_def) = manifests.apps.get(app_id) else {
+        bail!("Application '{app_id}' not found in apps.json");
+    };
+
+    // Determine effective architecture: prefer native host arch, fallback to x64 on ARM64 if available
+    let effective_arch = if app_def.is_installed_for_arch(root, host_arch) {
+        host_arch
+    } else if host_arch == CpuArch::Arm64 && app_def.is_installed_for_arch(root, CpuArch::X64) {
+        println!(
+            "[INFO] Native ARM64 binary not found for '{}'. Launching x64 version via Windows ARM64 emulation...",
+            app_def.name
+        );
+        CpuArch::X64
+    } else {
+        host_arch
+    };
+
+    verify_dependencies(&manifests, app_def, root, effective_arch)?;
+
+    let exe = app_def.executable_for_arch(root, effective_arch);
+    let dir = app_def.app_dir_for_arch(root, effective_arch);
+
+    Ok(ResolvedApp {
+        exe_path: exe,
+        app_dir: dir,
+        env: app_def.env.clone(),
+        default_args: app_def.default_args.clone(),
+        arch: effective_arch,
+    })
+}
+
+fn verify_dependencies(
+    manifests: &AppManifests,
+    app_def: &crate::core::config::AppDefinition,
+    root: &Path,
+    arch: CpuArch,
+) -> Result<()> {
+    let Some(deps) = &app_def.dependencies else {
+        return Ok(());
+    };
+
+    for dep in deps {
+        let Some(dep_def) = manifests.apps.get(dep) else {
+            continue;
+        };
+        if !dep_def.is_installed_for_arch(root, arch) {
+            bail!(
+                "Required dependency '{}' is not installed for [{}]. Run 'ppm install {}' first.",
+                dep_def.name,
+                arch.as_str(),
+                dep
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -176,12 +281,13 @@ fn launch_with_detours(
     work_dir: &Path,
     args: &[String],
     dll_path: &Path,
+    environment: &[(String, String)],
 ) -> Result<i32> {
     use std::ffi::CString;
     use std::mem::zeroed;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetStartupInfoW, WaitForSingleObject, INFINITE, PROCESS_INFORMATION,
-        STARTUPINFOW,
+        CREATE_UNICODE_ENVIRONMENT, GetExitCodeProcess, GetStartupInfoW, INFINITE, PROCESS_INFORMATION,
+        STARTUPINFOW, WaitForSingleObject,
     };
 
     let mut cmd_line_str = format!("\"{}\"", exe_path.display());
@@ -200,6 +306,8 @@ fn launch_with_detours(
         .chain(std::iter::once(0))
         .collect();
 
+    let mut environment_block = to_utf16_environment_block(environment);
+
     let dll_path_cstr = CString::new(dll_path.to_string_lossy().as_bytes())?;
 
     unsafe {
@@ -214,20 +322,21 @@ fn launch_with_detours(
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             1,
-            0,
-            std::ptr::null_mut(),
+            CREATE_UNICODE_ENVIRONMENT,
+            environment_block.as_mut_ptr().cast::<std::ffi::c_void>(),
             work_dir_wide.as_ptr(),
-            &mut si as *mut _ as *mut std::ffi::c_void,
-            &mut pi as *mut _ as *mut std::ffi::c_void,
+            std::ptr::from_mut(&mut si).cast::<std::ffi::c_void>(),
+            std::ptr::from_mut(&mut pi).cast::<std::ffi::c_void>(),
             dll_path_cstr.as_ptr(),
             std::ptr::null_mut(),
         );
 
         if success == 0 {
             bail!(
-                "DetourCreateProcessWithDllExW failed to launch '{}' with DLL '{}'",
+                "DetourCreateProcessWithDllExW failed to launch '{}' with DLL '{}': {}",
                 exe_path.display(),
-                dll_path.display()
+                dll_path.display(),
+                std::io::Error::last_os_error()
             );
         }
 
