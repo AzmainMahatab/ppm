@@ -182,27 +182,30 @@ crates/ppm/src/
     └── sanitizer.rs                # Post-Install Cleanup
 ```
 
-### C. `crates/test-probe/src/` & Integration Tests
+### C. Verification Probe & Integration Tests
 ```
-crates/test-probe/src/
-└── main.rs                         # Verification binary testing Registry, Shell, Vault & Injection
+crates/test-probe/                  # Isolated probe package (bin-artifact dev-dependency of ppm)
+└── src/main.rs                     # Tests Registry, Shell, Vault & Injection
 
 crates/ppm/tests/
-└── e2e_virtualization.rs           # Integration test executing test-probe under ppm run
+└── e2e_virtualization.rs           # Integration test consuming the probe via CARGO_BIN_FILE_* edge
 ```
+
+The toolchain is pinned to a dated nightly in `rust-toolchain.toml`; `.cargo/config.toml` opts into
+the `bindeps` unstable feature that enables the bin-artifact dependency edge above.
 
 ---
 
 ## 6. Build & Test Workflow
 
 ```bash
-# Run unit and integration test suite
+# Run unit and integration test suite (probe builds automatically as a bin-artifact dev-dependency)
 cargo test --workspace
 
 # Run static analysis and clippy lints
 cargo clippy --workspace --all-targets
 
-# Compile release binary
+# Compile release binaries (dev-dependencies absent from release graphs - probe never leaks)
 cargo build --release
 ```
 

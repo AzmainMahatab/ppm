@@ -20,7 +20,7 @@ A lightweight, single-binary portable application runner, virtualization engine,
 * **Dynamic Version Inspection**: Resolves installed versions directly from PE binary headers (`GetFileVersionInfoW`) and package manifests on disk.
 * **Isolated User Profile**: Maps user profile directories to the portable `Home/` directory.
 * **Deterministic Layout**: Structure organized into `.ppm/` (runtime configs, libraries, logs, and virtual hives), `Apps/` (binaries), and `Home/` (user data).
-* **Test Suite & Verification Probe**: Includes `test-probe` CLI binary and comprehensive workspace unit and integration tests (`cargo test --workspace`).
+* **Test Suite & Verification Probe**: Includes an isolated `test-probe` binary wired into tests as a bin-artifact dev-dependency, plus comprehensive workspace unit and integration tests (`cargo test --workspace`).
 
 ---
 

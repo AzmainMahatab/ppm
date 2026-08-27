@@ -34,24 +34,14 @@ impl TestEnvironment {
         let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
         let root = temp_dir.path();
 
+        // Intention: Resolve product binary and probe artifact purely through Cargo's build graph.
+        // Why: The probe ships as a bin-artifact dev-dependency (`artifact = "bin"`, gated by the
+        //      `[unstable] bindeps` opt-in on the toolchain pinned in rust-toolchain.toml). Cargo
+        //      compiles it whenever test targets are built and exports the absolute artifact path as
+        //      CARGO_BIN_FILE_TEST_PROBE_test-probe. Dev-dependencies are structurally absent from
+        //      release graphs: no feature flags, no membership carve-outs, no runtime bootstrap.
         let ppm_exe = PathBuf::from(env!("CARGO_BIN_EXE_ppm"));
-        let test_probe_exe = ppm_exe.with_file_name("test-probe.exe");
-
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let mut cmd = Command::new(cargo);
-        cmd.args(["build", "-p", "test-probe"]);
-        if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET") {
-            cmd.arg("--target").arg(target);
-        }
-        let status = cmd.status().expect("Failed to execute cargo build -p test-probe");
-        assert!(status.success(), "cargo build -p test-probe must succeed");
-
-        assert!(ppm_exe.is_file(), "ppm.exe must exist at {:?}", ppm_exe);
-        assert!(
-            test_probe_exe.is_file(),
-            "test-probe.exe must exist at {:?}",
-            test_probe_exe
-        );
+        let test_probe_exe = PathBuf::from(env!("CARGO_BIN_FILE_TEST_PROBE_test-probe"));
 
         // Copy ppm.exe to root
         fs::copy(&ppm_exe, root.join("ppm.exe")).expect("Failed to copy ppm.exe to test root");

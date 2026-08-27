@@ -20,25 +20,25 @@ categories = [
 ]
 
 [build-dependencies]
-cc = "1.2"
+cc.workspace = true
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
-reqwest = { version = "0.13", features = ["blocking", "json"] }
-indicatif = "0.18"
-comfy-table = "8.0"
-sevenz-rust = "0.6"
-zip = "8.6"
-cab = "0.6"
-msi = "0.10"
+anyhow.workspace = true
+cab.workspace = true
+clap = { workspace = true, features = ["derive"] }
+comfy-table.workspace = true
+hex.workspace = true
+indicatif.workspace = true
+msi.workspace = true
+regex.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yml = "0.0.13"
-schemars = "1.0"
-sha2 = "0.11"
-hex.workspace = true
-regex = "1.11"
-tempfile = "3.18"
+serde_yml.workspace = true
+sevenz-rust.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -46,10 +46,18 @@ windows-sys = { workspace = true, features = [
     "Win32_System_SystemInformation",
     "Win32_System_LibraryLoader"
 ] }
-anyhow = "1"
+zip.workspace = true
 # Intention: Build-ordering edge only; the rlib is never linked into the binary.
 # Why: Guarantees redirector.dll is fully compiled before ppm's build script embeds it.
 redirector = { path = "../redirector" }
+
+[dev-dependencies]
+# Intention: Provide the virtualization probe executable through Cargo's own build graph.
+# Why: A bin-artifact dependency makes Cargo compile the probe whenever test targets are built and
+#      export its absolute path (CARGO_BIN_FILE_TEST_PROBE_test-probe); dev-dependencies never enter
+#      release graphs, so shipping purity is structural - no feature flags, no runtime bootstrapping.
+#      Enabled by the `[unstable] bindeps` opt-in on the toolchain pinned in rust-toolchain.toml.
+test-probe = { path = "../test-probe", artifact = "bin" }
 
 [lints]
 workspace = true
