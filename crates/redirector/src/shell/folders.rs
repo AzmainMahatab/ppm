@@ -1,7 +1,8 @@
-use crate::detour::attach_detour;
+use crate::detour::{install_detour, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::atomic::AtomicPtr;
 use windows_sys::Win32::Foundation::{HANDLE, HWND, S_OK};
 use windows_sys::core::{GUID, HRESULT};
 
@@ -83,9 +84,9 @@ type FnSHGetKnownFolderPath = unsafe extern "system" fn(*const GUID, u32, HANDLE
 type FnSHGetFolderPathW = unsafe extern "system" fn(HWND, i32, HANDLE, u32, PWSTR) -> HRESULT;
 type FnGetUserProfileDirectoryW = unsafe extern "system" fn(HANDLE, PWSTR, *mut u32) -> BOOL;
 
-static mut REAL_SH_GET_KNOWN_FOLDER_PATH: *mut c_void = std::ptr::null_mut();
-static mut REAL_SH_GET_FOLDER_PATH_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_GET_USER_PROFILE_DIRECTORY_W: *mut c_void = std::ptr::null_mut();
+static REAL_SH_GET_KNOWN_FOLDER_PATH: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_SH_GET_FOLDER_PATH_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_GET_USER_PROFILE_DIRECTORY_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 fn guids_equal(a: &GUID, b: &GUID) -> bool {
     a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
@@ -109,7 +110,8 @@ unsafe extern "system" fn hook_sh_get_known_folder_path(
     path_out: *mut PWSTR,
 ) -> HRESULT {
     unsafe {
-        let real_fn: FnSHGetKnownFolderPath = std::mem::transmute(REAL_SH_GET_KNOWN_FOLDER_PATH);
+        let real_fn: FnSHGetKnownFolderPath =
+            std::mem::transmute(load_trampoline(&REAL_SH_GET_KNOWN_FOLDER_PATH));
         guard_shell_hook!(real_fn(rfid, flags, token, path_out), {
             if !rfid.is_null() && !path_out.is_null() {
                 let id = &*rfid;
@@ -154,7 +156,7 @@ unsafe extern "system" fn hook_sh_get_folder_path_w(
     path_out: PWSTR,
 ) -> HRESULT {
     unsafe {
-        let real_fn: FnSHGetFolderPathW = std::mem::transmute(REAL_SH_GET_FOLDER_PATH_W);
+        let real_fn: FnSHGetFolderPathW = std::mem::transmute(load_trampoline(&REAL_SH_GET_FOLDER_PATH_W));
         guard_shell_hook!(real_fn(hwnd, csidl, token, flags, path_out), {
             if !path_out.is_null() {
                 let clean_csidl = csidl & 0x00FF;
@@ -201,7 +203,8 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
     size: *mut u32,
 ) -> BOOL {
     unsafe {
-        let real_fn: FnGetUserProfileDirectoryW = std::mem::transmute(REAL_GET_USER_PROFILE_DIRECTORY_W);
+        let real_fn: FnGetUserProfileDirectoryW =
+            std::mem::transmute(load_trampoline(&REAL_GET_USER_PROFILE_DIRECTORY_W));
         guard_shell_hook!(real_fn(token, profile_dir, size), {
             if !size.is_null() {
                 let cfg = crate::paths::init_paths();
@@ -236,17 +239,17 @@ pub fn init_hooks() {
 
         if !shell32.is_null() {
             if let Some(proc) = GetProcAddress(shell32, c"SHGetKnownFolderPath".as_ptr().cast()) {
-                REAL_SH_GET_KNOWN_FOLDER_PATH = proc as *mut c_void;
-                attach_detour(
-                    &raw mut REAL_SH_GET_KNOWN_FOLDER_PATH,
+                install_detour(
+                    &REAL_SH_GET_KNOWN_FOLDER_PATH,
+                    proc as *mut c_void,
                     hook_sh_get_known_folder_path as *mut c_void,
                 );
             }
 
             if let Some(proc) = GetProcAddress(shell32, c"SHGetFolderPathW".as_ptr().cast()) {
-                REAL_SH_GET_FOLDER_PATH_W = proc as *mut c_void;
-                attach_detour(
-                    &raw mut REAL_SH_GET_FOLDER_PATH_W,
+                install_detour(
+                    &REAL_SH_GET_FOLDER_PATH_W,
+                    proc as *mut c_void,
                     hook_sh_get_folder_path_w as *mut c_void,
                 );
             }
@@ -255,9 +258,9 @@ pub fn init_hooks() {
         if !userenv.is_null()
             && let Some(proc) = GetProcAddress(userenv, c"GetUserProfileDirectoryW".as_ptr().cast())
         {
-            REAL_GET_USER_PROFILE_DIRECTORY_W = proc as *mut c_void;
-            attach_detour(
-                &raw mut REAL_GET_USER_PROFILE_DIRECTORY_W,
+            install_detour(
+                &REAL_GET_USER_PROFILE_DIRECTORY_W,
+                proc as *mut c_void,
                 hook_get_user_profile_directory_w as *mut c_void,
             );
         }

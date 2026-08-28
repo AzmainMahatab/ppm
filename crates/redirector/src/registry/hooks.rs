@@ -1,8 +1,9 @@
-use crate::detour::attach_detour;
+use crate::detour::{install_detour, load_trampoline};
 use crate::registry::handle_table::get_handle_table;
 use crate::registry::store::get_registry_store;
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::atomic::AtomicPtr;
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, HANDLE};
 use windows_sys::Win32::System::Registry::HKEY;
 
@@ -74,13 +75,13 @@ type FnRegDeleteValueW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
 type FnRegDeleteKeyW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
 type FnRegCloseKey = unsafe extern "system" fn(HKEY) -> i32;
 
-static mut REAL_REG_OPEN_KEY_EX_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_REG_CREATE_KEY_EX_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_REG_QUERY_VALUE_EX_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_REG_SET_VALUE_EX_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_REG_DELETE_VALUE_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_REG_DELETE_KEY_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_REG_CLOSE_KEY: *mut c_void = std::ptr::null_mut();
+static REAL_REG_OPEN_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_CREATE_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_QUERY_VALUE_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_SET_VALUE_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_DELETE_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_DELETE_KEY_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_CLOSE_KEY: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 // ---------------------- WIN32 API HOOKS ----------------------
 
@@ -92,7 +93,7 @@ unsafe extern "system" fn hook_reg_open_key_ex_w(
     phk_result: *mut HKEY,
 ) -> i32 {
     unsafe {
-        let real_fn: FnRegOpenKeyExW = std::mem::transmute(REAL_REG_OPEN_KEY_EX_W);
+        let real_fn: FnRegOpenKeyExW = std::mem::transmute(load_trampoline(&REAL_REG_OPEN_KEY_EX_W));
         guard_reg_hook!(real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result), {
             let base_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
             let subkey_str = wide_to_string(lp_sub_key);
@@ -146,7 +147,7 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
     lpdw_disposition: *mut u32,
 ) -> i32 {
     unsafe {
-        let real_fn: FnRegCreateKeyExW = std::mem::transmute(REAL_REG_CREATE_KEY_EX_W);
+        let real_fn: FnRegCreateKeyExW = std::mem::transmute(load_trampoline(&REAL_REG_CREATE_KEY_EX_W));
         guard_reg_hook!(
             real_fn(
                 hkey,
@@ -225,7 +226,7 @@ unsafe extern "system" fn hook_reg_query_value_ex_w(
     lpcb_data: *mut u32,
 ) -> i32 {
     unsafe {
-        let real_fn: FnRegQueryValueExW = std::mem::transmute(REAL_REG_QUERY_VALUE_EX_W);
+        let real_fn: FnRegQueryValueExW = std::mem::transmute(load_trampoline(&REAL_REG_QUERY_VALUE_EX_W));
         guard_reg_hook!(
             real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data),
             {
@@ -288,7 +289,7 @@ unsafe extern "system" fn hook_reg_set_value_ex_w(
     cb_data: u32,
 ) -> i32 {
     unsafe {
-        let real_fn: FnRegSetValueExW = std::mem::transmute(REAL_REG_SET_VALUE_EX_W);
+        let real_fn: FnRegSetValueExW = std::mem::transmute(load_trampoline(&REAL_REG_SET_VALUE_EX_W));
         guard_reg_hook!(
             real_fn(hkey, lp_value_name, reserved, dw_type, lp_data, cb_data),
             {
@@ -317,7 +318,7 @@ unsafe extern "system" fn hook_reg_set_value_ex_w(
 
 unsafe extern "system" fn hook_reg_delete_value_w(hkey: HKEY, lp_value_name: *const u16) -> i32 {
     unsafe {
-        let real_fn: FnRegDeleteValueW = std::mem::transmute(REAL_REG_DELETE_VALUE_W);
+        let real_fn: FnRegDeleteValueW = std::mem::transmute(load_trampoline(&REAL_REG_DELETE_VALUE_W));
         guard_reg_hook!(real_fn(hkey, lp_value_name), {
             let key_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
             let val_name = wide_to_string(lp_value_name);
@@ -330,7 +331,7 @@ unsafe extern "system" fn hook_reg_delete_value_w(hkey: HKEY, lp_value_name: *co
 
 unsafe extern "system" fn hook_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u16) -> i32 {
     unsafe {
-        let real_fn: FnRegDeleteKeyW = std::mem::transmute(REAL_REG_DELETE_KEY_W);
+        let real_fn: FnRegDeleteKeyW = std::mem::transmute(load_trampoline(&REAL_REG_DELETE_KEY_W));
         guard_reg_hook!(real_fn(hkey, lp_sub_key), {
             let base_path = get_handle_table().get_path(hkey as HANDLE).unwrap_or_default();
             let subkey_str = wide_to_string(lp_sub_key);
@@ -351,7 +352,7 @@ unsafe extern "system" fn hook_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u
 
 unsafe extern "system" fn hook_reg_close_key(hkey: HKEY) -> i32 {
     unsafe {
-        let real_fn: FnRegCloseKey = std::mem::transmute(REAL_REG_CLOSE_KEY);
+        let real_fn: FnRegCloseKey = std::mem::transmute(load_trampoline(&REAL_REG_CLOSE_KEY));
         guard_reg_hook!(real_fn(hkey), {
             if let Some(entry) = get_handle_table().close_handle(hkey as HANDLE)
                 && entry.is_synthetic
@@ -379,62 +380,65 @@ pub fn init_hooks() {
 
         if !reg_mod.is_null() {
             if let Some(proc) = GetProcAddress(reg_mod, c"RegOpenKeyExW".as_ptr().cast()) {
-                REAL_REG_OPEN_KEY_EX_W = proc as *mut c_void;
-                let ok = attach_detour(
-                    &raw mut REAL_REG_OPEN_KEY_EX_W,
+                let ok = install_detour(
+                    &REAL_REG_OPEN_KEY_EX_W,
+                    proc as *mut c_void,
                     hook_reg_open_key_ex_w as *mut c_void,
                 );
                 tracing::info!("Hook RegOpenKeyExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegCreateKeyExW".as_ptr().cast()) {
-                REAL_REG_CREATE_KEY_EX_W = proc as *mut c_void;
-                let ok = attach_detour(
-                    &raw mut REAL_REG_CREATE_KEY_EX_W,
+                let ok = install_detour(
+                    &REAL_REG_CREATE_KEY_EX_W,
+                    proc as *mut c_void,
                     hook_reg_create_key_ex_w as *mut c_void,
                 );
                 tracing::info!("Hook RegCreateKeyExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegQueryValueExW".as_ptr().cast()) {
-                REAL_REG_QUERY_VALUE_EX_W = proc as *mut c_void;
-                let ok = attach_detour(
-                    &raw mut REAL_REG_QUERY_VALUE_EX_W,
+                let ok = install_detour(
+                    &REAL_REG_QUERY_VALUE_EX_W,
+                    proc as *mut c_void,
                     hook_reg_query_value_ex_w as *mut c_void,
                 );
                 tracing::info!("Hook RegQueryValueExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegSetValueExW".as_ptr().cast()) {
-                REAL_REG_SET_VALUE_EX_W = proc as *mut c_void;
-                let ok = attach_detour(
-                    &raw mut REAL_REG_SET_VALUE_EX_W,
+                let ok = install_detour(
+                    &REAL_REG_SET_VALUE_EX_W,
+                    proc as *mut c_void,
                     hook_reg_set_value_ex_w as *mut c_void,
                 );
                 tracing::info!("Hook RegSetValueExW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegDeleteValueW".as_ptr().cast()) {
-                REAL_REG_DELETE_VALUE_W = proc as *mut c_void;
-                let ok = attach_detour(
-                    &raw mut REAL_REG_DELETE_VALUE_W,
+                let ok = install_detour(
+                    &REAL_REG_DELETE_VALUE_W,
+                    proc as *mut c_void,
                     hook_reg_delete_value_w as *mut c_void,
                 );
                 tracing::info!("Hook RegDeleteValueW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegDeleteKeyW".as_ptr().cast()) {
-                REAL_REG_DELETE_KEY_W = proc as *mut c_void;
-                let ok = attach_detour(
-                    &raw mut REAL_REG_DELETE_KEY_W,
+                let ok = install_detour(
+                    &REAL_REG_DELETE_KEY_W,
+                    proc as *mut c_void,
                     hook_reg_delete_key_w as *mut c_void,
                 );
                 tracing::info!("Hook RegDeleteKeyW: {}", ok);
             }
 
             if let Some(proc) = GetProcAddress(reg_mod, c"RegCloseKey".as_ptr().cast()) {
-                REAL_REG_CLOSE_KEY = proc as *mut c_void;
-                let ok = attach_detour(&raw mut REAL_REG_CLOSE_KEY, hook_reg_close_key as *mut c_void);
+                let ok = install_detour(
+                    &REAL_REG_CLOSE_KEY,
+                    proc as *mut c_void,
+                    hook_reg_close_key as *mut c_void,
+                );
                 tracing::info!("Hook RegCloseKey: {}", ok);
             }
         }

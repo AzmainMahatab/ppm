@@ -1,6 +1,7 @@
-use crate::detour::attach_detour;
+use crate::detour::{install_detour, load_trampoline};
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::atomic::AtomicPtr;
 use windows_sys::core::HRESULT;
 
 thread_local! {
@@ -8,7 +9,7 @@ thread_local! {
 }
 
 type FnSetCurrentProcessExplicitAppUserModelID = unsafe extern "system" fn(*const u16) -> HRESULT;
-static mut REAL_SET_APP_USER_MODEL_ID: *mut c_void = std::ptr::null_mut();
+static REAL_SET_APP_USER_MODEL_ID: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe fn wide_to_string(ptr: *const u16) -> String {
     unsafe {
@@ -45,7 +46,7 @@ impl Drop for AppIdHookGuard {
 unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRESULT {
     unsafe {
         let real_fn: FnSetCurrentProcessExplicitAppUserModelID =
-            std::mem::transmute(REAL_SET_APP_USER_MODEL_ID);
+            std::mem::transmute(load_trampoline(&REAL_SET_APP_USER_MODEL_ID));
 
         let _guard = match AppIdHookGuard::enter() {
             Some(g) => g,
@@ -77,9 +78,9 @@ pub fn init_hooks() {
                 c"SetCurrentProcessExplicitAppUserModelID".as_ptr().cast(),
             )
         {
-            REAL_SET_APP_USER_MODEL_ID = proc as *mut c_void;
-            attach_detour(
-                &raw mut REAL_SET_APP_USER_MODEL_ID,
+            install_detour(
+                &REAL_SET_APP_USER_MODEL_ID,
+                proc as *mut c_void,
                 hook_set_app_user_model_id as *mut c_void,
             );
         }

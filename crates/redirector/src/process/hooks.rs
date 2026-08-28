@@ -1,7 +1,8 @@
-use crate::detour::attach_detour;
+use crate::detour::{install_detour, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::{CString, c_void};
+use std::sync::atomic::AtomicPtr;
 use windows_sys::Win32::System::Threading::{PROCESS_INFORMATION, STARTUPINFOW};
 
 #[allow(clippy::upper_case_acronyms)]
@@ -71,7 +72,7 @@ type FnCreateProcessW = unsafe extern "system" fn(
     LpprocessInformation,
 ) -> BOOL;
 
-static mut REAL_CREATE_PROCESS_W: *mut c_void = std::ptr::null_mut();
+static REAL_CREATE_PROCESS_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe fn wide_to_string(ptr: *const u16) -> String {
     unsafe {
@@ -118,7 +119,7 @@ unsafe extern "system" fn hook_create_process_w(
     proc_info: LpprocessInformation,
 ) -> BOOL {
     unsafe {
-        let real_fn: FnCreateProcessW = std::mem::transmute(REAL_CREATE_PROCESS_W);
+        let real_fn: FnCreateProcessW = std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_W));
         guard_proc_hook!(
             real_fn(
                 app_name,
@@ -205,9 +206,9 @@ pub fn init_hooks() {
         }
 
         if let Some(proc) = target_proc {
-            REAL_CREATE_PROCESS_W = proc as *mut c_void;
-            attach_detour(
-                &raw mut REAL_CREATE_PROCESS_W,
+            install_detour(
+                &REAL_CREATE_PROCESS_W,
+                proc as *mut c_void,
                 hook_create_process_w as *mut c_void,
             );
         }

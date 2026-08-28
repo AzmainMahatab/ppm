@@ -1,8 +1,9 @@
 use crate::credentials::vault::get_vault;
-use crate::detour::attach_detour;
+use crate::detour::{install_detour, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::atomic::AtomicPtr;
 use windows_sys::Win32::Security::Credentials::CREDENTIALW;
 
 #[allow(clippy::upper_case_acronyms)]
@@ -52,10 +53,10 @@ type FnCredWriteW = unsafe extern "system" fn(PCREDENTIALW, u32) -> BOOL;
 type FnCredDeleteW = unsafe extern "system" fn(*const u16, u32, u32) -> BOOL;
 type FnCredFree = unsafe extern "system" fn(*const c_void);
 
-static mut REAL_CRED_READ_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_CRED_WRITE_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_CRED_DELETE_W: *mut c_void = std::ptr::null_mut();
-static mut REAL_CRED_FREE: *mut c_void = std::ptr::null_mut();
+static REAL_CRED_READ_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_CRED_WRITE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_CRED_DELETE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_CRED_FREE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe fn utf16_ptr_to_string(ptr: *const u16) -> String {
     unsafe {
@@ -89,7 +90,7 @@ unsafe extern "system" fn hook_cred_read_w(
     credential_out: *mut PCREDENTIALW,
 ) -> BOOL {
     unsafe {
-        let real_fn: FnCredReadW = std::mem::transmute(REAL_CRED_READ_W);
+        let real_fn: FnCredReadW = std::mem::transmute(load_trampoline(&REAL_CRED_READ_W));
         guard_cred_hook!(real_fn(target_name, cred_type, flags, credential_out), {
             if !target_name.is_null() && !credential_out.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
@@ -158,7 +159,7 @@ unsafe extern "system" fn hook_cred_read_w(
 
 unsafe extern "system" fn hook_cred_write_w(credential: PCREDENTIALW, flags: u32) -> BOOL {
     unsafe {
-        let real_fn: FnCredWriteW = std::mem::transmute(REAL_CRED_WRITE_W);
+        let real_fn: FnCredWriteW = std::mem::transmute(load_trampoline(&REAL_CRED_WRITE_W));
         guard_cred_hook!(real_fn(credential, flags), {
             if !credential.is_null() {
                 let cred = &*credential;
@@ -193,7 +194,7 @@ unsafe extern "system" fn hook_cred_write_w(credential: PCREDENTIALW, flags: u32
 
 unsafe extern "system" fn hook_cred_delete_w(target_name: *const u16, cred_type: u32, flags: u32) -> BOOL {
     unsafe {
-        let real_fn: FnCredDeleteW = std::mem::transmute(REAL_CRED_DELETE_W);
+        let real_fn: FnCredDeleteW = std::mem::transmute(load_trampoline(&REAL_CRED_DELETE_W));
         guard_cred_hook!(real_fn(target_name, cred_type, flags), {
             if !target_name.is_null() {
                 let target_str = utf16_ptr_to_string(target_name);
@@ -213,7 +214,7 @@ unsafe extern "system" fn hook_cred_delete_w(target_name: *const u16, cred_type:
 
 unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
     unsafe {
-        let real_fn: FnCredFree = std::mem::transmute(REAL_CRED_FREE);
+        let real_fn: FnCredFree = std::mem::transmute(load_trampoline(&REAL_CRED_FREE));
         guard_cred_hook!(real_fn(buffer), {
             if !buffer.is_null() {
                 let cred_ptr = buffer as *mut CREDENTIALW;
@@ -245,23 +246,35 @@ pub fn init_hooks() {
         }
 
         if let Some(proc) = GetProcAddress(advapi32, c"CredReadW".as_ptr().cast()) {
-            REAL_CRED_READ_W = proc as *mut c_void;
-            attach_detour(&raw mut REAL_CRED_READ_W, hook_cred_read_w as *mut c_void);
+            install_detour(
+                &REAL_CRED_READ_W,
+                proc as *mut c_void,
+                hook_cred_read_w as *mut c_void,
+            );
         }
 
         if let Some(proc) = GetProcAddress(advapi32, c"CredWriteW".as_ptr().cast()) {
-            REAL_CRED_WRITE_W = proc as *mut c_void;
-            attach_detour(&raw mut REAL_CRED_WRITE_W, hook_cred_write_w as *mut c_void);
+            install_detour(
+                &REAL_CRED_WRITE_W,
+                proc as *mut c_void,
+                hook_cred_write_w as *mut c_void,
+            );
         }
 
         if let Some(proc) = GetProcAddress(advapi32, c"CredDeleteW".as_ptr().cast()) {
-            REAL_CRED_DELETE_W = proc as *mut c_void;
-            attach_detour(&raw mut REAL_CRED_DELETE_W, hook_cred_delete_w as *mut c_void);
+            install_detour(
+                &REAL_CRED_DELETE_W,
+                proc as *mut c_void,
+                hook_cred_delete_w as *mut c_void,
+            );
         }
 
         if let Some(proc) = GetProcAddress(advapi32, c"CredFree".as_ptr().cast()) {
-            REAL_CRED_FREE = proc as *mut c_void;
-            attach_detour(&raw mut REAL_CRED_FREE, hook_cred_free as *mut c_void);
+            install_detour(
+                &REAL_CRED_FREE,
+                proc as *mut c_void,
+                hook_cred_free as *mut c_void,
+            );
         }
     }
 }
