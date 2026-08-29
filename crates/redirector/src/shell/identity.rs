@@ -62,9 +62,17 @@ fn sanitize_identity(raw: &str) -> String {
 /// The identity segment is truncated so the full AUMID stays within the strictest documented
 /// character budget; the root hash never is, and it alone carries the isolation boundary.
 fn synthetic_aumid(identity: &str) -> String {
+    format_aumid(root_hash16(), identity)
+}
+
+/// Builds the isolated AUMID for this (root hash, identity) pair.
+///
+/// The identity segment is truncated so the full AUMID stays within the strictest documented
+/// character budget; the root hash never is, and it alone carries the isolation boundary.
+fn format_aumid(root_hash: &str, identity: &str) -> String {
     let mut identity = sanitize_identity(identity);
     identity.truncate(34);
-    format!("PPM.Portable.{}.{}", root_hash16(), identity)
+    format!("PPM.Portable.{root_hash}.{identity}")
 }
 
 /// Proactively establishes the isolated identity during DLL attach, before any window can
@@ -145,5 +153,30 @@ pub fn init_hooks() {
             &REAL_SET_APP_USER_MODEL_ID,
             hook_set_app_user_model_id as *mut c_void,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_keeps_namespace_characters_and_masks_the_rest() {
+        assert_eq!(sanitize_identity("Some.App_v2-beta"), "Some.App_v2-beta");
+        assert_eq!(sanitize_identity("My App (1)!"), "My_App__1__");
+        assert_eq!(sanitize_identity(""), "");
+    }
+
+    #[test]
+    fn aumid_embeds_root_hash_and_truncates_long_identities() {
+        let hash = "0123456789abcdef";
+        assert_eq!(
+            format_aumid(hash, "Some.App"),
+            "PPM.Portable.0123456789abcdef.Some.App"
+        );
+
+        let long_identity = "a".repeat(40);
+        let aumid = format_aumid(hash, &long_identity);
+        assert_eq!(aumid, format!("PPM.Portable.{hash}.{}", "a".repeat(34)));
     }
 }

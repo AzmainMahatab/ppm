@@ -323,3 +323,39 @@ fn resolve_json_query<'a>(mut current: &'a Value, query: &str) -> Result<&'a Val
 
     Ok(current)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolves_nested_keys_and_array_indices() {
+        let value = json!({"a": {"b": [10, 20]}});
+        assert_eq!(resolve_json_query(&value, "/a/b/1").unwrap(), &json!(20));
+    }
+
+    #[test]
+    fn resolves_predicate_selected_array_element() {
+        let value = json!({"Releases": [
+            {"Platform": "win32", "Architecture": "x64", "ProductVersion": "1.2.3"},
+            {"Platform": "win32", "Architecture": "arm64", "ProductVersion": "2.0.0"}
+        ]});
+
+        let selected = resolve_json_query(
+            &value,
+            "/Releases[Platform=win32,Architecture=x64]/ProductVersion",
+        )
+        .unwrap();
+        assert_eq!(selected.as_str().unwrap(), "1.2.3");
+    }
+
+    #[test]
+    fn missing_key_and_unmatched_predicate_are_errors() {
+        let value = json!({"a": 1});
+        assert!(resolve_json_query(&value, "/missing").is_err());
+
+        let array = json!({"Releases": [{"Platform": "linux"}]});
+        assert!(resolve_json_query(&array, "/Releases[Platform=win32]/X").is_err());
+    }
+}

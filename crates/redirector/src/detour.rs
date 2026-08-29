@@ -161,3 +161,37 @@ pub(crate) fn hook_export(module: HMODULE, api: &str, slot: &AtomicPtr<c_void>, 
         ok
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    /// A real, non-null address with valid provenance - only ever loaded, never called.
+    fn sentinel(byte: u8) -> *mut c_void {
+        (Box::leak(Box::new(byte)) as *mut u8).cast::<c_void>()
+    }
+
+    #[test]
+    fn load_trampoline_returns_the_preseeded_trampoline() {
+        let trampoline = sentinel(7);
+        let slot = AtomicPtr::new(trampoline);
+        assert_eq!(load_trampoline(&slot), trampoline);
+    }
+
+    #[test]
+    fn load_trampoline_observes_cross_thread_publication() {
+        let slot = std::sync::Arc::new(AtomicPtr::new(std::ptr::null_mut()));
+        let publisher = std::sync::Arc::clone(&slot);
+
+        thread::spawn(move || {
+            let published = sentinel(9);
+            publisher.store(published, Ordering::Release);
+        });
+
+        // The Acquire spin is the contract itself: whatever the interleaving, the load
+        // must never observe null and must observe the publication.
+        let loaded = load_trampoline(&slot);
+        assert!(!loaded.is_null());
+    }
+}

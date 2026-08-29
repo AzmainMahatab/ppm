@@ -144,3 +144,95 @@ pub(crate) fn perform_install(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ppm::core::config::AppManifests;
+    use serde_json::json;
+
+    fn manifest(apps: serde_json::Value) -> AppManifests {
+        serde_json::from_value(apps).expect("invariant: test manifest is schema-valid")
+    }
+
+    fn app(deps: Option<Vec<&str>>) -> serde_json::Value {
+        let mut def = json!({
+            "name": "App",
+            "target_dir": "App",
+            "executable": "app.exe",
+            "version_check": {"type": "github_release", "repo": "a/b"},
+            "package": {"type": "nsis_7z"}
+        });
+        if let Some(deps) = deps {
+            def["dependencies"] = json!(deps);
+        }
+        def
+    }
+
+    #[test]
+    fn dependency_is_installed_before_dependent() {
+        let manifests = manifest(json!({
+            "apps": {
+                "app": app(Some(vec!["lib"])),
+                "lib": app(None),
+            }
+        }));
+        assert_eq!(
+            resolve_install_order(&manifests, "app").unwrap(),
+            vec!["lib", "app"]
+        );
+    }
+
+    #[test]
+    fn diamond_dependency_is_deduplicated() {
+        let manifests = manifest(json!({
+            "apps": {
+                "app": app(Some(vec!["left", "right"])),
+                "left": app(Some(vec!["base"])),
+                "right": app(Some(vec!["base"])),
+                "base": app(None),
+            }
+        }));
+
+        let order = resolve_install_order(&manifests, "app").unwrap();
+        assert_eq!(*order.last().unwrap(), "app");
+        assert_eq!(order.iter().filter(|id| *id == "base").count(), 1);
+        let base = order.iter().position(|id| *id == "base").unwrap();
+        assert!(base < order.iter().position(|id| *id == "left").unwrap());
+        assert!(base < order.iter().position(|id| *id == "right").unwrap());
+    }
+
+    #[test]
+    fn circular_dependency_is_rejected() {
+        let manifests = manifest(json!({
+            "apps": {
+                "a": app(Some(vec!["b"])),
+                "b": app(Some(vec!["a"])),
+            }
+        }));
+        let err = resolve_install_order(&manifests, "a").unwrap_err().to_string();
+        assert!(err.contains("Circular"), "{err}");
+    }
+
+    #[test]
+    fn undefined_dependency_is_rejected() {
+        let manifests = manifest(json!({ "apps": { "app": app(Some(vec!["ghost"])) } }));
+        let err = resolve_install_order(&manifests, "app").unwrap_err().to_string();
+        assert!(err.contains("not defined"), "{err}");
+    }
+
+    #[test]
+    fn all_mode_orders_every_app() {
+        let manifests = manifest(json!({
+            "apps": {
+                "app": app(Some(vec!["lib"])),
+                "lib": app(None),
+                "solo": app(None),
+            }
+        }));
+
+        let order = resolve_install_order(&manifests, "all").unwrap();
+        assert_eq!(order.len(), 3);
+        assert!(order.iter().position(|id| *id == "lib") < order.iter().position(|id| *id == "app"));
+    }
+}
