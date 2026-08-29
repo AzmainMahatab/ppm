@@ -1,5 +1,6 @@
+use crate::winstr::path_to_wide;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -26,79 +27,82 @@ pub struct PathConfig {
     pub documents_w: Vec<u16>,
 }
 
-static PATHS: OnceLock<PathConfig> = OnceLock::new();
-static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+static PATHS: LazyLock<PathConfig> = LazyLock::new(build_paths);
+static LOGGER_GUARD: LazyLock<WorkerGuard> = LazyLock::new(init_worker_guard);
 
 pub fn init_paths() -> &'static PathConfig {
-    PATHS.get_or_init(|| {
-        let root = resolve_root();
-        let ppm_dir = root.join(".ppm");
-        let system_dir = ppm_dir.join("system");
-        let logs_dir = ppm_dir.join("logs");
+    &PATHS
+}
 
-        ensure_dir(&system_dir);
-        ensure_dir(&logs_dir);
+fn build_paths() -> PathConfig {
+    let root = resolve_root();
+    let ppm_dir = root.join(".ppm");
+    let system_dir = ppm_dir.join("system");
+    let logs_dir = ppm_dir.join("logs");
 
-        let registry_json = system_dir.join("registry.json");
-        let credentials_json = system_dir.join("credentials.json");
-        let log_file = logs_dir.join("redirector.log");
+    ensure_dir(&system_dir);
+    ensure_dir(&logs_dir);
 
-        let user_profile = root.join("Home");
-        let local_appdata = user_profile.join("AppData").join("Local");
-        let roaming_appdata = user_profile.join("AppData").join("Roaming");
-        let documents = user_profile.join("Documents");
+    let registry_json = system_dir.join("registry.json");
+    let credentials_json = system_dir.join("credentials.json");
+    let log_file = logs_dir.join("redirector.log");
 
-        ensure_dir(&local_appdata);
-        ensure_dir(&roaming_appdata);
-        ensure_dir(&documents);
+    let user_profile = root.join("Home");
+    let local_appdata = user_profile.join("AppData").join("Local");
+    let roaming_appdata = user_profile.join("AppData").join("Roaming");
+    let documents = user_profile.join("Documents");
 
-        let to_wide = |p: &Path| -> Vec<u16> {
-            use std::os::windows::ffi::OsStrExt;
-            p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
-        };
+    ensure_dir(&local_appdata);
+    ensure_dir(&roaming_appdata);
+    ensure_dir(&documents);
 
-        PathConfig {
-            user_profile_w: to_wide(&user_profile),
-            local_appdata_w: to_wide(&local_appdata),
-            roaming_appdata_w: to_wide(&roaming_appdata),
-            documents_w: to_wide(&documents),
-            root,
-            ppm_dir,
-            system_dir,
-            registry_json,
-            credentials_json,
-            logs_dir,
-            log_file,
-            user_profile,
-            local_appdata,
-            roaming_appdata,
-            documents,
-        }
-    })
+    // wide strings are encoded from the canonical PathBufs below
+
+    PathConfig {
+        user_profile_w: path_to_wide(&user_profile),
+        local_appdata_w: path_to_wide(&local_appdata),
+        roaming_appdata_w: path_to_wide(&roaming_appdata),
+        documents_w: path_to_wide(&documents),
+        root,
+        ppm_dir,
+        system_dir,
+        registry_json,
+        credentials_json,
+        logs_dir,
+        log_file,
+        user_profile,
+        local_appdata,
+        roaming_appdata,
+        documents,
+    }
 }
 
 /// Initializes the high-performance non-blocking concurrent logger.
 /// Emitted logs are dispatched to an in-memory lock-free queue with sub-microsecond latency,
 /// while a dedicated background worker thread flushes batches to `.ppm/logs/redirector.log`.
 pub fn init_logger() {
-    LOGGER_GUARD.get_or_init(|| {
-        let cfg = init_paths();
-        let file_appender = tracing_appender::rolling::never(&cfg.logs_dir, "redirector.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // Touching the LazyLock initializes the subscriber and pins the worker guard.
+    std::hint::black_box(&*LOGGER_GUARD);
+}
 
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
+/// Builds the non-blocking worker guard; runs once via `LazyLock`.
+fn init_worker_guard() -> WorkerGuard {
+    let cfg = init_paths();
+    let file_appender = tracing_appender::rolling::never(&cfg.logs_dir, "redirector.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-        let _ = tracing_subscriber::fmt()
-            .with_writer(non_blocking)
-            .with_ansi(false)
-            .with_env_filter(filter)
-            .with_target(false)
-            .with_thread_ids(true)
-            .try_init();
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
 
-        guard
-    });
+    let _ = tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_thread_ids(true)
+        .try_init();
+
+    guard
 }
 
 /// Creates a directory tree, loudly reporting failure. `DllMain` cannot propagate a

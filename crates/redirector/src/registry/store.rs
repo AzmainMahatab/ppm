@@ -2,7 +2,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedValue {
@@ -29,13 +29,13 @@ pub struct VirtualRegistry {
     data: RwLock<VirtualRegistryData>,
 }
 
-static REGISTRY_STORE: OnceLock<VirtualRegistry> = OnceLock::new();
+static REGISTRY_STORE: LazyLock<VirtualRegistry> = LazyLock::new(|| {
+    let cfg = crate::paths::init_paths();
+    VirtualRegistry::new(cfg.registry_json.clone())
+});
 
 pub fn get_registry_store() -> &'static VirtualRegistry {
-    REGISTRY_STORE.get_or_init(|| {
-        let cfg = crate::paths::init_paths();
-        VirtualRegistry::new(cfg.registry_json.clone())
-    })
+    &REGISTRY_STORE
 }
 
 impl VirtualRegistry {

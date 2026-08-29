@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -23,7 +23,7 @@ pub struct VirtualHandleTable {
     entries: RwLock<HashMap<usize, VirtualHandleEntry>>,
 }
 
-static HANDLE_TABLE: OnceLock<VirtualHandleTable> = OnceLock::new();
+static HANDLE_TABLE: LazyLock<VirtualHandleTable> = LazyLock::new(VirtualHandleTable::new);
 
 impl Default for VirtualHandleTable {
     fn default() -> Self {
@@ -32,7 +32,7 @@ impl Default for VirtualHandleTable {
 }
 
 pub fn get_handle_table() -> &'static VirtualHandleTable {
-    HANDLE_TABLE.get_or_init(VirtualHandleTable::new)
+    &HANDLE_TABLE
 }
 
 impl VirtualHandleTable {

@@ -2,7 +2,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultCredential {
@@ -23,13 +23,13 @@ pub struct CredentialVault {
     data: RwLock<VaultData>,
 }
 
-static VAULT: OnceLock<CredentialVault> = OnceLock::new();
+static VAULT: LazyLock<CredentialVault> = LazyLock::new(|| {
+    let cfg = crate::paths::init_paths();
+    CredentialVault::new(cfg.credentials_json.clone())
+});
 
 pub fn get_vault() -> &'static CredentialVault {
-    VAULT.get_or_init(|| {
-        let cfg = crate::paths::init_paths();
-        CredentialVault::new(cfg.credentials_json.clone())
-    })
+    &VAULT
 }
 
 impl CredentialVault {

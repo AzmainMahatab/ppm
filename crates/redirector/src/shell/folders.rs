@@ -1,4 +1,5 @@
 use crate::detour::{guard_detour, hook_export, load_trampoline};
+use crate::winstr::alloc_cotask_wide_string;
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -11,10 +12,6 @@ type PWSTR = *mut u16;
 
 thread_local! {
     static IN_SHELL_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-unsafe extern "system" {
-    fn CoTaskMemAlloc(cb: usize) -> *mut c_void;
 }
 
 // GUID constants
@@ -62,18 +59,6 @@ static REAL_GET_USER_PROFILE_DIRECTORY_W: AtomicPtr<c_void> = AtomicPtr::new(std
 
 fn guids_equal(a: &GUID, b: &GUID) -> bool {
     a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
-}
-
-/// Allocates a NUL-terminated wide copy of `w_str` from the COM task allocator.
-fn alloc_cotask_wide_string(w_str: &[u16]) -> PWSTR {
-    unsafe {
-        let byte_len = w_str.len() * 2;
-        let mem = CoTaskMemAlloc(byte_len);
-        if !mem.is_null() {
-            std::ptr::copy_nonoverlapping(w_str.as_ptr(), mem.cast(), w_str.len());
-        }
-        mem.cast()
-    }
 }
 
 unsafe extern "system" fn hook_sh_get_known_folder_path(

@@ -1,23 +1,18 @@
 use crate::credentials::vault::get_vault;
 use crate::detour::{guard_detour, hook_export, load_trampoline};
+use crate::winstr::{alloc_cotask_wide_string, to_wide};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicPtr;
 use windows_sys::Win32::Security::Credentials::CREDENTIALW;
+use windows_sys::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree};
 
-#[allow(clippy::upper_case_acronyms)]
-type PWSTR = *mut u16;
 #[allow(clippy::upper_case_acronyms)]
 type PCREDENTIALW = *mut CREDENTIALW;
 
 thread_local! {
     static IN_CRED_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-unsafe extern "system" {
-    fn CoTaskMemAlloc(cb: usize) -> *mut c_void;
-    fn CoTaskMemFree(pv: *mut c_void);
 }
 
 type FnCredReadW = unsafe extern "system" fn(*const u16, u32, u32, *mut PCREDENTIALW) -> BOOL;
@@ -44,18 +39,6 @@ fn utf16_ptr_to_string(ptr: *const u16) -> String {
             len += 1;
         }
         String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
-    }
-}
-
-/// Allocates a NUL-terminated wide copy of `w_str` from the COM task allocator.
-fn alloc_cotask_wide_string(w_str: &[u16]) -> PWSTR {
-    unsafe {
-        let byte_len = w_str.len() * 2;
-        let mem = CoTaskMemAlloc(byte_len);
-        if !mem.is_null() {
-            std::ptr::copy_nonoverlapping(w_str.as_ptr(), mem.cast(), w_str.len());
-        }
-        mem.cast()
     }
 }
 
@@ -94,19 +77,10 @@ unsafe extern "system" fn hook_cred_read_w(
                         cred_struct.Flags = 0;
                         cred_struct.Type = cred.cred_type;
 
-                        use std::ffi::OsStr;
-                        use std::os::windows::ffi::OsStrExt;
-
-                        let target_w: Vec<u16> = OsStr::new(&cred.target_name)
-                            .encode_wide()
-                            .chain(std::iter::once(0))
-                            .collect();
+                        let target_w = to_wide(&cred.target_name);
                         cred_struct.TargetName = alloc_cotask_wide_string(&target_w);
 
-                        let user_w: Vec<u16> = OsStr::new(&cred.user_name)
-                            .encode_wide()
-                            .chain(std::iter::once(0))
-                            .collect();
+                        let user_w = to_wide(&cred.user_name);
                         cred_struct.UserName = alloc_cotask_wide_string(&user_w);
 
                         cred_struct.CredentialBlobSize = blob_bytes.len() as u32;

@@ -3,7 +3,7 @@ use crate::paths::init_paths;
 use crate::winstr::wide_to_string;
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicPtr;
 use windows_sys::core::HRESULT;
 
@@ -13,7 +13,7 @@ thread_local! {
 
 type FnSetCurrentProcessExplicitAppUserModelID = unsafe extern "system" fn(*const u16) -> HRESULT;
 static REAL_SET_APP_USER_MODEL_ID: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-static ROOT_HASH: OnceLock<String> = OnceLock::new();
+static ROOT_HASH: LazyLock<String> = LazyLock::new(compute_root_hash);
 
 // Intention: Namespace every virtualized identity as
 //             PPM.Portable.<root-hash-16hex>.<Identity>.
@@ -25,24 +25,28 @@ static ROOT_HASH: OnceLock<String> = OnceLock::new();
 //      canonicalized, case-normalized root path, so identities are stable across launches
 //      (pinning survives) and deterministic per deployment location.
 fn root_hash16() -> &'static str {
-    ROOT_HASH.get_or_init(|| {
-        let root = init_paths().root.clone();
-        let canonical = std::fs::canonicalize(&root).unwrap_or(root);
-        let normalized = canonical.to_string_lossy();
-        // Strip the `\\?\` verbatim prefix canonicalize adds on Windows so the hash does not
-        // depend on whether canonicalization succeeded.
-        let normalized = normalized.strip_prefix(r"\\?\").unwrap_or(&normalized);
-        let normalized = normalized.to_lowercase();
+    &ROOT_HASH
+}
 
-        // FNV-1a 64-bit: dependency-free, deterministic, and collision-free for any realistic
-        // number of deployment roots (disambiguation duty only - not a security primitive).
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in normalized.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{hash:016x}")
-    })
+/// FNV-1a-64 over the canonicalized, case-normalized root path; see the module
+/// namespace rationale above.
+fn compute_root_hash() -> String {
+    let root = init_paths().root.clone();
+    let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+    let normalized = canonical.to_string_lossy();
+    // Strip the `\\?\` verbatim prefix canonicalize adds on Windows so the hash does not
+    // depend on whether canonicalization succeeded.
+    let normalized = normalized.strip_prefix(r"\\?\").unwrap_or(&normalized);
+    let normalized = normalized.to_lowercase();
+
+    // FNV-1a 64-bit: dependency-free, deterministic, and collision-free for any realistic
+    // number of deployment roots (disambiguation duty only - not a security primitive).
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn sanitize_identity(raw: &str) -> String {
@@ -89,7 +93,7 @@ pub fn init_app_user_model_id() {
             .unwrap_or_else(|| "App".to_string())
     });
     let synthetic_id = synthetic_aumid(&raw_name);
-    let app_id_wide: Vec<u16> = synthetic_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let app_id_wide = crate::winstr::to_wide(&synthetic_id);
 
     unsafe {
         use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -130,7 +134,7 @@ unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRES
     // portable root instead of colliding with the host-installed original.
     let app_id_str = wide_to_string(app_id);
     let synthetic_id = synthetic_aumid(&app_id_str);
-    let synthetic_wide: Vec<u16> = synthetic_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let synthetic_wide = crate::winstr::to_wide(&synthetic_id);
 
     tracing::debug!("SetCurrentProcessExplicitAppUserModelID: mapped '{app_id_str}' -> '{synthetic_id}'");
 
