@@ -1,5 +1,5 @@
 use crate::credentials::vault::get_vault;
-use crate::detour::{install_detour, load_trampoline};
+use crate::detour::{guard_detour, install_detour, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -13,34 +13,6 @@ type PCREDENTIALW = *mut CREDENTIALW;
 
 thread_local! {
     static IN_CRED_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-struct CredHookGuard;
-
-impl CredHookGuard {
-    fn enter() -> Option<Self> {
-        if IN_CRED_HOOK.try_with(|h| h.get()).unwrap_or(false) {
-            return None;
-        }
-        let _ = IN_CRED_HOOK.try_with(|h| h.set(true));
-        Some(CredHookGuard)
-    }
-}
-
-impl Drop for CredHookGuard {
-    fn drop(&mut self) {
-        let _ = IN_CRED_HOOK.try_with(|h| h.set(false));
-    }
-}
-
-macro_rules! guard_cred_hook {
-    ($fallback:expr_2021, $body:expr_2021) => {{
-        let _guard = match CredHookGuard::enter() {
-            Some(g) => g,
-            None => return $fallback,
-        };
-        $body
-    }};
 }
 
 unsafe extern "system" {
@@ -94,7 +66,8 @@ unsafe extern "system" fn hook_cred_read_w(
     credential_out: *mut PCREDENTIALW,
 ) -> BOOL {
     let real_fn: FnCredReadW = unsafe { std::mem::transmute(load_trampoline(&REAL_CRED_READ_W)) };
-    guard_cred_hook!(
+    guard_detour!(
+        &IN_CRED_HOOK,
         unsafe { real_fn(target_name, cred_type, flags, credential_out) },
         {
             if !target_name.is_null() && !credential_out.is_null() {
@@ -175,7 +148,7 @@ unsafe extern "system" fn hook_cred_read_w(
 
 unsafe extern "system" fn hook_cred_write_w(credential: PCREDENTIALW, flags: u32) -> BOOL {
     let real_fn: FnCredWriteW = unsafe { std::mem::transmute(load_trampoline(&REAL_CRED_WRITE_W)) };
-    guard_cred_hook!(unsafe { real_fn(credential, flags) }, {
+    guard_detour!(&IN_CRED_HOOK, unsafe { real_fn(credential, flags) }, {
         if !credential.is_null() {
             // SAFETY: `credential` is non-null (checked above) and points to a CREDENTIALW
             // owned by the caller for the duration of this call.
@@ -210,24 +183,28 @@ unsafe extern "system" fn hook_cred_write_w(credential: PCREDENTIALW, flags: u32
 
 unsafe extern "system" fn hook_cred_delete_w(target_name: *const u16, cred_type: u32, flags: u32) -> BOOL {
     let real_fn: FnCredDeleteW = unsafe { std::mem::transmute(load_trampoline(&REAL_CRED_DELETE_W)) };
-    guard_cred_hook!(unsafe { real_fn(target_name, cred_type, flags) }, {
-        if !target_name.is_null() {
-            let target_str = utf16_ptr_to_string(target_name);
-            if get_vault().delete(&target_str) {
-                tracing::debug!(
-                    "CredDeleteW [Vault Intercept]: target '{target_str}' removed from virtual store"
-                );
-                return TRUE;
+    guard_detour!(
+        &IN_CRED_HOOK,
+        unsafe { real_fn(target_name, cred_type, flags) },
+        {
+            if !target_name.is_null() {
+                let target_str = utf16_ptr_to_string(target_name);
+                if get_vault().delete(&target_str) {
+                    tracing::debug!(
+                        "CredDeleteW [Vault Intercept]: target '{target_str}' removed from virtual store"
+                    );
+                    return TRUE;
+                }
             }
-        }
 
-        unsafe { real_fn(target_name, cred_type, flags) }
-    })
+            unsafe { real_fn(target_name, cred_type, flags) }
+        }
+    )
 }
 
 unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
     let real_fn: FnCredFree = unsafe { std::mem::transmute(load_trampoline(&REAL_CRED_FREE)) };
-    guard_cred_hook!(unsafe { real_fn(buffer) }, {
+    guard_detour!(&IN_CRED_HOOK, unsafe { real_fn(buffer) }, {
         if !buffer.is_null() {
             // SAFETY: `buffer` is non-null (checked above) and points to a CREDENTIALW the
             // caller owns for the duration of this call; each `CoTaskMemFree` below releases

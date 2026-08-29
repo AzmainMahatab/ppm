@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::thread::LocalKey;
 use windows_sys::Win32::System::Threading::GetCurrentThread;
 
 unsafe extern "system" {
@@ -75,3 +77,55 @@ pub(crate) fn load_trampoline(slot: &AtomicPtr<c_void>) -> *mut c_void {
         }
     }
 }
+
+/// Re-entrancy guard for detour hook bodies.
+///
+/// # Why
+/// A hook body may re-enter its own hooked API (directly or transitively); without a
+/// guard each re-entry would re-apply the redirect instead of reaching the original
+/// implementation. Each hook module owns one thread-local flag; while the flag is set
+/// on the current thread, nested entry yields `None` and the caller must forward to
+/// the trampoline - the documented unvirtualized fallback.
+///
+/// # Why `try_with` and a silent forward
+/// Thread-local access can fail only after thread destruction has begun, when the flag
+/// storage no longer exists. That path is unreachable while redirect logic is live, so
+/// forwarding cannot mask a live-path bug; panicking would instead unwind across an
+/// `extern "system"` frame and abort the virtualized host application during teardown.
+pub(crate) struct ReenterGuard {
+    key: &'static LocalKey<Cell<bool>>,
+}
+
+impl ReenterGuard {
+    pub(crate) fn enter(key: &'static LocalKey<Cell<bool>>) -> Option<Self> {
+        key.try_with(|flag| {
+            if flag.get() {
+                None
+            } else {
+                flag.set(true);
+                Some(Self { key })
+            }
+        })
+        .ok()
+        .flatten()
+    }
+}
+
+impl Drop for ReenterGuard {
+    fn drop(&mut self) {
+        let _ = self.key.try_with(|flag| flag.set(false));
+    }
+}
+
+/// Evaluates `body` under the re-entrancy flag of `key`, or returns `fallback` when the
+/// hook was re-entered (see [`ReenterGuard`]).
+macro_rules! guard_detour {
+    ($key:expr, $fallback:expr, $body:expr) => {{
+        let _guard = match $crate::detour::ReenterGuard::enter($key) {
+            Some(guard) => guard,
+            None => return $fallback,
+        };
+        $body
+    }};
+}
+pub(crate) use guard_detour;

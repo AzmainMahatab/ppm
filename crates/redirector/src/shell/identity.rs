@@ -1,4 +1,4 @@
-use crate::detour::{install_detour, load_trampoline};
+use crate::detour::{ReenterGuard, install_detour, load_trampoline};
 use crate::paths::init_paths;
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -79,24 +79,6 @@ fn wide_to_string(ptr: *const u16) -> String {
     }
 }
 
-struct AppIdHookGuard;
-
-impl AppIdHookGuard {
-    fn enter() -> Option<Self> {
-        if IN_APP_ID_HOOK.try_with(|h| h.get()).unwrap_or(false) {
-            return None;
-        }
-        let _ = IN_APP_ID_HOOK.try_with(|h| h.set(true));
-        Some(AppIdHookGuard)
-    }
-}
-
-impl Drop for AppIdHookGuard {
-    fn drop(&mut self) {
-        let _ = IN_APP_ID_HOOK.try_with(|h| h.set(false));
-    }
-}
-
 /// Proactively establishes the isolated identity during DLL attach, before any window can
 /// exist. Reactive-only interception would leave the majority of applications - which never
 /// call SetCurrentProcessExplicitAppUserModelID - grouped under their host-derived implicit
@@ -139,10 +121,10 @@ unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRES
     let real_fn: FnSetCurrentProcessExplicitAppUserModelID =
         unsafe { std::mem::transmute(load_trampoline(&REAL_SET_APP_USER_MODEL_ID)) };
 
-    let _guard = match AppIdHookGuard::enter() {
-        Some(g) => g,
-        // SAFETY: forwarding to the original API is the documented fallback for re-entrant
-        // calls; `load_trampoline` guarantees the trampoline is published and call-valid.
+    // SAFETY: forwarding to the original API is the documented fallback for re-entrant
+    // calls; `load_trampoline` guarantees the trampoline is published and call-valid.
+    let _guard = match ReenterGuard::enter(&IN_APP_ID_HOOK) {
+        Some(guard) => guard,
         None => unsafe { return real_fn(app_id) },
     };
 

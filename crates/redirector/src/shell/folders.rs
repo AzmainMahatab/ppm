@@ -1,4 +1,4 @@
-use crate::detour::{install_detour, load_trampoline};
+use crate::detour::{guard_detour, install_detour, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -11,34 +11,6 @@ type PWSTR = *mut u16;
 
 thread_local! {
     static IN_SHELL_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-struct ShellHookGuard;
-
-impl ShellHookGuard {
-    fn enter() -> Option<Self> {
-        if IN_SHELL_HOOK.try_with(|h| h.get()).unwrap_or(false) {
-            return None;
-        }
-        let _ = IN_SHELL_HOOK.try_with(|h| h.set(true));
-        Some(ShellHookGuard)
-    }
-}
-
-impl Drop for ShellHookGuard {
-    fn drop(&mut self) {
-        let _ = IN_SHELL_HOOK.try_with(|h| h.set(false));
-    }
-}
-
-macro_rules! guard_shell_hook {
-    ($fallback:expr_2021, $body:expr_2021) => {{
-        let _guard = match ShellHookGuard::enter() {
-            Some(g) => g,
-            None => return $fallback,
-        };
-        $body
-    }};
 }
 
 unsafe extern "system" {
@@ -112,43 +84,49 @@ unsafe extern "system" fn hook_sh_get_known_folder_path(
 ) -> HRESULT {
     let real_fn: FnSHGetKnownFolderPath =
         unsafe { std::mem::transmute(load_trampoline(&REAL_SH_GET_KNOWN_FOLDER_PATH)) };
-    guard_shell_hook!(unsafe { real_fn(rfid, flags, token, path_out) }, {
-        if !rfid.is_null() && !path_out.is_null() {
-            // SAFETY: `rfid` is non-null (checked above) and points to a GUID owned by the
-            // caller for the duration of this call.
-            let id = unsafe { &*rfid };
-            let cfg = crate::paths::init_paths();
+    guard_detour!(
+        &IN_SHELL_HOOK,
+        unsafe { real_fn(rfid, flags, token, path_out) },
+        {
+            if !rfid.is_null() && !path_out.is_null() {
+                // SAFETY: `rfid` is non-null (checked above) and points to a GUID owned by the
+                // caller for the duration of this call.
+                let id = unsafe { &*rfid };
+                let cfg = crate::paths::init_paths();
 
-            let target_w = if guids_equal(id, &FOLDERID_PROFILE) {
-                tracing::debug!("SHGetKnownFolderPath [PROFILE]: redirected to Home");
-                Some(&cfg.user_profile_w)
-            } else if guids_equal(id, &FOLDERID_LOCAL_APP_DATA) {
-                tracing::debug!("SHGetKnownFolderPath [LOCAL_APP_DATA]: redirected to Home/AppData/Local");
-                Some(&cfg.local_appdata_w)
-            } else if guids_equal(id, &FOLDERID_ROAMING_APP_DATA) {
-                tracing::debug!(
-                    "SHGetKnownFolderPath [ROAMING_APP_DATA]: redirected to Home/AppData/Roaming"
-                );
-                Some(&cfg.roaming_appdata_w)
-            } else if guids_equal(id, &FOLDERID_DOCUMENTS) {
-                tracing::debug!("SHGetKnownFolderPath [DOCUMENTS]: redirected to Home/Documents");
-                Some(&cfg.documents_w)
-            } else {
-                None
-            };
+                let target_w = if guids_equal(id, &FOLDERID_PROFILE) {
+                    tracing::debug!("SHGetKnownFolderPath [PROFILE]: redirected to Home");
+                    Some(&cfg.user_profile_w)
+                } else if guids_equal(id, &FOLDERID_LOCAL_APP_DATA) {
+                    tracing::debug!(
+                        "SHGetKnownFolderPath [LOCAL_APP_DATA]: redirected to Home/AppData/Local"
+                    );
+                    Some(&cfg.local_appdata_w)
+                } else if guids_equal(id, &FOLDERID_ROAMING_APP_DATA) {
+                    tracing::debug!(
+                        "SHGetKnownFolderPath [ROAMING_APP_DATA]: redirected to Home/AppData/Roaming"
+                    );
+                    Some(&cfg.roaming_appdata_w)
+                } else if guids_equal(id, &FOLDERID_DOCUMENTS) {
+                    tracing::debug!("SHGetKnownFolderPath [DOCUMENTS]: redirected to Home/Documents");
+                    Some(&cfg.documents_w)
+                } else {
+                    None
+                };
 
-            if let Some(w) = target_w {
-                // SAFETY: `path_out` is non-null (checked above) and is the caller-owned
-                // PWSTR out-parameter.
-                unsafe {
-                    *path_out = alloc_cotask_wide_string(w);
+                if let Some(w) = target_w {
+                    // SAFETY: `path_out` is non-null (checked above) and is the caller-owned
+                    // PWSTR out-parameter.
+                    unsafe {
+                        *path_out = alloc_cotask_wide_string(w);
+                    }
+                    return S_OK;
                 }
-                return S_OK;
             }
-        }
 
-        unsafe { real_fn(rfid, flags, token, path_out) }
-    })
+            unsafe { real_fn(rfid, flags, token, path_out) }
+        }
+    )
 }
 
 unsafe extern "system" fn hook_sh_get_folder_path_w(
@@ -160,46 +138,52 @@ unsafe extern "system" fn hook_sh_get_folder_path_w(
 ) -> HRESULT {
     let real_fn: FnSHGetFolderPathW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_SH_GET_FOLDER_PATH_W)) };
-    guard_shell_hook!(unsafe { real_fn(hwnd, csidl, token, flags, path_out) }, {
-        if !path_out.is_null() {
-            let clean_csidl = csidl & 0x00FF;
-            let cfg = crate::paths::init_paths();
+    guard_detour!(
+        &IN_SHELL_HOOK,
+        unsafe { real_fn(hwnd, csidl, token, flags, path_out) },
+        {
+            if !path_out.is_null() {
+                let clean_csidl = csidl & 0x00FF;
+                let cfg = crate::paths::init_paths();
 
-            let target_w = match clean_csidl {
-                CSIDL_PROFILE => {
-                    tracing::debug!("SHGetFolderPathW [CSIDL_PROFILE]: redirected to Home");
-                    Some(&cfg.user_profile_w)
-                }
-                CSIDL_LOCAL_APPDATA => {
-                    tracing::debug!(
-                        "SHGetFolderPathW [CSIDL_LOCAL_APPDATA]: redirected to Home/AppData/Local"
-                    );
-                    Some(&cfg.local_appdata_w)
-                }
-                CSIDL_APPDATA => {
-                    tracing::debug!("SHGetFolderPathW [CSIDL_APPDATA]: redirected to Home/AppData/Roaming");
-                    Some(&cfg.roaming_appdata_w)
-                }
-                CSIDL_PERSONAL => {
-                    tracing::debug!("SHGetFolderPathW [CSIDL_PERSONAL]: redirected to Home/Documents");
-                    Some(&cfg.documents_w)
-                }
-                _ => None,
-            };
+                let target_w = match clean_csidl {
+                    CSIDL_PROFILE => {
+                        tracing::debug!("SHGetFolderPathW [CSIDL_PROFILE]: redirected to Home");
+                        Some(&cfg.user_profile_w)
+                    }
+                    CSIDL_LOCAL_APPDATA => {
+                        tracing::debug!(
+                            "SHGetFolderPathW [CSIDL_LOCAL_APPDATA]: redirected to Home/AppData/Local"
+                        );
+                        Some(&cfg.local_appdata_w)
+                    }
+                    CSIDL_APPDATA => {
+                        tracing::debug!(
+                            "SHGetFolderPathW [CSIDL_APPDATA]: redirected to Home/AppData/Roaming"
+                        );
+                        Some(&cfg.roaming_appdata_w)
+                    }
+                    CSIDL_PERSONAL => {
+                        tracing::debug!("SHGetFolderPathW [CSIDL_PERSONAL]: redirected to Home/Documents");
+                        Some(&cfg.documents_w)
+                    }
+                    _ => None,
+                };
 
-            if let Some(w) = target_w {
-                // SAFETY: `path_out` is non-null (checked above) and is the caller-owned buffer,
-                // which Win32 guarantees is at least MAX_PATH wide for CSIDL queries - enough
-                // for the redirection targets written here.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(w.as_ptr(), path_out, w.len());
+                if let Some(w) = target_w {
+                    // SAFETY: `path_out` is non-null (checked above) and is the caller-owned buffer,
+                    // which Win32 guarantees is at least MAX_PATH wide for CSIDL queries - enough
+                    // for the redirection targets written here.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(w.as_ptr(), path_out, w.len());
+                    }
+                    return S_OK;
                 }
-                return S_OK;
             }
-        }
 
-        unsafe { real_fn(hwnd, csidl, token, flags, path_out) }
-    })
+            unsafe { real_fn(hwnd, csidl, token, flags, path_out) }
+        }
+    )
 }
 
 unsafe extern "system" fn hook_get_user_profile_directory_w(
@@ -209,7 +193,7 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
 ) -> BOOL {
     let real_fn: FnGetUserProfileDirectoryW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_GET_USER_PROFILE_DIRECTORY_W)) };
-    guard_shell_hook!(unsafe { real_fn(token, profile_dir, size) }, {
+    guard_detour!(&IN_SHELL_HOOK, unsafe { real_fn(token, profile_dir, size) }, {
         if !size.is_null() {
             let cfg = crate::paths::init_paths();
             let needed_len = cfg.user_profile_w.len() as u32;

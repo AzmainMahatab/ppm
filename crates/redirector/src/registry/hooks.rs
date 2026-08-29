@@ -1,4 +1,4 @@
-use crate::detour::{install_detour, load_trampoline};
+use crate::detour::{guard_detour, install_detour, load_trampoline};
 use crate::registry::handle_table::get_handle_table;
 use crate::registry::store::get_registry_store;
 use std::cell::Cell;
@@ -11,34 +11,6 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 thread_local! {
     static IN_REG_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-struct RegHookGuard;
-
-impl RegHookGuard {
-    fn enter() -> Option<Self> {
-        if IN_REG_HOOK.try_with(|h| h.get()).unwrap_or(false) {
-            return None;
-        }
-        let _ = IN_REG_HOOK.try_with(|h| h.set(true));
-        Some(RegHookGuard)
-    }
-}
-
-impl Drop for RegHookGuard {
-    fn drop(&mut self) {
-        let _ = IN_REG_HOOK.try_with(|h| h.set(false));
-    }
-}
-
-macro_rules! guard_reg_hook {
-    ($fallback:expr_2021, $body:expr_2021) => {{
-        let _guard = match RegHookGuard::enter() {
-            Some(g) => g,
-            None => return $fallback,
-        };
-        $body
-    }};
 }
 
 /// Decodes a NUL-terminated UTF-16 string from a raw Win32 pointer.
@@ -109,7 +81,8 @@ unsafe extern "system" fn hook_reg_open_key_ex_w(
     phk_result: *mut HKEY,
 ) -> i32 {
     let real_fn: FnRegOpenKeyExW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_OPEN_KEY_EX_W)) };
-    guard_reg_hook!(
+    guard_detour!(
+        &IN_REG_HOOK,
         unsafe { real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result) },
         {
             let base_path = get_handle_table().get_path(hkey.cast()).unwrap_or_default();
@@ -167,7 +140,8 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
 ) -> i32 {
     let real_fn: FnRegCreateKeyExW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_REG_CREATE_KEY_EX_W)) };
-    guard_reg_hook!(
+    guard_detour!(
+        &IN_REG_HOOK,
         unsafe {
             real_fn(
                 hkey,
@@ -250,7 +224,8 @@ unsafe extern "system" fn hook_reg_query_value_ex_w(
 ) -> i32 {
     let real_fn: FnRegQueryValueExW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_REG_QUERY_VALUE_EX_W)) };
-    guard_reg_hook!(
+    guard_detour!(
+        &IN_REG_HOOK,
         unsafe { real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data) },
         {
             let key_path = get_handle_table().get_path(hkey.cast()).unwrap_or_default();
@@ -312,7 +287,8 @@ unsafe extern "system" fn hook_reg_set_value_ex_w(
     cb_data: u32,
 ) -> i32 {
     let real_fn: FnRegSetValueExW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_SET_VALUE_EX_W)) };
-    guard_reg_hook!(
+    guard_detour!(
+        &IN_REG_HOOK,
         unsafe { real_fn(hkey, lp_value_name, reserved, dw_type, lp_data, cb_data) },
         {
             let key_path = get_handle_table().get_path(hkey.cast()).unwrap_or_default();
@@ -337,7 +313,7 @@ unsafe extern "system" fn hook_reg_set_value_ex_w(
 unsafe extern "system" fn hook_reg_delete_value_w(hkey: HKEY, lp_value_name: *const u16) -> i32 {
     let real_fn: FnRegDeleteValueW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_REG_DELETE_VALUE_W)) };
-    guard_reg_hook!(unsafe { real_fn(hkey, lp_value_name) }, {
+    guard_detour!(&IN_REG_HOOK, unsafe { real_fn(hkey, lp_value_name) }, {
         let key_path = get_handle_table().get_path(hkey.cast()).unwrap_or_default();
         let val_name = wide_to_string(lp_value_name);
         get_registry_store().delete_value(&key_path, &val_name);
@@ -348,7 +324,7 @@ unsafe extern "system" fn hook_reg_delete_value_w(hkey: HKEY, lp_value_name: *co
 
 unsafe extern "system" fn hook_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u16) -> i32 {
     let real_fn: FnRegDeleteKeyW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_DELETE_KEY_W)) };
-    guard_reg_hook!(unsafe { real_fn(hkey, lp_sub_key) }, {
+    guard_detour!(&IN_REG_HOOK, unsafe { real_fn(hkey, lp_sub_key) }, {
         let base_path = get_handle_table().get_path(hkey.cast()).unwrap_or_default();
         let full_path = resolve_full_key(&base_path, &wide_to_string(lp_sub_key));
 
@@ -360,7 +336,7 @@ unsafe extern "system" fn hook_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u
 
 unsafe extern "system" fn hook_reg_close_key(hkey: HKEY) -> i32 {
     let real_fn: FnRegCloseKey = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_CLOSE_KEY)) };
-    guard_reg_hook!(unsafe { real_fn(hkey) }, {
+    guard_detour!(&IN_REG_HOOK, unsafe { real_fn(hkey) }, {
         if let Some(entry) = get_handle_table().close_handle(hkey.cast())
             && entry.is_synthetic
         {

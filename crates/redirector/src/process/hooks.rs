@@ -1,4 +1,4 @@
-use crate::detour::{install_detour, load_trampoline};
+use crate::detour::{guard_detour, install_detour, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::{CString, c_void};
@@ -12,34 +12,6 @@ type LpprocessInformation = *mut PROCESS_INFORMATION;
 
 thread_local! {
     static IN_PROC_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-struct ProcHookGuard;
-
-impl ProcHookGuard {
-    fn enter() -> Option<Self> {
-        if IN_PROC_HOOK.try_with(|h| h.get()).unwrap_or(false) {
-            return None;
-        }
-        let _ = IN_PROC_HOOK.try_with(|h| h.set(true));
-        Some(ProcHookGuard)
-    }
-}
-
-impl Drop for ProcHookGuard {
-    fn drop(&mut self) {
-        let _ = IN_PROC_HOOK.try_with(|h| h.set(false));
-    }
-}
-
-macro_rules! guard_proc_hook {
-    ($fallback:expr_2021, $body:expr_2021) => {{
-        let _guard = match ProcHookGuard::enter() {
-            Some(g) => g,
-            None => return $fallback,
-        };
-        $body
-    }};
 }
 
 unsafe extern "C" {
@@ -116,7 +88,8 @@ unsafe extern "system" fn hook_create_process_w(
     proc_info: LpprocessInformation,
 ) -> BOOL {
     let real_fn: FnCreateProcessW = unsafe { std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_W)) };
-    guard_proc_hook!(
+    guard_detour!(
+        &IN_PROC_HOOK,
         unsafe {
             real_fn(
                 app_name,
