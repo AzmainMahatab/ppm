@@ -4,6 +4,12 @@ members = [
     "crates/redirector",
     "crates/test-probe"
 ]
+# Intention: Mark ppm as the sole release candidate for bare root-level commands.
+# Why: A virtual workspace makes every member a default build target, which would emit the
+#      test-probe tooling binary into `cargo build --release` output. The dependency tree still
+#      decides everything ppm needs: redirector.dll arrives through its cdylib artifact edge and
+#      test-probe through the bin-artifact dev-dependency exercised by the e2e suite.
+default-members = ["crates/ppm"]
 
 # Intention: Pin resolver v3 explicitly instead of relying on edition implications.
 # Why: This is a virtual workspace (no root package), so `edition = "2024"` does NOT imply the
@@ -17,6 +23,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
 rust-version = "1.98"
+repository = "https://github.com/AzmainMahatab/ppm"
 
 # Intention: Single-source every third-party dependency version so the three crates can never drift.
 # Why: Only versions centralize; feature sets stay per-crate and additive (see windows-sys).

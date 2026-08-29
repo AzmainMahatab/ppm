@@ -74,36 +74,33 @@ type FnCreateProcessW = unsafe extern "system" fn(
 
 static REAL_CREATE_PROCESS_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
-unsafe fn wide_to_string(ptr: *const u16) -> String {
+fn wide_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
     unsafe {
-        if ptr.is_null() {
-            return String::new();
-        }
         let mut len = 0;
         while *ptr.add(len) != 0 {
             len += 1;
         }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        String::from_utf16_lossy(slice)
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
     }
 }
 
-unsafe fn is_sandboxed_chromium_child(app_name: *const u16, cmd_line: *const u16) -> bool {
-    unsafe {
-        let mut check = String::new();
-        if !app_name.is_null() {
-            check.push_str(&wide_to_string(app_name));
-            check.push(' ');
-        }
-        if !cmd_line.is_null() {
-            check.push_str(&wide_to_string(cmd_line));
-        }
-        let lower = check.to_lowercase();
-        lower.contains("--type=")
-            || lower.contains("msedgewebview2.exe")
-            || lower.contains("msedge.exe")
-            || lower.contains("crashpad_handler.exe")
+fn is_sandboxed_chromium_child(app_name: *const u16, cmd_line: *const u16) -> bool {
+    let mut check = String::new();
+    if !app_name.is_null() {
+        check.push_str(&wide_to_string(app_name));
+        check.push(' ');
     }
+    if !cmd_line.is_null() {
+        check.push_str(&wide_to_string(cmd_line));
+    }
+    let lower = check.to_lowercase();
+    lower.contains("--type=")
+        || lower.contains("msedgewebview2.exe")
+        || lower.contains("msedge.exe")
+        || lower.contains("crashpad_handler.exe")
 }
 
 unsafe extern "system" fn hook_create_process_w(
@@ -118,9 +115,9 @@ unsafe extern "system" fn hook_create_process_w(
     startup_info: LPSTARTUPINFOW,
     proc_info: LpprocessInformation,
 ) -> BOOL {
-    unsafe {
-        let real_fn: FnCreateProcessW = std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_W));
-        guard_proc_hook!(
+    let real_fn: FnCreateProcessW = unsafe { std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_W)) };
+    guard_proc_hook!(
+        unsafe {
             real_fn(
                 app_name,
                 cmd_line,
@@ -131,39 +128,47 @@ unsafe extern "system" fn hook_create_process_w(
                 env,
                 curr_dir,
                 startup_info,
-                proc_info
-            ),
-            {
-                if !is_sandboxed_chromium_child(app_name, cmd_line) {
-                    let cfg = crate::paths::init_paths();
-                    let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
+                proc_info,
+            )
+        },
+        {
+            if !is_sandboxed_chromium_child(app_name, cmd_line) {
+                let cfg = crate::paths::init_paths();
+                let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
 
-                    if dll_path.is_file()
-                        && let Ok(dll_cstr) = CString::new(dll_path.to_string_lossy().as_bytes())
-                    {
-                        let res = DetourCreateProcessWithDllExW(
+                if dll_path.is_file()
+                    && let Ok(dll_cstr) = CString::new(dll_path.to_string_lossy().as_bytes())
+                {
+                    // SAFETY: every pointer argument is forwarded verbatim from the hooked
+                    // CreateProcessW frame; `dll_cstr` outlives the call; `proc_attr`,
+                    // `thread_attr`, `env`, `startup_info`, and `proc_info` only need their
+                    // const-to-mut qualifiers relaxed to match the Detours ABI.
+                    let res = unsafe {
+                        DetourCreateProcessWithDllExW(
                             app_name,
                             cmd_line,
-                            proc_attr as *mut _,
-                            thread_attr as *mut _,
+                            proc_attr.cast_mut(),
+                            thread_attr.cast_mut(),
                             inherit,
                             flags,
-                            env as *mut _,
+                            env.cast_mut(),
                             curr_dir,
-                            startup_info as *mut _,
-                            proc_info as *mut _,
+                            startup_info.cast(),
+                            proc_info.cast(),
                             dll_cstr.as_ptr(),
                             std::ptr::null_mut(),
+                        )
+                    };
+                    if res != 0 {
+                        tracing::info!(
+                            "CreateProcess [Child Injected]: Injected redirector.dll into new child process"
                         );
-                        if res != 0 {
-                            tracing::info!(
-                                "CreateProcess [Child Injected]: Injected redirector.dll into new child process"
-                            );
-                            return TRUE;
-                        }
+                        return TRUE;
                     }
                 }
+            }
 
+            unsafe {
                 real_fn(
                     app_name,
                     cmd_line,
@@ -177,8 +182,8 @@ unsafe extern "system" fn hook_create_process_w(
                     proc_info,
                 )
             }
-        )
-    }
+        }
+    )
 }
 
 pub fn init_hooks() {

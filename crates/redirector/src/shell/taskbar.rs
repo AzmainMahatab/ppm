@@ -11,17 +11,16 @@ thread_local! {
 type FnSetCurrentProcessExplicitAppUserModelID = unsafe extern "system" fn(*const u16) -> HRESULT;
 static REAL_SET_APP_USER_MODEL_ID: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
-unsafe fn wide_to_string(ptr: *const u16) -> String {
+fn wide_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
     unsafe {
-        if ptr.is_null() {
-            return String::new();
-        }
         let mut len = 0;
         while *ptr.add(len) != 0 {
             len += 1;
         }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        String::from_utf16_lossy(slice)
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
     }
 }
 
@@ -44,27 +43,24 @@ impl Drop for AppIdHookGuard {
 }
 
 unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRESULT {
-    unsafe {
-        let real_fn: FnSetCurrentProcessExplicitAppUserModelID =
-            std::mem::transmute(load_trampoline(&REAL_SET_APP_USER_MODEL_ID));
+    let real_fn: FnSetCurrentProcessExplicitAppUserModelID =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_SET_APP_USER_MODEL_ID)) };
 
-        let _guard = match AppIdHookGuard::enter() {
-            Some(g) => g,
-            None => return real_fn(app_id),
-        };
+    let _guard = match AppIdHookGuard::enter() {
+        Some(g) => g,
+        // SAFETY: forwarding to the original API is the documented fallback for re-entrant
+        // calls; `load_trampoline` guarantees the trampoline is published and call-valid.
+        None => unsafe { return real_fn(app_id) },
+    };
 
-        let app_id_str = wide_to_string(app_id);
-        let synthetic_id = format!("PPM.Isolated.{}", app_id_str);
-        let synthetic_wide: Vec<u16> = synthetic_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let app_id_str = wide_to_string(app_id);
+    let synthetic_id = format!("PPM.Isolated.{app_id_str}");
+    let synthetic_wide: Vec<u16> = synthetic_id.encode_utf16().chain(std::iter::once(0)).collect();
 
-        tracing::debug!(
-            "SetCurrentProcessExplicitAppUserModelID: mapped '{}' -> '{}'",
-            app_id_str,
-            synthetic_id
-        );
+    tracing::debug!("SetCurrentProcessExplicitAppUserModelID: mapped '{app_id_str}' -> '{synthetic_id}'");
 
-        real_fn(synthetic_wide.as_ptr())
-    }
+    // SAFETY: forwarding the rewritten AppID to the original API.
+    unsafe { real_fn(synthetic_wide.as_ptr()) }
 }
 
 pub fn init_hooks() {

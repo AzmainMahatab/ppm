@@ -1,7 +1,8 @@
 // Intention: Embed the redirector engine binary produced by the workspace dependency.
-// Why: The path is exported by the build script; the read happens in the compile phase that
-// Cargo guarantees runs after the redirector dependency is fully built - race-free by design.
-pub const EMBEDDED_REDIRECTOR_DLL: &[u8] = include_bytes!(env!("PPM_REDIRECTOR_DLL"));
+// Why: The cdylib artifact dependency (`artifact = "cdylib"`) makes Cargo build redirector.dll
+//      as part of ppm's build graph and export its exact staging path via
+//      CARGO_CDYLIB_FILE_REDIRECTOR_redirector - no layout guessing, no build-script race.
+pub const EMBEDDED_REDIRECTOR_DLL: &[u8] = include_bytes!(env!("CARGO_CDYLIB_FILE_REDIRECTOR_redirector"));
 
 pub const DEFAULT_APPS_JSON: &str = r#"{
   "$schema": "./apps.schema.json",

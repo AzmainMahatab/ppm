@@ -23,11 +23,11 @@ pub unsafe fn attach_detour(target_ptr: *mut *mut c_void, detour_fn: *mut c_void
         DetourUpdateThread(GetCurrentThread());
         let status = DetourAttach(target_ptr, detour_fn);
         if status != 0 {
-            tracing::error!("DetourAttach failed with code {}", status);
+            tracing::error!("DetourAttach failed with code {status}");
         }
         let commit_status = DetourTransactionCommit();
         if commit_status != 0 {
-            tracing::error!("DetourTransactionCommit failed with code {}", commit_status);
+            tracing::error!("DetourTransactionCommit failed with code {commit_status}");
         }
         status == 0 && commit_status == 0
     }
@@ -41,6 +41,12 @@ pub unsafe fn attach_detour(target_ptr: *mut *mut c_void, detour_fn: *mut c_void
 /// success, the unpatched original on failure (where the hook is never entered). Gating the
 /// publication on the transaction result would instead risk an unbounded hook spin in the
 /// pathological "patched but reported failure" case.
+///
+/// # Invariant
+/// Attach runs from `DllMain`. The loader lock serializes `DllMain` calls but does NOT freeze
+/// the process: any DLL in the load chain may spawn threads that reach hooked APIs while this
+/// function runs. Publication therefore never relies on "no other threads exist" - hooks wait
+/// for this store instead (see [`load_trampoline`]).
 pub(crate) fn install_detour(slot: &AtomicPtr<c_void>, original: *mut c_void, hook: *mut c_void) -> bool {
     let mut real: *mut c_void = original;
     let ok = unsafe { attach_detour(&mut real, hook) };
@@ -54,9 +60,13 @@ pub(crate) fn install_detour(slot: &AtomicPtr<c_void>, original: *mut c_void, ho
 /// Detours' code patch becomes live inside `DetourTransactionCommit`, while the trampoline
 /// pointer is published by the attaching thread right after the transaction returns. A hook
 /// entered inside that microscopic window must not read null; the Acquire spin converts the
-/// window into a bounded wait. Under this crate's deployment model (attach from `DllMain` while
-/// the loader lock serializes process startup) the spin never executes; under a future
-/// hot-attach path it stays correct instead of dispatching through null.
+/// window into a bounded wait.
+///
+/// # Invariant
+/// The loader lock serializes `DllMain` calls but does not freeze the process: DLLs in the
+/// load chain may spawn threads that reach hooked APIs during attach. The spin is therefore
+/// live protection for that case - not dead code - and it keeps a future hot-attach path
+/// correct instead of dispatching through null.
 pub(crate) fn load_trampoline(slot: &AtomicPtr<c_void>) -> *mut c_void {
     loop {
         match slot.load(Ordering::Acquire) {

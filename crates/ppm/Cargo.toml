@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Lightweight user-mode Windows virtualization engine and multi-architecture portable package manager"
 readme = "../../README.md"
 keywords = [
@@ -47,9 +48,12 @@ windows-sys = { workspace = true, features = [
     "Win32_System_LibraryLoader"
 ] }
 zip.workspace = true
-# Intention: Build-ordering edge only; the rlib is never linked into the binary.
-# Why: Guarantees redirector.dll is fully compiled before ppm's build script embeds it.
-redirector = { path = "../redirector" }
+# Intention: Build redirector.dll as a cdylib artifact of ppm's own build graph.
+# Why: Cargo compiles the cdylib before ppm compiles and exports its exact staging path
+#      (CARGO_CDYLIB_FILE_REDIRECTOR_redirector), which core/assets.rs embeds via include_bytes!.
+#      This replaces the former plain path dependency + build-script layout-guessing with a
+#      first-class artifact edge - no candidate fallbacks, no reverse-engineered promotion rules.
+redirector = { path = "../redirector", artifact = "cdylib" }
 
 [dev-dependencies]
 # Intention: Provide the virtualization probe executable through Cargo's own build graph.
