@@ -121,6 +121,9 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
         ("PORTABLE_APP".into(), "1".into()),
         ("ELECTRON_ENABLE_LOGGING".into(), "true".into()),
         ("PPM_ROOT".into(), path_to_env_value(root)),
+        // Intention: Identify the virtualized app to the redirector so the child's taskbar
+        // identity (AUMID) is derived dynamically - see redirector shell::init_hooks.
+        ("PPM_APP_NAME".into(), app_name_or_path.into()),
     ];
 
     // Auto-detect WebView2 engine if present under Apps/<run_arch>/WebView2

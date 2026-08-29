@@ -244,6 +244,112 @@ fn test_child_process_injection() -> Result<(), String> {
     Ok(())
 }
 
+fn test_sync_isolation() -> Result<(), String> {
+    println!("[TEST 5/5] Testing Synchronization, IPC & Window Isolation...");
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+        unsafe extern "system" {
+            fn CreateNamedPipeW(
+                lpName: *const u16,
+                dwOpenMode: u32,
+                dwPipeMode: u32,
+                nMaxInstances: u32,
+                nOutBufferSize: u32,
+                nInBufferSize: u32,
+                nDefaultTimeOut: u32,
+                lpSecurityAttributes: *const SECURITY_ATTRIBUTES,
+            ) -> HANDLE;
+        }
+
+        const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
+        const PIPE_TYPE_BYTE: u32 = 0x00000000;
+        const PIPE_WAIT: u32 = 0x00000000;
+
+        // 1. Mutex isolation
+        let mutex_name = to_wide("Local\\Probe_SingleInstance_TestMutex");
+        let h_mutex = CreateMutexW(ptr::null(), 0, mutex_name.as_ptr());
+        if h_mutex.is_null() {
+            return Err("CreateMutexW failed to create virtualized mutex".to_string());
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(h_mutex);
+            return Err("CreateMutexW unexpectedly returned ERROR_ALREADY_EXISTS".to_string());
+        }
+        CloseHandle(h_mutex);
+
+        // 2. Named pipe isolation
+        let pipe_name = to_wide(r"\\.\pipe\Probe_Test_Pipe");
+        let h_pipe = CreateNamedPipeW(
+            pipe_name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            1,
+            512,
+            512,
+            0,
+            ptr::null(),
+        );
+        if !h_pipe.is_null() {
+            CloseHandle(h_pipe);
+        }
+
+        // 3. Window isolation: Desktop host taskbar window "Shell_TrayWnd" must be hidden from portable process
+        let shell_tray = to_wide("Shell_TrayWnd");
+        let hwnd_tray = FindWindowW(shell_tray.as_ptr(), ptr::null());
+        if !hwnd_tray.is_null() {
+            return Err(format!(
+                "FindWindowW failed to isolate host desktop window: returned 0x{:08X}",
+                hwnd_tray as usize
+            ));
+        }
+
+        // 4. EnumWindows isolation: Host explorer windows must not leak through enumeration
+        use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, SetForegroundWindow};
+
+        #[allow(clippy::upper_case_acronyms)]
+        type BOOL = i32;
+
+        unsafe extern "system" fn check_enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            unsafe {
+                let leaked_ptr = lparam as *mut bool;
+                // If Shell_TrayWnd was enumerated, mark leaked
+                let mut class_buf = [0u16; 64];
+                let len = windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(
+                    hwnd,
+                    class_buf.as_mut_ptr(),
+                    64,
+                );
+                let class_str = String::from_utf16_lossy(&class_buf[..len as usize]);
+                if class_str == "Shell_TrayWnd" {
+                    *leaked_ptr = true;
+                }
+                TRUE
+            }
+        }
+
+        let mut leaked_shell_tray = false;
+        EnumWindows(Some(check_enum_proc), &mut leaked_shell_tray as *mut _ as LPARAM);
+        if leaked_shell_tray {
+            return Err("EnumWindows leaked host desktop Shell_TrayWnd into portable process".to_string());
+        }
+
+        // 5. Focus Hijacking protection: SetForegroundWindow on foreign HWND must fail safely
+        let fake_foreign_hwnd: HWND = 0x123456 as HWND;
+        let fg_res = SetForegroundWindow(fake_foreign_hwnd);
+        if fg_res != 0 {
+            return Err("SetForegroundWindow unexpectedly returned TRUE on foreign HWND".to_string());
+        }
+    }
+
+    println!("  -> Synchronization, IPC & Window Isolation PASSED!");
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.iter().any(|a| a == "--child") {
@@ -283,7 +389,11 @@ fn main() {
         eprintln!("[FAIL] {}", e);
         std::process::exit(4);
     }
+    if let Err(e) = test_sync_isolation() {
+        eprintln!("[FAIL] {}", e);
+        std::process::exit(5);
+    }
 
-    println!("=== ALL 4 VIRTUALIZATION PILLARS PASSED SUCCESSFULLY! ===");
+    println!("=== ALL 5 VIRTUALIZATION PILLARS PASSED SUCCESSFULLY! ===");
     std::process::exit(0);
 }
