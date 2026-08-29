@@ -11,3 +11,7 @@
 Thumbs.db
 .vscode/
 .idea/
+
+# AI session artifacts (kept locally, never committed)
+AGENTS.md
+PLAN.md
