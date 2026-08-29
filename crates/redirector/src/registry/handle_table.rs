@@ -121,22 +121,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_virtual_handle_table_lifecycle() {
+    fn predefined_pseudo_handles_map_to_canonical_hive_names() {
         let table = VirtualHandleTable::new();
 
-        // 1. Test Synthetic Handle Registration
+        assert_eq!(
+            table.get_path(HKEY_CLASSES_ROOT as HANDLE),
+            Some("HKCR".to_string())
+        );
+        assert_eq!(
+            table.get_path(HKEY_CURRENT_USER as HANDLE),
+            Some("HKCU".to_string())
+        );
+        assert_eq!(
+            table.get_path(HKEY_LOCAL_MACHINE as HANDLE),
+            Some("HKLM".to_string())
+        );
+        assert_eq!(table.get_path(HKEY_USERS as HANDLE), Some("HKU".to_string()));
+        assert_eq!(
+            table.get_path(HKEY_CURRENT_CONFIG as HANDLE),
+            Some("HKCC".to_string())
+        );
+    }
+
+    #[test]
+    fn virtual_handles_allocate_track_and_close() {
+        let table = VirtualHandleTable::new();
+
         let h1 = table.register_virtual_handle("HKCU\\Software\\App1".to_string());
         assert!(!h1.is_null());
         assert!(table.is_synthetic(h1));
         assert_eq!(table.get_path(h1), Some("HKCU\\Software\\App1".to_string()));
 
-        // 2. Test Host Handle Registration
+        // Synthetic IDs advance by 4, never colliding or reusing the predefined range.
+        let h2 = table.register_virtual_handle("HKCU\\Software\\App2".to_string());
+        assert_eq!(h2 as usize - h1 as usize, 4);
+
         let host_raw = 0x1234 as HANDLE;
         table.register_host_handle(host_raw, "HKLM\\Software\\App2".to_string());
         assert!(!table.is_synthetic(host_raw));
         assert_eq!(table.get_path(host_raw), Some("HKLM\\Software\\App2".to_string()));
 
-        // 3. Test Handle Close
         let closed = table.close_handle(h1);
         assert!(closed.is_some());
         assert!(table.get_path(h1).is_none());

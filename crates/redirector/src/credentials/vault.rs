@@ -98,31 +98,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_credential_vault_crud() {
+    fn credentials_survive_a_full_disk_round_trip() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let vault_file = temp_dir.path().join("credentials.json");
+
+        {
+            let vault = CredentialVault::new(vault_file.clone());
+            vault.set(
+                "git:https://github.com".to_string(),
+                1,
+                "john_doe".to_string(),
+                b"super_secret_token",
+                1,
+            );
+            vault.set("second:target".to_string(), 1, "other".to_string(), b"abc", 1);
+            assert!(vault.delete("git:https://github.com"));
+        }
+        // `vault` is dropped: the on-disk vault is the only state left.
+
+        let reopened = CredentialVault::new(vault_file.clone());
+
+        // Deleted credentials stay deleted across the reload.
+        assert!(reopened.get("git:https://github.com").is_none());
+
+        // Surviving credentials round-trip fully, lookup case-insensitively.
+        let cred = reopened
+            .get("SECOND:TARGET")
+            .expect("credential should survive the reload");
+        assert_eq!(cred.user_name, "other");
+        assert_eq!(hex::decode(&cred.credential_blob_hex).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn corrupt_state_file_starts_empty_and_recovers_on_next_write() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let vault_file = temp_dir.path().join("credentials.json");
+        std::fs::write(&vault_file, b"{ not valid json").unwrap();
+
         let vault = CredentialVault::new(vault_file.clone());
 
-        // 1. Insert credential
-        let secret = b"super_secret_token";
-        vault.set(
-            "git:https://github.com".to_string(),
-            1,
-            "john_doe".to_string(),
-            secret,
-            1,
-        );
+        // Documented loud-failure behavior: corrupt state starts from empty instead of
+        // pretending the lost entries still exist.
+        assert!(vault.get("anything").is_none());
 
-        // 2. Query credential
-        let cred = vault.get("git:https://github.com");
-        assert!(cred.is_some());
-        let cred = cred.unwrap();
-        assert_eq!(cred.user_name, "john_doe");
-        let decoded = hex::decode(&cred.credential_blob_hex).unwrap();
-        assert_eq!(decoded, secret);
-
-        // 3. Delete credential
-        assert!(vault.delete("git:https://github.com"));
-        assert!(vault.get("git:https://github.com").is_none());
+        // The recovered empty state persists on the next write.
+        vault.set("fresh".to_string(), 1, "user".to_string(), b"blob", 1);
+        let reopened = CredentialVault::new(vault_file.clone());
+        assert!(reopened.get("fresh").is_some());
     }
 }

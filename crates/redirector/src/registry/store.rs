@@ -190,29 +190,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_registry_store_set_get_value() {
+    fn written_state_survives_a_full_disk_round_trip() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let reg_file = temp_dir.path().join("registry.json");
-        let store = VirtualRegistry::new(reg_file.clone());
 
-        // Set value
-        let val_bytes = b"HelloVirtualWorld\0";
-        store.set_value("HKCU\\Software\\MyApp", "Greeting", 1, val_bytes);
+        {
+            let store = VirtualRegistry::new(reg_file.clone());
+            store.set_value("HKCU\\Software\\MyApp", "Greeting", 1, b"HelloVirtualWorld\0");
+            store.set_value("HKCU\\Software\\MyApp", "Deleted", 2, b"x");
+            store.set_value("HKCU\\Software\\Other", "Keep", 3, b"ok");
+            store.delete_value("HKCU\\Software\\MyApp", "Deleted");
+            store.delete_key("HKCU\\Software\\Gone");
+        }
+        // `store` is dropped: the on-disk hive is the only state left.
 
-        // Get value
-        let res = store.get_value("HKCU\\Software\\MyApp", "Greeting");
-        assert!(res.is_some());
-        let (val_type, bytes) = res.unwrap().expect("Value should exist and not be tombstoned");
+        let reopened = VirtualRegistry::new(reg_file.clone());
+
+        // Surviving values round-trip with type and bytes intact.
+        let (val_type, bytes) = reopened
+            .get_value("hkcu\\software\\myapp", "GREETING")
+            .unwrap()
+            .expect("value should survive the reload");
         assert_eq!(val_type, 1);
-        assert_eq!(bytes, val_bytes);
+        assert_eq!(bytes, b"HelloVirtualWorld\0");
 
-        // Delete value
-        store.delete_value("HKCU\\Software\\MyApp", "Greeting");
-        let res_deleted = store.get_value("HKCU\\Software\\MyApp", "Greeting");
-        assert_eq!(res_deleted, Some(Err(()))); // Tombstoned / masked
+        // Normalization must be stable across the reload.
+        let (val_type2, _) = reopened
+            .get_value("HKCU\\SOFTWARE\\MYAPP", "greeting")
+            .unwrap()
+            .expect("normalization must be stable across reloads");
+        assert_eq!(val_type2, 1);
 
-        // Tombstone entire key
-        store.delete_key("HKCU\\Software\\MyApp");
-        assert!(store.is_key_tombstoned("HKCU\\Software\\MyApp"));
+        // Value-level and key-level tombstones survive the reload.
+        assert_eq!(
+            reopened.get_value("HKCU\\Software\\MyApp", "Deleted"),
+            Some(Err(()))
+        );
+        assert!(reopened.is_key_tombstoned("HKCU\\Software\\Gone"));
+
+        // Unrelated keys remain intact.
+        let (keep_type, keep_bytes) = reopened
+            .get_value("HKCU\\Software\\Other", "Keep")
+            .unwrap()
+            .expect("unrelated key should survive");
+        assert_eq!(keep_type, 3);
+        assert_eq!(keep_bytes, b"ok");
+
+        // The on-disk hive carries the canonical serialized shape.
+        let on_disk = std::fs::read_to_string(&reg_file).expect("registry.json must exist");
+        assert!(on_disk.contains("MYAPP"));
+        assert!(on_disk.contains(&hex::encode(b"HelloVirtualWorld\0")));
+        assert!(on_disk.contains("is_tombstone"));
+        assert!(on_disk.contains("deleted_values"));
     }
 }
