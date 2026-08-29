@@ -163,7 +163,15 @@ crates/redirector/src/
 ### B. `crates/ppm/src/`
 ```
 crates/ppm/src/
-├── main.rs                         # CLI Entrypoint & Subcommand Dispatch
+├── main.rs                         # CLI Entrypoint (parse -> resolve root -> execute)
+│
+├── cli/                            # Command-Line Interface Layer
+│   ├── mod.rs                      # Cli/Commands Definitions & Dispatch
+│   ├── context.rs                  # Root Resolution & Manifest Loading
+│   ├── pipeline.rs                 # Dependency Ordering & Install Pipeline
+│   └── commands/                   # One Module Per Command
+│       ├── init.rs  run.rs  check.rs  install.rs  update.rs
+│       └── link.rs  list.rs  schema.rs  validate.rs
 │
 ├── core/                           # Core Domain
 │   ├── mod.rs
@@ -189,7 +197,14 @@ crates/ppm/src/
 ### C. Verification Probe & Integration Tests
 ```
 crates/test-probe/                  # Isolated probe package (bin-artifact dev-dependency of ppm)
-└── src/main.rs                     # Verifies Registry, Shell, Vault, Injection & Taskbar Identity
+├── src/main.rs                     # Suite Dispatcher (--child / --echo-args / --help modes)
+├── src/support.rs                  # UTF-16 Marshalling Helpers
+└── src/suites/                     # One Suite Per Isolation Boundary
+    ├── registry.rs                 # Registry Copy-on-Write
+    ├── shell.rs                    # Known-Folder Redirection
+    ├── credentials.rs              # Credential Vault
+    ├── injection.rs                # Child-Process Re-Injection
+    └── identity.rs                 # Taskbar AUMID Contract
 
 crates/ppm/tests/
 └── e2e_virtualization.rs           # Integration test consuming the probe via CARGO_BIN_FILE_* edge

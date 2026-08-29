@@ -10,18 +10,17 @@ A lightweight, single-binary portable application runner, virtualization engine,
 
 ## Features
 
-* **Multi-Architecture Management**: Organizes and runs native binaries for **Intel/AMD x64** (`Apps/x64/`) and **ARM64** (`Apps/arm64/`).
-* **Hardware Architecture Routing**: Inspects host CPU architecture on startup via `GetNativeSystemInfo` and launches the matching native application binary.
-* **User-Mode Virtualization**:
-  * **Copy-on-Write Registry Virtualization**: Intercepts Win32 registry APIs (`KernelBase.dll` / `advapi32.dll`), persisting modifications and tombstones to `.ppm/system/registry.json` without modifying the host OS.
-  * **Child Process Injection**: Injects `redirector.dll` across child processes via Microsoft Detours (`CreateProcessW`).
-  * **Isolated Credential Vault**: Intercepts `Cred*` APIs (`advapi32.dll`), persisting encrypted credentials to `.ppm/system/credentials.json`.
-  * **Shell Path Redirection**: Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, and `FOLDERID_RoamingAppData` (`shell32.dll` / `userenv.dll`) to `Home/`.
-  * **Taskbar Identity**: Establishes a root-scoped `AppUserModelID` (`PPM.Portable.<root-hash>.<App>`) at attach and stamps taskbar windows with a Portable Mode overlay badge.
-* **Dynamic Version Inspection**: Resolves installed versions directly from PE binary headers (`GetFileVersionInfoW`) and package manifests on disk.
-* **Isolated User Profile**: Maps user profile directories to the portable `Home/` directory.
-* **Deterministic Layout**: Structure organized into `.ppm/` (runtime configs, libraries, logs, and virtual hives), `Apps/` (binaries), and `Home/` (user data).
-* **Test Suite & Verification Probe**: Includes an isolated `test-probe` binary wired into tests as a bin-artifact dev-dependency, plus comprehensive workspace unit and integration tests (`cargo test --workspace`).
+* **User-Mode Virtualization** — five isolation boundaries enforced via Microsoft Detours:
+  Copy-on-Write registry, isolated credential vault, shell known-folder redirection,
+  child-process re-injection, and root-scoped taskbar identity (`AppUserModelID` +
+  Portable Mode overlay badge).
+* **Multi-Architecture Package Management** — x64/arm64 binary organization, host-architecture
+  routing, dependency-DAG resolution, PE-header version detection, and zip/7z/tar/MSI installs.
+* **Deterministic Portable Layout** — fully self-contained `.ppm/` + `Apps/` + `Home/` structure.
+* **Verified Isolation** — a live Win32 probe exercises every boundary under full injection
+  as part of the standard test suite.
+
+The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 
 ---
 
@@ -113,7 +112,10 @@ A lightweight, single-binary portable application runner, virtualization engine,
 
 ## Developer Documentation
 
-For in-depth architectural diagrams, Win32 Detours hooks matrix, and path invariants, see [ARCHITECTURE.md](ARCHITECTURE.md).
+* [FEATURES.md](FEATURES.md) — capability overview
+* [SPEC.md](SPEC.md) — behavioral contracts & invariants
+* [ARCHITECTURE.md](ARCHITECTURE.md) — boundary matrix, interception API map, source tree
+* [docs/adr/](docs/adr/) — architecture decision records
 
 ### Building & Testing from Source
 
