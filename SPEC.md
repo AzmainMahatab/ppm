@@ -33,7 +33,7 @@ defines applications:
 | 1 | Registry (CoW) | Host reads fall through unchanged; writes and deletes are virtualized with tombstones into `.ppm/system/registry.json`. |
 | 2 | Process Spawning | Every spawned child is re-injected with the engine and inherits all boundaries. |
 | 3 | Credentials | Generic Windows credentials are stored encrypted in `.ppm/system/credentials.json`; the host credential store is untouched. |
-| 4 | Shell Paths | `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData` resolve under `Home/`. |
+| 4 | Shell Paths | `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` resolve under `Home/`. |
 | 5 | Process Identity | A root-scoped identity exists from the first instant of process execution; app-initiated identity calls are re-parented into the same namespace. |
 
 ### 3.1 Identity Format
@@ -75,6 +75,11 @@ Home/                    virtualized user profile
 | 3 | Credentials suite failure |
 | 4 | Process injection suite failure |
 | 5 | Process identity suite failure |
+
+Arbitration depth: the process-identity suite additionally sets an app-requested identity
+through the real shell32 export and asserts it is re-parented into the same root-scoped
+namespace; the shell-paths suite verifies all four redirected folders and the legacy
+`SHGetFolderPathW` CSIDL selector.
 
 Auxiliary modes: `--child` (verify virtualized environment in a spawned child),
 `--echo-args` (argument passthrough echo), `--help` (passthrough help).

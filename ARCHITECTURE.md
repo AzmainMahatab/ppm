@@ -137,7 +137,9 @@ graph TD
 crates/redirector/src/
 ├── lib.rs                          # DLL Entrypoint & Hook Orchestration
 ├── paths.rs                        # Path Resolution (Home/, .ppm/logs/, .ppm/system/)
-├── detour.rs                       # Microsoft Detours FFI Wrapper
+├── detour.rs                       # Detours FFI, Re-Entrancy Guard & Export-Resolution Seam
+├── winstr.rs                       # Win16 String, UTF-16 Encoding & COM-Task Allocators
+├── persist.rs                      # Loud-Failure JSON State Persistence (load/persist)
 │
 ├── registry/                       # Registry Virtualization
 │   ├── mod.rs                      # Registry module export & initialization
