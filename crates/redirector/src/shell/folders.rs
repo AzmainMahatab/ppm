@@ -1,4 +1,4 @@
-use crate::detour::{guard_detour, install_detour, load_trampoline};
+use crate::detour::{guard_detour, hook_export, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -222,36 +222,36 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
     unsafe {
         let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
         let userenv = LoadLibraryW(windows_sys::core::w!("userenv.dll"));
 
-        if !shell32.is_null() {
-            if let Some(proc) = GetProcAddress(shell32, c"SHGetKnownFolderPath".as_ptr().cast()) {
-                install_detour(
-                    &REAL_SH_GET_KNOWN_FOLDER_PATH,
-                    proc as *mut c_void,
-                    hook_sh_get_known_folder_path as *mut c_void,
-                );
-            }
-
-            if let Some(proc) = GetProcAddress(shell32, c"SHGetFolderPathW".as_ptr().cast()) {
-                install_detour(
-                    &REAL_SH_GET_FOLDER_PATH_W,
-                    proc as *mut c_void,
-                    hook_sh_get_folder_path_w as *mut c_void,
-                );
-            }
+        if shell32.is_null() {
+            tracing::warn!("shell32.dll unavailable; shell-path hooks skipped");
+        } else {
+            hook_export(
+                shell32,
+                "SHGetKnownFolderPath",
+                &REAL_SH_GET_KNOWN_FOLDER_PATH,
+                hook_sh_get_known_folder_path as *mut c_void,
+            );
+            hook_export(
+                shell32,
+                "SHGetFolderPathW",
+                &REAL_SH_GET_FOLDER_PATH_W,
+                hook_sh_get_folder_path_w as *mut c_void,
+            );
         }
 
-        if !userenv.is_null()
-            && let Some(proc) = GetProcAddress(userenv, c"GetUserProfileDirectoryW".as_ptr().cast())
-        {
-            install_detour(
+        if userenv.is_null() {
+            tracing::warn!("userenv.dll unavailable; profile-path hook skipped");
+        } else {
+            hook_export(
+                userenv,
+                "GetUserProfileDirectoryW",
                 &REAL_GET_USER_PROFILE_DIRECTORY_W,
-                proc as *mut c_void,
                 hook_get_user_profile_directory_w as *mut c_void,
             );
         }

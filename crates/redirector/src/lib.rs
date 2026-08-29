@@ -4,6 +4,7 @@ pub mod paths;
 pub mod process;
 pub mod registry;
 pub mod shell;
+pub(crate) mod winstr;
 
 pub type BOOL = i32;
 pub const TRUE: BOOL = 1;

@@ -2,6 +2,8 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::thread::LocalKey;
+use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
 use windows_sys::Win32::System::Threading::GetCurrentThread;
 
 unsafe extern "system" {
@@ -129,3 +131,33 @@ macro_rules! guard_detour {
     }};
 }
 pub(crate) use guard_detour;
+
+/// Resolves `api` on `module` and attaches `hook` over it.
+///
+/// # Why a single seam
+/// Every `init_hooks` call site resolved exports with hand-rolled `GetProcAddress`
+/// blocks whose failure behavior had drifted (some silent, some logged). Centralizing
+/// here makes a missing export or failed attach uniformly loud: a silently absent hook
+/// would leave an isolation boundary unenforced while the process keeps running.
+///
+/// # Invariant
+/// The slot is published by [`install_detour`] in every outcome, so a live hook never
+/// dispatches through null.
+pub(crate) fn hook_export(module: HMODULE, api: &str, slot: &AtomicPtr<c_void>, hook: *mut c_void) -> bool {
+    if module.is_null() {
+        tracing::warn!("Hook {api}: module handle is null");
+        return false;
+    }
+    // SAFETY: `export_name` is a NUL-terminated ANSI export name; `module` is a live
+    // module handle obtained by the caller; `hook` is a valid hook function pointer.
+    let export_name: Vec<u8> = api.bytes().chain(std::iter::once(0)).collect();
+    unsafe {
+        let Some(target) = GetProcAddress(module, export_name.as_ptr()) else {
+            tracing::warn!("Hook {api}: export not found");
+            return false;
+        };
+        let ok = install_detour(slot, target as *mut c_void, hook);
+        tracing::info!("Hook {api}: {ok}");
+        ok
+    }
+}

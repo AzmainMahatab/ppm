@@ -1,4 +1,5 @@
-use crate::detour::{guard_detour, install_detour, load_trampoline};
+use crate::detour::{guard_detour, hook_export, load_trampoline};
+use crate::winstr::wide_to_string;
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::{CString, c_void};
@@ -45,19 +46,6 @@ type FnCreateProcessW = unsafe extern "system" fn(
 ) -> BOOL;
 
 static REAL_CREATE_PROCESS_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-
-fn wide_to_string(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let mut len = 0;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
-    }
-}
 
 fn is_sandboxed_chromium_child(app_name: *const u16, cmd_line: *const u16) -> bool {
     let mut check = String::new();
@@ -160,35 +148,24 @@ unsafe extern "system" fn hook_create_process_w(
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
     unsafe {
         let kernelbase = GetModuleHandleW(windows_sys::core::w!("kernelbase.dll"));
         let kernel32 = GetModuleHandleW(windows_sys::core::w!("kernel32.dll"));
 
-        let mut target_proc = None;
-
-        // 1. Try kernelbase.dll!CreateProcessW
-        if !kernelbase.is_null()
-            && let Some(proc) = GetProcAddress(kernelbase, c"CreateProcessW".as_ptr().cast())
-        {
-            target_proc = Some(proc);
-        }
-
-        // 2. Fallback kernel32.dll!CreateProcessW
-        if target_proc.is_none()
-            && !kernel32.is_null()
-            && let Some(proc) = GetProcAddress(kernel32, c"CreateProcessW".as_ptr().cast())
-        {
-            target_proc = Some(proc);
-        }
-
-        if let Some(proc) = target_proc {
-            install_detour(
-                &REAL_CREATE_PROCESS_W,
-                proc as *mut c_void,
-                hook_create_process_w as *mut c_void,
-            );
+        // KernelBase exports CreateProcessW on modern Windows; kernel32 is the fallback.
+        let attached = [kernelbase, kernel32].into_iter().any(|module| {
+            !module.is_null()
+                && hook_export(
+                    module,
+                    "CreateProcessW",
+                    &REAL_CREATE_PROCESS_W,
+                    hook_create_process_w as *mut c_void,
+                )
+        });
+        if !attached {
+            tracing::warn!("CreateProcessW: hook not attached; child injection inactive");
         }
     }
 }

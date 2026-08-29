@@ -1,6 +1,7 @@
-use crate::detour::{guard_detour, install_detour, load_trampoline};
+use crate::detour::{guard_detour, hook_export, load_trampoline};
 use crate::registry::handle_table::get_handle_table;
 use crate::registry::store::get_registry_store;
+use crate::winstr::wide_to_string;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicPtr;
@@ -11,23 +12,6 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 thread_local! {
     static IN_REG_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Decodes a NUL-terminated UTF-16 string from a raw Win32 pointer.
-///
-/// # Safety
-/// `ptr` must point to a valid NUL-terminated UTF-16 sequence readable up to the terminator.
-fn wide_to_string(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let mut len = 0;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
-    }
 }
 
 /// Joins an open-key base path with a subkey the way the Win32 registry APIs compose them,
@@ -347,7 +331,7 @@ unsafe extern "system" fn hook_reg_close_key(hkey: HKEY) -> i32 {
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 
     unsafe {
         // Hook Win32 Registry APIs in KernelBase.dll (modern Windows) or advapi32.dll
@@ -361,68 +345,54 @@ pub fn init_hooks() {
         };
 
         if !reg_mod.is_null() {
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegOpenKeyExW".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_OPEN_KEY_EX_W,
-                    proc as *mut c_void,
-                    hook_reg_open_key_ex_w as *mut c_void,
-                );
-                tracing::info!("Hook RegOpenKeyExW: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegOpenKeyExW",
+                &REAL_REG_OPEN_KEY_EX_W,
+                hook_reg_open_key_ex_w as *mut c_void,
+            );
 
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegCreateKeyExW".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_CREATE_KEY_EX_W,
-                    proc as *mut c_void,
-                    hook_reg_create_key_ex_w as *mut c_void,
-                );
-                tracing::info!("Hook RegCreateKeyExW: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegCreateKeyExW",
+                &REAL_REG_CREATE_KEY_EX_W,
+                hook_reg_create_key_ex_w as *mut c_void,
+            );
 
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegQueryValueExW".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_QUERY_VALUE_EX_W,
-                    proc as *mut c_void,
-                    hook_reg_query_value_ex_w as *mut c_void,
-                );
-                tracing::info!("Hook RegQueryValueExW: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegQueryValueExW",
+                &REAL_REG_QUERY_VALUE_EX_W,
+                hook_reg_query_value_ex_w as *mut c_void,
+            );
 
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegSetValueExW".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_SET_VALUE_EX_W,
-                    proc as *mut c_void,
-                    hook_reg_set_value_ex_w as *mut c_void,
-                );
-                tracing::info!("Hook RegSetValueExW: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegSetValueExW",
+                &REAL_REG_SET_VALUE_EX_W,
+                hook_reg_set_value_ex_w as *mut c_void,
+            );
 
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegDeleteValueW".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_DELETE_VALUE_W,
-                    proc as *mut c_void,
-                    hook_reg_delete_value_w as *mut c_void,
-                );
-                tracing::info!("Hook RegDeleteValueW: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegDeleteValueW",
+                &REAL_REG_DELETE_VALUE_W,
+                hook_reg_delete_value_w as *mut c_void,
+            );
 
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegDeleteKeyW".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_DELETE_KEY_W,
-                    proc as *mut c_void,
-                    hook_reg_delete_key_w as *mut c_void,
-                );
-                tracing::info!("Hook RegDeleteKeyW: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegDeleteKeyW",
+                &REAL_REG_DELETE_KEY_W,
+                hook_reg_delete_key_w as *mut c_void,
+            );
 
-            if let Some(proc) = GetProcAddress(reg_mod, c"RegCloseKey".as_ptr().cast()) {
-                let ok = install_detour(
-                    &REAL_REG_CLOSE_KEY,
-                    proc as *mut c_void,
-                    hook_reg_close_key as *mut c_void,
-                );
-                tracing::info!("Hook RegCloseKey: {ok}");
-            }
+            hook_export(
+                reg_mod,
+                "RegCloseKey",
+                &REAL_REG_CLOSE_KEY,
+                hook_reg_close_key as *mut c_void,
+            );
         }
     }
 }

@@ -1,5 +1,6 @@
-use crate::detour::{ReenterGuard, install_detour, load_trampoline};
+use crate::detour::{ReenterGuard, hook_export, load_trampoline};
 use crate::paths::init_paths;
+use crate::winstr::wide_to_string;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -64,19 +65,6 @@ fn synthetic_aumid(identity: &str) -> String {
     let mut identity = sanitize_identity(identity);
     identity.truncate(34);
     format!("PPM.Portable.{}.{}", root_hash16(), identity)
-}
-
-fn wide_to_string(ptr: *const u16) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let mut len = 0;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
-    }
 }
 
 /// Proactively establishes the isolated identity during DLL attach, before any window can
@@ -147,21 +135,15 @@ unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRES
 /// with the isolated namespace instead of clobbering it.
 pub fn init_hooks() {
     init_app_user_model_id();
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
     unsafe {
         let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
-        if !shell32.is_null()
-            && let Some(proc) = GetProcAddress(
-                shell32,
-                c"SetCurrentProcessExplicitAppUserModelID".as_ptr().cast(),
-            )
-        {
-            install_detour(
-                &REAL_SET_APP_USER_MODEL_ID,
-                proc as *mut c_void,
-                hook_set_app_user_model_id as *mut c_void,
-            );
-        }
+        hook_export(
+            shell32,
+            "SetCurrentProcessExplicitAppUserModelID",
+            &REAL_SET_APP_USER_MODEL_ID,
+            hook_set_app_user_model_id as *mut c_void,
+        );
     }
 }

@@ -1,5 +1,5 @@
 use crate::credentials::vault::get_vault;
-use crate::detour::{guard_detour, install_detour, load_trampoline};
+use crate::detour::{guard_detour, hook_export, load_trampoline};
 use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -229,7 +229,7 @@ unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
     unsafe {
         let advapi32 = LoadLibraryW(windows_sys::core::w!("advapi32.dll"));
@@ -237,36 +237,32 @@ pub fn init_hooks() {
             return;
         }
 
-        if let Some(proc) = GetProcAddress(advapi32, c"CredReadW".as_ptr().cast()) {
-            install_detour(
-                &REAL_CRED_READ_W,
-                proc as *mut c_void,
-                hook_cred_read_w as *mut c_void,
-            );
-        }
+        hook_export(
+            advapi32,
+            "CredReadW",
+            &REAL_CRED_READ_W,
+            hook_cred_read_w as *mut c_void,
+        );
 
-        if let Some(proc) = GetProcAddress(advapi32, c"CredWriteW".as_ptr().cast()) {
-            install_detour(
-                &REAL_CRED_WRITE_W,
-                proc as *mut c_void,
-                hook_cred_write_w as *mut c_void,
-            );
-        }
+        hook_export(
+            advapi32,
+            "CredWriteW",
+            &REAL_CRED_WRITE_W,
+            hook_cred_write_w as *mut c_void,
+        );
 
-        if let Some(proc) = GetProcAddress(advapi32, c"CredDeleteW".as_ptr().cast()) {
-            install_detour(
-                &REAL_CRED_DELETE_W,
-                proc as *mut c_void,
-                hook_cred_delete_w as *mut c_void,
-            );
-        }
+        hook_export(
+            advapi32,
+            "CredDeleteW",
+            &REAL_CRED_DELETE_W,
+            hook_cred_delete_w as *mut c_void,
+        );
 
-        if let Some(proc) = GetProcAddress(advapi32, c"CredFree".as_ptr().cast()) {
-            install_detour(
-                &REAL_CRED_FREE,
-                proc as *mut c_void,
-                hook_cred_free as *mut c_void,
-            );
-        }
+        hook_export(
+            advapi32,
+            "CredFree",
+            &REAL_CRED_FREE,
+            hook_cred_free as *mut c_void,
+        );
     }
 }
