@@ -134,11 +134,11 @@ fn test_e2e_virtualization_with_probe() {
         "credentials.json should exist in .ppm/system"
     );
 
-    // Boundary verification guard: the probe must have exercised and passed the taskbar
+    // Boundary verification guard: the probe must have exercised and passed the process
     // identity boundary; a silent AUMID regression can no longer pass the suite.
     assert!(
-        stdout_str.contains("Taskbar Identity Boundary"),
-        "Probe must verify the taskbar identity boundary contract. Stdout: {}",
+        stdout_str.contains("Process Identity Boundary"),
+        "Probe must verify the process identity boundary contract. Stdout: {}",
         stdout_str
     );
 }

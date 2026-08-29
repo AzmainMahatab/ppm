@@ -89,7 +89,7 @@ graph TD
 │ 2. Process Spawning  │ kernelbase.dll / kernel32.dll │ CreateProcessW                  │
 │ 3. Credentials       │ advapi32.dll                  │ CredReadW / CredWriteW / Delete │
 │ 4. Shell Paths       │ shell32.dll + userenv.dll     │ Known Folders / Profile Paths   │
-│ 5. Taskbar Identity  │ shell32.dll                   │ SetCurrentProcessExplicitAppId  │
+│ 5. Process Identity  │ shell32.dll                   │ SetCurrentProcessExplicitAppId  │
 └──────────────────────┴───────────────────────────────┴─────────────────────────────────┘
 ```
 

@@ -12,7 +12,7 @@ A lightweight, single-binary portable application runner, virtualization engine,
 
 * **User-Mode Virtualization** — five isolation boundaries enforced via Microsoft Detours:
   Copy-on-Write registry, isolated credential vault, shell known-folder redirection,
-  child-process re-injection, and root-scoped taskbar identity (`AppUserModelID` +
+  child-process re-injection, and root-scoped process identity (`AppUserModelID` +
   Portable Mode overlay badge).
 * **Multi-Architecture Package Management** — x64/arm64 binary organization, host-architecture
   routing, dependency-DAG resolution, PE-header version detection, and zip/7z/tar/MSI installs.

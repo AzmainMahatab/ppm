@@ -1,4 +1,4 @@
-//! Taskbar identity boundary verification: the redirector must have proactively
+//! Process identity boundary verification: the redirector must have proactively
 //! established a root-scoped AppUserModelID at DLL attach.
 
 use std::ffi::c_void;
@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::Shell::GetCurrentProcessExplicitAppUserModelID;
 use crate::support::from_wide_ptr;
 
 pub(crate) fn run() -> Result<(), String> {
-    println!("[SUITE 5/5] Taskbar Identity Boundary...");
+    println!("[SUITE 5/5] Process Identity Boundary...");
     unsafe {
         let mut aumid_ptr: *mut u16 = ptr::null_mut();
         let hr = GetCurrentProcessExplicitAppUserModelID(&mut aumid_ptr);
@@ -29,7 +29,7 @@ pub(crate) fn run() -> Result<(), String> {
         validate_portable_aumid(&aumid)?;
     }
 
-    println!("  -> Taskbar Identity Boundary PASSED!");
+    println!("  -> Process Identity Boundary PASSED!");
     Ok(())
 }
 

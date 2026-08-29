@@ -34,7 +34,7 @@ defines applications:
 | 2 | Process Spawning | Every spawned child is re-injected with the engine and inherits all boundaries. |
 | 3 | Credentials | Generic Windows credentials are stored encrypted in `.ppm/system/credentials.json`; the host credential store is untouched. |
 | 4 | Shell Paths | `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData` resolve under `Home/`. |
-| 5 | Taskbar Identity | A root-scoped identity exists from the first instant of process execution; app-initiated identity calls are re-parented into the same namespace. |
+| 5 | Process Identity | A root-scoped identity exists from the first instant of process execution; app-initiated identity calls are re-parented into the same namespace. |
 
 ### 3.1 Identity Format
 
@@ -47,7 +47,7 @@ PPM.Portable.<root-hash-16hex>.<identity>
 * `identity`: application name injected by the runner (`PPM_APP_NAME`), falling
   back to the executable stem.
 
-Two deployment roots therefore never share a taskbar identity, regardless of the
+Two deployment roots therefore never share the same identity, regardless of the
 application's own `SetCurrentProcessExplicitAppUserModelID` calls.
 
 ## 4. On-Disk Layout Invariants
@@ -74,12 +74,12 @@ Home/                    virtualized user profile
 | 2 | Shell paths suite failure |
 | 3 | Credentials suite failure |
 | 4 | Process injection suite failure |
-| 5 | Taskbar identity suite failure |
+| 5 | Process identity suite failure |
 
 Auxiliary modes: `--child` (verify virtualized environment in a spawned child),
 `--echo-args` (argument passthrough echo), `--help` (passthrough help).
 The integration harness (`e2e_virtualization.rs`) asserts both process success and
-that the taskbar identity suite executed.
+that the process identity suite executed.
 
 ## 6. Intentional Non-Goals
 
