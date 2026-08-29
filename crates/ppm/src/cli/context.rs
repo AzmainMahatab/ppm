@@ -148,4 +148,3 @@ mod tests {
         assert_eq!(resolve_root_from(None, None, Some(&plain)), plain);
     }
 }
-
