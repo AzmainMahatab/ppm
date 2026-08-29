@@ -33,13 +33,20 @@ type EnvironmentOverrides = [(String, String)];
 // Why: Edition 2024 makes mutating the parent process environment unsafe and racy; handing the
 //      child a dedicated block keeps ppm's own process pristine and the launch reproducible.
 fn build_child_environment(overrides: &EnvironmentOverrides) -> Vec<(String, String)> {
-    let override_keys: HashSet<String> = overrides.iter().map(|(key, _)| key.to_uppercase()).collect();
-
     // Ex: A variable that cannot be represented as UTF-8 is excluded rather than aborting the
     //     launch; Windows environment blocks are UTF-16 and such names are pathological.
-    let inherited = env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| !override_keys.contains(&key.to_uppercase()));
+    let inherited =
+        env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)));
+    merge_child_environment(inherited, overrides)
+}
+
+fn merge_child_environment(
+    inherited: impl Iterator<Item = (String, String)>,
+    overrides: &EnvironmentOverrides,
+) -> Vec<(String, String)> {
+    let override_keys: HashSet<String> = overrides.iter().map(|(key, _)| key.to_uppercase()).collect();
+
+    let inherited = inherited.filter(|(key, _)| !override_keys.contains(&key.to_uppercase()));
 
     let mut merged: Vec<(String, String)> = inherited.collect();
     merged.extend(overrides.iter().cloned());
@@ -390,4 +397,57 @@ fn quote_win32_arg(arg: &str) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overrides_replace_inherited_keys_case_insensitively() {
+        let inherited = [
+            ("PATH".to_string(), "host".to_string()),
+            ("KEEP".to_string(), "1".to_string()),
+        ];
+        let overrides = [("path".to_string(), "portable".to_string())];
+
+        let merged = merge_child_environment(inherited.into_iter(), &overrides);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("KEEP".to_string(), "1".to_string()),
+                ("path".to_string(), "portable".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_output_is_case_insensitively_sorted() {
+        let inherited = [
+            ("b".to_string(), "1".to_string()),
+            ("A".to_string(), "2".to_string()),
+        ];
+
+        let merged = merge_child_environment(inherited.into_iter(), &[]);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("A".to_string(), "2".to_string()),
+                ("b".to_string(), "1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn environment_block_is_nul_terminated_per_entry_and_overall() {
+        let block = to_utf16_environment_block(&[
+            ("A".to_string(), "1".to_string()),
+            ("B".to_string(), "2".to_string()),
+        ]);
+
+        let text: String = String::from_utf16_lossy(&block);
+        assert_eq!(text, "A=1\0B=2\0\0");
+    }
 }

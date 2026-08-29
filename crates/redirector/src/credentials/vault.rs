@@ -96,12 +96,11 @@ impl CredentialVault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_credential_vault_crud() {
-        let temp_dir = std::env::temp_dir().join(format!("ppm_test_vault_{}", std::process::id()));
-        let vault_file = temp_dir.join("credentials.json");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let vault_file = temp_dir.path().join("credentials.json");
         let vault = CredentialVault::new(vault_file.clone());
 
         // 1. Insert credential
@@ -125,9 +124,5 @@ mod tests {
         // 3. Delete credential
         assert!(vault.delete("git:https://github.com"));
         assert!(vault.get("git:https://github.com").is_none());
-
-        // Clean up
-        let _ = fs::remove_file(&vault_file);
-        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

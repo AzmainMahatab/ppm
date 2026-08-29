@@ -188,12 +188,11 @@ impl VirtualRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_registry_store_set_get_value() {
-        let temp_dir = std::env::temp_dir().join(format!("ppm_test_reg_{}", std::process::id()));
-        let reg_file = temp_dir.join("registry.json");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let reg_file = temp_dir.path().join("registry.json");
         let store = VirtualRegistry::new(reg_file.clone());
 
         // Set value
@@ -215,9 +214,5 @@ mod tests {
         // Tombstone entire key
         store.delete_key("HKCU\\Software\\MyApp");
         assert!(store.is_key_tombstoned("HKCU\\Software\\MyApp"));
-
-        // Clean up
-        let _ = fs::remove_file(&reg_file);
-        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
