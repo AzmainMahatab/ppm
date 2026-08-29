@@ -157,7 +157,8 @@ crates/redirector/src/
 └── shell/                            # Shell & Profile Virtualization
     ├── mod.rs                        # Shell module export & initialization
     ├── folders.rs                    # SHGetKnownFolderPath, GetUserProfileDirectoryW
-    └── taskbar.rs                    # AUMID Identity, Overlay Badge Monitor
+    ├── identity.rs                   # Root-Scoped AUMID Namespace (policy & hooks)
+    └── badge.rs                      # Portable Mode Overlay Badge & Monitor
 ```
 
 ### B. `crates/ppm/src/`

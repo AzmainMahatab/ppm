@@ -1,7 +1,9 @@
+pub mod badge;
 pub mod folders;
-pub mod taskbar;
+pub mod identity;
 
 pub fn init_hooks() {
     folders::init_hooks();
-    taskbar::init_hooks();
+    identity::init_hooks();
+    badge::init_hooks();
 }
