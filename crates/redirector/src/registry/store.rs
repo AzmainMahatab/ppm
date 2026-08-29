@@ -1,7 +1,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -41,15 +40,7 @@ pub fn get_registry_store() -> &'static VirtualRegistry {
 
 impl VirtualRegistry {
     pub fn new(path: PathBuf) -> Self {
-        let data = if path.is_file() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                serde_json::from_str(&content).unwrap_or_default()
-            } else {
-                VirtualRegistryData::default()
-            }
-        } else {
-            VirtualRegistryData::default()
-        };
+        let data = crate::persist::load_state(&path, "registry");
 
         VirtualRegistry {
             path,
@@ -189,29 +180,15 @@ impl VirtualRegistry {
     }
 
     fn persist(&self) {
-        let json_str = {
-            let data = self.data.read();
-            serde_json::to_string_pretty(&*data).unwrap_or_default()
-        };
-
-        if !json_str.is_empty() {
-            if let Some(parent) = self.path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(e) = fs::write(&self.path, &json_str) {
-                tracing::error!(
-                    "Failed to write virtual registry state to '{}': {}",
-                    self.path.display(),
-                    e
-                );
-            }
-        }
+        let data = self.data.read();
+        crate::persist::persist_state(&self.path, &*data, "registry");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_registry_store_set_get_value() {

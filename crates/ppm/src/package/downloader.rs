@@ -21,7 +21,7 @@ pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg}\n[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .unwrap()
+            .expect("invariant: hard-coded progress template is valid")
             .progress_chars("#>-"),
     );
     pb.set_message(format!("  • Downloading {}", display_name));

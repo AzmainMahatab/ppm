@@ -121,7 +121,7 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
         ("PORTABLE_APP".into(), "1".into()),
         ("ELECTRON_ENABLE_LOGGING".into(), "true".into()),
         ("PPM_ROOT".into(), path_to_env_value(root)),
-        // Intention: Identify the virtualized app to the redirector so the child's taskbar
+        // Intention: Identify the virtualized app to the redirector so the child's process
         // identity (AUMID) is derived dynamically - see redirector shell::init_hooks.
         ("PPM_APP_NAME".into(), app_name_or_path.into()),
     ];

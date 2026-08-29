@@ -239,8 +239,9 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
 
             let matched_url = caps
                 .get(0)
-                .map(|m| m.as_str().replace(r"\u002F", "/"))
-                .unwrap_or_default();
+                .expect("invariant: capture group 0 (the whole match) is always present")
+                .as_str()
+                .replace(r"\u002F", "/");
 
             let version = caps
                 .get(1)

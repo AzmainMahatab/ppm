@@ -36,8 +36,8 @@ pub fn init_paths() -> &'static PathConfig {
         let system_dir = ppm_dir.join("system");
         let logs_dir = ppm_dir.join("logs");
 
-        let _ = std::fs::create_dir_all(&system_dir);
-        let _ = std::fs::create_dir_all(&logs_dir);
+        ensure_dir(&system_dir);
+        ensure_dir(&logs_dir);
 
         let registry_json = system_dir.join("registry.json");
         let credentials_json = system_dir.join("credentials.json");
@@ -48,9 +48,9 @@ pub fn init_paths() -> &'static PathConfig {
         let roaming_appdata = user_profile.join("AppData").join("Roaming");
         let documents = user_profile.join("Documents");
 
-        let _ = std::fs::create_dir_all(&local_appdata);
-        let _ = std::fs::create_dir_all(&roaming_appdata);
-        let _ = std::fs::create_dir_all(&documents);
+        ensure_dir(&local_appdata);
+        ensure_dir(&roaming_appdata);
+        ensure_dir(&documents);
 
         let to_wide = |p: &Path| -> Vec<u16> {
             use std::os::windows::ffi::OsStrExt;
@@ -101,6 +101,16 @@ pub fn init_logger() {
     });
 }
 
+/// Creates a directory tree, loudly reporting failure. `DllMain` cannot propagate a
+/// directory error to the host process, so the boundary keeps running - but a path the
+/// engine could not materialize is exactly the kind of silent environmental failure
+/// that must not pass unnoticed.
+fn ensure_dir(path: &Path) {
+    if let Err(e) = std::fs::create_dir_all(path) {
+        tracing::warn!("Failed to create directory '{}': {e}", path.display());
+    }
+}
+
 fn resolve_root() -> PathBuf {
     // 1. Check PPM_ROOT environment variable
     if let Ok(root_env) = std::env::var("PPM_ROOT") {
@@ -143,6 +153,11 @@ fn resolve_root() -> PathBuf {
         }
     }
 
-    // Fallback: Current working directory
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // Fallback: current working directory. DllMain cannot propagate a failure to the
+    // host process, so the degenerate root is retained - but the cause stays loud:
+    // every boundary keys off this root and must not silently mis-anchor.
+    std::env::current_dir().unwrap_or_else(|e| {
+        tracing::error!("current_dir() failed ({e}); redirector falling back to a relative root - isolation boundaries will key off an invalid location");
+        PathBuf::from(".")
+    })
 }

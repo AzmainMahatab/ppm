@@ -74,7 +74,16 @@ unsafe extern "system" fn hook_cred_read_w(
                 let target_str = utf16_ptr_to_string(target_name);
 
                 if let Some(cred) = get_vault().get(&target_str) {
-                    let blob_bytes = hex::decode(&cred.credential_blob_hex).unwrap_or_default();
+                    // A corrupt blob means the stored secret is unrecoverable; delivering an
+                    // empty credential would silently masquerade as success, so the read
+                    // defers to the host store (which reports the credential as absent).
+                    let Ok(blob_bytes) = hex::decode(&cred.credential_blob_hex) else {
+                        tracing::error!(
+                            "Credential '{}' has a corrupt blob in the vault; deferring to host store",
+                            cred.target_name
+                        );
+                        return unsafe { real_fn(target_name, cred_type, flags, credential_out) };
+                    };
 
                     // SAFETY: `cred_mem` comes from CoTaskMemAlloc sized for exactly one
                     // CREDENTIALW (non-null via `as_mut`) and is fully initialized below before

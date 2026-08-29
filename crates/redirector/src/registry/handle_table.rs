@@ -11,6 +11,13 @@ pub struct VirtualHandleEntry {
     pub is_synthetic: bool,
 }
 
+// Predefined registry-key pseudo-handle values (Win32 HKEY_* constants).
+const HKEY_CLASSES_ROOT: u32 = 0x8000_0000;
+const HKEY_CURRENT_USER: u32 = 0x8000_0001;
+const HKEY_LOCAL_MACHINE: u32 = 0x8000_0002;
+const HKEY_USERS: u32 = 0x8000_0003;
+const HKEY_CURRENT_CONFIG: u32 = 0x8000_0005;
+
 pub struct VirtualHandleTable {
     next_synthetic_id: AtomicUsize,
     entries: RwLock<HashMap<usize, VirtualHandleEntry>>,
@@ -74,23 +81,18 @@ impl VirtualHandleTable {
             return None;
         }
         let h_u32 = (handle as usize) as u32;
-        if h_u32 == 0x80000001 {
-            return Some("HKCU".to_string());
-        }
-        if h_u32 == 0x80000002 {
-            return Some("HKLM".to_string());
-        }
-        if h_u32 == 0x80000000 {
-            return Some("HKCR".to_string());
-        }
-        if h_u32 == 0x80000003 {
-            return Some("HKU".to_string());
-        }
-        if h_u32 == 0x80000005 {
-            return Some("HKCC".to_string());
-        }
-        let map = self.entries.read();
-        map.get(&(handle as usize)).map(|e| e.path.clone())
+        let predefined = match h_u32 {
+            HKEY_CLASSES_ROOT => "HKCR",
+            HKEY_CURRENT_USER => "HKCU",
+            HKEY_LOCAL_MACHINE => "HKLM",
+            HKEY_USERS => "HKU",
+            HKEY_CURRENT_CONFIG => "HKCC",
+            _ => {
+                let map = self.entries.read();
+                return map.get(&(handle as usize)).map(|e| e.path.clone());
+            }
+        };
+        Some(predefined.to_string())
     }
 
     /// Checks if a handle is a synthetic virtual handle.

@@ -1,6 +1,7 @@
 pub mod credentials;
 pub mod detour;
 pub mod paths;
+pub(crate) mod persist;
 pub mod process;
 pub mod registry;
 pub mod shell;
@@ -34,7 +35,7 @@ pub unsafe extern "system" fn DllMain(
 
             tracing::info!("redirector.dll attached to process (PID: {})", std::process::id());
 
-            // Initialize all 4 isolation boundaries
+            // Initialize every isolation boundary: registry, process spawning, credentials, shell
             registry::init_hooks();
             process::init_hooks();
             credentials::init_hooks();

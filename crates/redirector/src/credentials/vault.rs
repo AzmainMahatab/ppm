@@ -1,7 +1,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -35,15 +34,7 @@ pub fn get_vault() -> &'static CredentialVault {
 
 impl CredentialVault {
     pub fn new(path: PathBuf) -> Self {
-        let data = if path.is_file() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                serde_json::from_str(&content).unwrap_or_default()
-            } else {
-                VaultData::default()
-            }
-        } else {
-            VaultData::default()
-        };
+        let data = crate::persist::load_state(&path, "credentials");
 
         CredentialVault {
             path,
@@ -97,29 +88,15 @@ impl CredentialVault {
     }
 
     fn persist(&self) {
-        let json_str = {
-            let data = self.data.read();
-            serde_json::to_string_pretty(&*data).unwrap_or_default()
-        };
-
-        if !json_str.is_empty() {
-            if let Some(parent) = self.path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(e) = fs::write(&self.path, &json_str) {
-                tracing::error!(
-                    "Failed to write credentials vault state to '{}': {}",
-                    self.path.display(),
-                    e
-                );
-            }
-        }
+        let data = self.data.read();
+        crate::persist::persist_state(&self.path, &*data, "credentials");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_credential_vault_crud() {
