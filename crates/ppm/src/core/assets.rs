@@ -65,3 +65,36 @@ pub const DEFAULT_APPS_JSON: &str = r#"{
     }
   }
 }"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::AppManifests;
+
+    #[test]
+    fn embedded_redirector_is_a_non_empty_pe_image() {
+        assert!(!EMBEDDED_REDIRECTOR_DLL.is_empty());
+        assert_eq!(
+            &EMBEDDED_REDIRECTOR_DLL[..2],
+            b"MZ",
+            "embedded engine must be a PE image"
+        );
+    }
+
+    #[test]
+    fn default_manifest_parses_and_has_a_closed_dependency_graph() {
+        let manifests: AppManifests = serde_json::from_str(DEFAULT_APPS_JSON)
+            .expect("invariant: shipped default manifest is schema-valid");
+
+        for (app_id, definition) in &manifests.apps {
+            if let Some(deps) = &definition.dependencies {
+                for dep in deps {
+                    assert!(
+                        manifests.apps.contains_key(dep),
+                        "app '{app_id}' depends on undefined app '{dep}'"
+                    );
+                }
+            }
+        }
+    }
+}

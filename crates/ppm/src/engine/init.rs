@@ -90,3 +90,57 @@ fn regenerate_schema(root: &Path) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_scaffolds_directories_deploys_engine_and_seeds_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        init_environment(root.path()).unwrap();
+
+        for dir in [
+            ".ppm/system",
+            ".ppm/lib",
+            ".ppm/cache",
+            ".ppm/logs",
+            "Apps/x64",
+            "Apps/arm64",
+            "Home/AppData/Local",
+            "Home/AppData/Roaming",
+            "Home/AppData/WebViewData",
+            "Home/Documents",
+        ] {
+            assert!(
+                root.path().join(dir).is_dir(),
+                "missing scaffolded directory: {dir}"
+            );
+        }
+
+        let deployed = std::fs::read(root.path().join(".ppm/lib/redirector.dll")).unwrap();
+        assert_eq!(deployed, EMBEDDED_REDIRECTOR_DLL);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".ppm/apps.json")).unwrap(),
+            DEFAULT_APPS_JSON
+        );
+        assert!(root.path().join(".ppm/apps.schema.json").is_file());
+    }
+
+    #[test]
+    fn reinit_never_clobbers_a_user_authored_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        init_environment(root.path()).unwrap();
+
+        let user_manifest = r#"{"apps": {}}"#;
+        std::fs::write(root.path().join(".ppm/apps.json"), user_manifest).unwrap();
+
+        init_environment(root.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".ppm/apps.json")).unwrap(),
+            user_manifest
+        );
+    }
+}
