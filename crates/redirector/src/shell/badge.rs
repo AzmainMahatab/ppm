@@ -1,8 +1,8 @@
 use crate::{BOOL, FALSE, TRUE};
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, S_OK};
 use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::{GUID, HRESULT};
 
 static MONITOR_RUNNING: AtomicBool = AtomicBool::new(false);
-static BADGE_HICON: OnceLock<usize> = OnceLock::new();
+static BADGE_HICON: LazyLock<AtomicPtr<c_void>> = LazyLock::new(|| AtomicPtr::new(create_badge_icon()));
 
 // CLSID_TaskbarList = 56FDF344-FD6D-11d0-958A-006097C9A090
 const CLSID_TASKBAR_LIST: GUID = GUID {
@@ -64,11 +64,96 @@ struct ITaskbarList3 {
     lpVtbl: *const ITaskbarList3Vtbl,
 }
 
+/// Paints the 16x16 badge into a top-down 32bpp DIB and its 1bpp AND mask: a teal disc
+/// (Vibrant Teal #0D9488) with a white border ring and a white "P" glyph; everything
+/// outside the disc stays transparent.
+fn paint_badge_pixels(pixel_ptr: *mut u8, mask_bytes: &mut [u8; 32]) {
+    const BG_R: u8 = 0x0D;
+    const BG_G: u8 = 0x94;
+    const BG_B: u8 = 0x88;
+    const WHITE: u8 = 0xFF;
+
+    let set_pixel = |x: usize, y: usize| {
+        let offset = (y * 16 + x) * 4;
+        // SAFETY: `pixel_ptr` addresses the 16x16x4-byte DIB from CreateDIBSection; every
+        // offset below stays inside it for x, y < 16.
+        let px = unsafe { pixel_ptr.add(offset) };
+        unsafe {
+            *px = WHITE;
+            *px.add(1) = WHITE;
+            *px.add(2) = WHITE;
+            *px.add(3) = WHITE;
+        }
+    };
+
+    for y in 0..16usize {
+        for x in 0..16usize {
+            let dx = x as f32 - 7.5;
+            let dy = y as f32 - 7.5;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            let offset = (y * 16 + x) * 4;
+            if dist <= 7.2 {
+                // Inside circular badge: clear mask bit (0 = opaque)
+                let mask_byte_idx = y * 2 + (x / 8);
+                let mask_bit_idx = 7 - (x % 8);
+                mask_bytes[mask_byte_idx] &= !(1 << mask_bit_idx);
+
+                if dist > 6.0 {
+                    // White border ring
+                    set_pixel(x, y);
+                } else {
+                    // Teal background
+                    // SAFETY: same DIB bounds as above.
+                    let px = unsafe { pixel_ptr.add(offset) };
+                    unsafe {
+                        *px = BG_B;
+                        *px.add(1) = BG_G;
+                        *px.add(2) = BG_R;
+                        *px.add(3) = WHITE;
+                    }
+                }
+            } else {
+                // Transparent outside
+                // SAFETY: same DIB bounds as above.
+                let px = unsafe { pixel_ptr.add(offset) };
+                unsafe {
+                    *px = 0;
+                    *px.add(1) = 0;
+                    *px.add(2) = 0;
+                    *px.add(3) = 0;
+                }
+            }
+        }
+    }
+
+    // Draw letter 'P'
+    for y in 4..=11 {
+        set_pixel(5, y);
+        set_pixel(6, y);
+    }
+    for x in 7..=9 {
+        set_pixel(x, 4);
+        set_pixel(x, 5);
+        set_pixel(x, 7);
+        set_pixel(x, 8);
+    }
+    for y in 5..=7 {
+        set_pixel(10, y);
+        set_pixel(11, y);
+    }
+}
+
 /// Lazily materializes the 16x16 "Portable Mode" overlay badge: a teal disc with a white
 /// border and a white "P" glyph, drawn into a top-down DIB and converted to a real HICON.
 /// Cached process-wide; the GDI intermediates are freed, the HICON lives for the process.
 pub fn get_or_create_badge_icon() -> HICON {
-    let handle = *BADGE_HICON.get_or_init(|| unsafe {
+    BADGE_HICON.load(Ordering::Acquire)
+}
+
+/// Builds the badge HICON once: DIB creation, pixel painting, and ICONINFO assembly.
+fn create_badge_icon() -> HICON {
+    unsafe {
         use windows_sys::Win32::Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
             DeleteObject, GetDC, RGBQUAD, ReleaseDC,
@@ -107,78 +192,14 @@ pub fn get_or_create_badge_icon() -> HICON {
 
         if hbm_color.is_null() || p_bits.is_null() {
             tracing::warn!("Failed to create DIB section for badge icon");
-            return 0;
+            return std::ptr::null_mut();
         }
 
-        let bg_b = 0x88u8;
-        let bg_g = 0x94u8;
-        let bg_r = 0x0Du8; // Vibrant Teal #0D9488
-        let white = 0xFFu8;
-
-        let pixel_ptr = p_bits as *mut u8;
+        let pixel_ptr = p_bits.cast::<u8>();
         let mut mask_bytes = [0xFFu8; 32]; // 16x16 1bpp mask (2 bytes per row * 16 rows)
+        paint_badge_pixels(pixel_ptr, &mut mask_bytes);
 
-        for y in 0..16usize {
-            for x in 0..16usize {
-                let dx = x as f32 - 7.5;
-                let dy = y as f32 - 7.5;
-                let dist = (dx * dx + dy * dy).sqrt();
-
-                let offset = (y * 16 + x) * 4;
-                if dist <= 7.2 {
-                    // Inside circular badge: clear mask bit (0 = opaque)
-                    let mask_byte_idx = y * 2 + (x / 8);
-                    let mask_bit_idx = 7 - (x % 8);
-                    mask_bytes[mask_byte_idx] &= !(1 << mask_bit_idx);
-
-                    if dist > 6.0 {
-                        // White border
-                        *pixel_ptr.add(offset) = white;
-                        *pixel_ptr.add(offset + 1) = white;
-                        *pixel_ptr.add(offset + 2) = white;
-                        *pixel_ptr.add(offset + 3) = white;
-                    } else {
-                        // Teal background
-                        *pixel_ptr.add(offset) = bg_b;
-                        *pixel_ptr.add(offset + 1) = bg_g;
-                        *pixel_ptr.add(offset + 2) = bg_r;
-                        *pixel_ptr.add(offset + 3) = white;
-                    }
-                } else {
-                    // Transparent outside
-                    *pixel_ptr.add(offset) = 0;
-                    *pixel_ptr.add(offset + 1) = 0;
-                    *pixel_ptr.add(offset + 2) = 0;
-                    *pixel_ptr.add(offset + 3) = 0;
-                }
-            }
-        }
-
-        // Draw letter 'P'
-        let set_pixel = |x: usize, y: usize| {
-            let offset = (y * 16 + x) * 4;
-            *pixel_ptr.add(offset) = white;
-            *pixel_ptr.add(offset + 1) = white;
-            *pixel_ptr.add(offset + 2) = white;
-            *pixel_ptr.add(offset + 3) = white;
-        };
-
-        for y in 4..=11 {
-            set_pixel(5, y);
-            set_pixel(6, y);
-        }
-        for x in 7..=9 {
-            set_pixel(x, 4);
-            set_pixel(x, 5);
-            set_pixel(x, 7);
-            set_pixel(x, 8);
-        }
-        for y in 5..=7 {
-            set_pixel(10, y);
-            set_pixel(11, y);
-        }
-
-        let hbm_mask = CreateBitmap(16, 16, 1, 1, mask_bytes.as_ptr() as *const c_void);
+        let hbm_mask = CreateBitmap(16, 16, 1, 1, mask_bytes.as_ptr().cast::<c_void>());
 
         let icon_info = ICONINFO {
             fIcon: TRUE,
@@ -199,10 +220,8 @@ pub fn get_or_create_badge_icon() -> HICON {
             tracing::info!("Taskbar Badge HICON created successfully via CreateIconIndirect (16x16)");
         }
 
-        h_icon as usize
-    });
-
-    handle as HICON
+        h_icon
+    }
 }
 
 unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {

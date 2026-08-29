@@ -84,7 +84,9 @@ fn format_aumid(root_hash: &str, identity: &str) -> String {
 /// call SetCurrentProcessExplicitAppUserModelID - grouped under their host-derived implicit
 /// identity, out of sync with the virtualized profile (the documented first-commit behavior,
 /// evolved to dynamic per-root derivation).
-pub fn init_app_user_model_id() {
+/// # Safety
+/// `shell32` must be a live module handle exposing `SetCurrentProcessExplicitAppUserModelID`.
+pub(crate) unsafe fn init_app_user_model_id(shell32: windows_sys::Win32::Foundation::HMODULE) {
     // Identity precedence: runner-injected app name -> executable stem -> generic fallback.
     let raw_name = std::env::var("PPM_APP_NAME").unwrap_or_else(|_| {
         std::env::current_exe()
@@ -96,15 +98,12 @@ pub fn init_app_user_model_id() {
     let app_id_wide = crate::winstr::to_wide(&synthetic_id);
 
     unsafe {
-        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
 
-        let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
-        if !shell32.is_null()
-            && let Some(target) = GetProcAddress(
-                shell32,
-                c"SetCurrentProcessExplicitAppUserModelID".as_ptr().cast(),
-            )
-        {
+        if let Some(target) = GetProcAddress(
+            shell32,
+            c"SetCurrentProcessExplicitAppUserModelID".as_ptr().cast(),
+        ) {
             let set_aumid: FnSetCurrentProcessExplicitAppUserModelID = std::mem::transmute(target);
             // SAFETY: `app_id_wide` is a NUL-terminated UTF-16 buffer outliving the call;
             // SetCurrentProcessExplicitAppUserModelID only reads it and records the identity
@@ -146,11 +145,11 @@ unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRES
 /// can exist), then the interception guard so app-initiated identity changes stay in sync
 /// with the isolated namespace instead of clobbering it.
 pub fn init_hooks() {
-    init_app_user_model_id();
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
     unsafe {
         let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
+        init_app_user_model_id(shell32);
         hook_export(
             shell32,
             "SetCurrentProcessExplicitAppUserModelID",
