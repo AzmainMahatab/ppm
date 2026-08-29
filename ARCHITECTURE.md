@@ -90,7 +90,6 @@ graph TD
 │ 3. Credentials       │ advapi32.dll                  │ CredReadW / CredWriteW / Delete │
 │ 4. Shell Paths       │ shell32.dll + userenv.dll     │ Known Folders / Profile Paths   │
 │ 5. Taskbar Identity  │ shell32.dll                   │ SetCurrentProcessExplicitAppId  │
-│ 6. Sync & Windows    │ kernel32.dll / user32.dll     │ Mutex / Pipe / Window Isolation │
 └──────────────────────┴───────────────────────────────┴─────────────────────────────────┘
 ```
 
@@ -107,17 +106,10 @@ graph TD
 | **`SHGetKnownFolderPath`** | `shell32.dll` | Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` to `<root>\Home\...`. |
 | **`GetUserProfileDirectoryW`** | `userenv.dll` | Returns `<root>\Home` as user profile directory. |
 | **`SetCurrentProcessExplicitAppUserModelID`** | `shell32.dll` | Proactively sets a root-scoped identity (`PPM.Portable.<root-hash>.<App>`) during DLL attach, and maps app-initiated calls into the same isolated domain. |
-| **`CreateMutexW/A`, `CreateMutexExW/A`, `CreateEventW/A`, `CreateSemaphoreW/A`, `CreateFileMappingW/A`** | `kernelbase.dll` / `kernel32.dll` | Namespaces kernel objects into `Local\PPM_<session_id>_...` so two deployment roots never share a single-instance mutex or event. |
-| **`CreateNamedPipeW/A`, `WaitNamedPipeW/A`, `CreateFileW/A`** | `kernelbase.dll` / `kernel32.dll` | Renames pipe paths under `\\?\pipe\ppm_<session_id>_...`; preserves internal child IPC pipes (Mojo) so injected children stay connected. |
-| **`FindWindowW/A`, `FindWindowExW/A`, `EnumWindows`, `EnumDesktopWindows`** | `user32.dll` | Filters host windows out of discovery results; shell classes are exempt only on the taskbar COM thread (see scoped exemption below). |
-| **`SendMessageW/A`, `PostMessageW/A`** | `user32.dll` | Drops `WM_COPYDATA` payloads addressed to foreign windows while faking successful delivery. |
-| **`SetForegroundWindow`, `BringWindowToTop`, `SwitchToThisWindow`** | `user32.dll` | Blocks focus hijacking of host application windows. |
-
-**Scoped shell-query exemption**: `ITaskbarList3`'s in-process COM proxy resolves the taskbar via
-`FindWindowW("Shell_TrayWnd")` executed inside this process; a blanket shell-class exemption would
-re-leak host windows to the application. The exemption therefore lives in a thread-local permit
-(`ShellQueryExemption`) held only by the taskbar monitor thread, so COM integration succeeds while
-every other thread keeps shell-class windows strictly outside the session.
+Kernel synchronization objects, named pipes, and host window discovery are intentionally **not**
+intercepted. An exploration of that boundary (33 additional Win32 detours) is preserved on the
+`explore/sync-isolation` branch and can be resurrected if a real application exhibits fixed-name
+single-instance or IPC collisions.
 
 ---
 
@@ -162,14 +154,10 @@ crates/redirector/src/
 │   ├── vault.rs                    # Encrypted Credential Vault (.ppm/system/credentials.json)
 │   └── hooks.rs                    # Cred* API Detours
 │
-├── shell/                            # Shell & Profile Virtualization
-│   ├── mod.rs                        # Shell module export & initialization
-│   ├── folders.rs                    # SHGetKnownFolderPath, GetUserProfileDirectoryW
-│   └── taskbar.rs                    # AUMID Identity, Overlay Badge Monitor
-│
-└── sync/                             # Synchronization, IPC & Window Isolation
-    ├── mod.rs                        # Sync module export & initialization
-    └── hooks.rs                      # 33 Win32 Detours (objects, pipes, windows, focus)
+└── shell/                            # Shell & Profile Virtualization
+    ├── mod.rs                        # Shell module export & initialization
+    ├── folders.rs                    # SHGetKnownFolderPath, GetUserProfileDirectoryW
+    └── taskbar.rs                    # AUMID Identity, Overlay Badge Monitor
 ```
 
 ### B. `crates/ppm/src/`
@@ -201,7 +189,7 @@ crates/ppm/src/
 ### C. Verification Probe & Integration Tests
 ```
 crates/test-probe/                  # Isolated probe package (bin-artifact dev-dependency of ppm)
-└── src/main.rs                     # Tests Registry, Shell, Vault, Injection & Sync Isolation
+└── src/main.rs                     # Verifies Registry, Shell, Vault, Injection & Taskbar Identity
 
 crates/ppm/tests/
 └── e2e_virtualization.rs           # Integration test consuming the probe via CARGO_BIN_FILE_* edge

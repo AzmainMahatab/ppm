@@ -496,11 +496,6 @@ pub fn start_taskbar_monitor() {
     std::thread::Builder::new()
         .name("taskbar_monitor".to_string())
         .spawn(|| {
-            // Intention: re-enable OS-shell window visibility for this thread only.
-            // Why: the ITaskbarList3 COM proxy resolves the taskbar via FindWindowW("Shell_TrayWnd")
-            //      inside this process; without the exemption the window discovery hooks blind it.
-            let _shell_queries = crate::sync::hooks::ShellQueryExemption::enter();
-
             let hicon = get_or_create_badge_icon();
             if hicon.is_null() {
                 return;

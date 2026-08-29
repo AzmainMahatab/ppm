@@ -1,11 +1,12 @@
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, S_OK};
 use windows_sys::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
 };
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
     RegQueryValueExW, RegSetValueExW,
@@ -13,7 +14,7 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
 };
-use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+use windows_sys::Win32::UI::Shell::{GetCurrentProcessExplicitAppUserModelID, SHGetKnownFolderPath};
 use windows_sys::core::GUID;
 
 const FOLDERID_PROFILE: GUID = GUID {
@@ -42,7 +43,7 @@ unsafe fn from_wide_ptr(ptr: *const u16) -> String {
 }
 
 fn test_registry_cow() -> Result<(), String> {
-    println!("[TEST 1/4] Testing Registry Copy-on-Write Virtualization...");
+    println!("[SUITE 1/5] Registry Boundary (Copy-on-Write)...");
     unsafe {
         let subkey = to_wide("Software\\PPMTestProbe");
         let mut hkey: HKEY = ptr::null_mut();
@@ -116,12 +117,12 @@ fn test_registry_cow() -> Result<(), String> {
 
         let _ = RegCloseKey(hkey);
     }
-    println!("  -> Registry CoW Virtualization PASSED!");
+    println!("  -> Registry Boundary PASSED!");
     Ok(())
 }
 
 fn test_shell_redirection() -> Result<(), String> {
-    println!("[TEST 2/4] Testing Shell Known Folder Redirection...");
+    println!("[SUITE 2/5] Shell Paths Boundary...");
     unsafe {
         let mut path_out: *mut u16 = ptr::null_mut();
         let hr = SHGetKnownFolderPath(&FOLDERID_PROFILE, 0, ptr::null_mut(), &mut path_out);
@@ -139,12 +140,12 @@ fn test_shell_redirection() -> Result<(), String> {
             ));
         }
     }
-    println!("  -> Shell Known Folder Redirection PASSED!");
+    println!("  -> Shell Paths Boundary PASSED!");
     Ok(())
 }
 
 fn test_credentials_vault() -> Result<(), String> {
-    println!("[TEST 3/4] Testing Windows Credentials Virtual Vault...");
+    println!("[SUITE 3/5] Credentials Boundary...");
     unsafe {
         let target_w = to_wide("PPMTestTarget");
         let user_w = to_wide("PPMUser");
@@ -195,12 +196,12 @@ fn test_credentials_vault() -> Result<(), String> {
             return Err("CredDeleteW failed".to_string());
         }
     }
-    println!("  -> Credentials Virtual Vault PASSED!");
+    println!("  -> Credentials Boundary PASSED!");
     Ok(())
 }
 
 fn test_child_process_injection() -> Result<(), String> {
-    println!("[TEST 4/4] Testing Child Process Detours Injection...");
+    println!("[SUITE 4/5] Process Injection Boundary...");
     let current_exe = env::current_exe().map_err(|e| format!("Failed to get current_exe: {}", e))?;
     let cmd = format!("\"{}\" --child", current_exe.display());
     let mut cmd_w = to_wide(&cmd);
@@ -240,113 +241,55 @@ fn test_child_process_injection() -> Result<(), String> {
         }
     }
 
-    println!("  -> Child Process Detours Injection PASSED!");
+    println!("  -> Process Injection Boundary PASSED!");
     Ok(())
 }
 
-fn test_sync_isolation() -> Result<(), String> {
-    println!("[TEST 5/5] Testing Synchronization, IPC & Window Isolation...");
+fn test_taskbar_identity() -> Result<(), String> {
+    println!("[SUITE 5/5] Taskbar Identity Boundary...");
     unsafe {
-        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
-        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-        use windows_sys::Win32::System::Threading::CreateMutexW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
-
-        unsafe extern "system" {
-            fn CreateNamedPipeW(
-                lpName: *const u16,
-                dwOpenMode: u32,
-                dwPipeMode: u32,
-                nMaxInstances: u32,
-                nOutBufferSize: u32,
-                nInBufferSize: u32,
-                nDefaultTimeOut: u32,
-                lpSecurityAttributes: *const SECURITY_ATTRIBUTES,
-            ) -> HANDLE;
-        }
-
-        const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
-        const PIPE_TYPE_BYTE: u32 = 0x00000000;
-        const PIPE_WAIT: u32 = 0x00000000;
-
-        // 1. Mutex isolation
-        let mutex_name = to_wide("Local\\Probe_SingleInstance_TestMutex");
-        let h_mutex = CreateMutexW(ptr::null(), 0, mutex_name.as_ptr());
-        if h_mutex.is_null() {
-            return Err("CreateMutexW failed to create virtualized mutex".to_string());
-        }
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            CloseHandle(h_mutex);
-            return Err("CreateMutexW unexpectedly returned ERROR_ALREADY_EXISTS".to_string());
-        }
-        CloseHandle(h_mutex);
-
-        // 2. Named pipe isolation
-        let pipe_name = to_wide(r"\\.\pipe\Probe_Test_Pipe");
-        let h_pipe = CreateNamedPipeW(
-            pipe_name.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_WAIT,
-            1,
-            512,
-            512,
-            0,
-            ptr::null(),
-        );
-        if !h_pipe.is_null() {
-            CloseHandle(h_pipe);
-        }
-
-        // 3. Window isolation: Desktop host taskbar window "Shell_TrayWnd" must be hidden from portable process
-        let shell_tray = to_wide("Shell_TrayWnd");
-        let hwnd_tray = FindWindowW(shell_tray.as_ptr(), ptr::null());
-        if !hwnd_tray.is_null() {
+        let mut aumid_ptr: *mut u16 = ptr::null_mut();
+        let hr = GetCurrentProcessExplicitAppUserModelID(&mut aumid_ptr);
+        if hr != S_OK || aumid_ptr.is_null() {
             return Err(format!(
-                "FindWindowW failed to isolate host desktop window: returned 0x{:08X}",
-                hwnd_tray as usize
+                "GetCurrentProcessExplicitAppUserModelID failed: HRESULT 0x{:08X}",
+                hr
             ));
         }
 
-        // 4. EnumWindows isolation: Host explorer windows must not leak through enumeration
-        use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, SetForegroundWindow};
+        let aumid = from_wide_ptr(aumid_ptr);
+        CoTaskMemFree(aumid_ptr as *mut c_void);
+        println!("  -> Process AppUserModelID: '{}'", aumid);
 
-        #[allow(clippy::upper_case_acronyms)]
-        type BOOL = i32;
-
-        unsafe extern "system" fn check_enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            unsafe {
-                let leaked_ptr = lparam as *mut bool;
-                // If Shell_TrayWnd was enumerated, mark leaked
-                let mut class_buf = [0u16; 64];
-                let len = windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(
-                    hwnd,
-                    class_buf.as_mut_ptr(),
-                    64,
-                );
-                let class_str = String::from_utf16_lossy(&class_buf[..len as usize]);
-                if class_str == "Shell_TrayWnd" {
-                    *leaked_ptr = true;
-                }
-                TRUE
-            }
-        }
-
-        let mut leaked_shell_tray = false;
-        EnumWindows(Some(check_enum_proc), &mut leaked_shell_tray as *mut _ as LPARAM);
-        if leaked_shell_tray {
-            return Err("EnumWindows leaked host desktop Shell_TrayWnd into portable process".to_string());
-        }
-
-        // 5. Focus Hijacking protection: SetForegroundWindow on foreign HWND must fail safely
-        let fake_foreign_hwnd: HWND = 0x123456 as HWND;
-        let fg_res = SetForegroundWindow(fake_foreign_hwnd);
-        if fg_res != 0 {
-            return Err("SetForegroundWindow unexpectedly returned TRUE on foreign HWND".to_string());
-        }
+        validate_portable_aumid(&aumid)?;
     }
 
-    println!("  -> Synchronization, IPC & Window Isolation PASSED!");
+    println!("  -> Taskbar Identity Boundary PASSED!");
+    Ok(())
+}
+
+fn validate_portable_aumid(aumid: &str) -> Result<(), String> {
+    const ISOLATION_PREFIX: &str = "PPM.Portable.";
+
+    let root_hash_and_identity = aumid
+        .strip_prefix(ISOLATION_PREFIX)
+        .ok_or_else(|| format!("AppUserModelID '{aumid}' lacks the '{ISOLATION_PREFIX}' isolation prefix"))?;
+
+    let (root_hash, identity) = root_hash_and_identity.split_once('.').ok_or_else(|| {
+        format!("AppUserModelID '{aumid}' is missing the '.' separator between root hash and identity")
+    })?;
+
+    let hash_is_canonical = root_hash.len() == 16 && root_hash.bytes().all(|b| b.is_ascii_hexdigit());
+    if !hash_is_canonical {
+        return Err(format!(
+            "AppUserModelID '{aumid}' root hash '{root_hash}' must be exactly 16 hex characters"
+        ));
+    }
+
+    if identity.is_empty() {
+        return Err(format!("AppUserModelID '{aumid}' carries an empty app identity"));
+    }
+
     Ok(())
 }
 
@@ -389,11 +332,11 @@ fn main() {
         eprintln!("[FAIL] {}", e);
         std::process::exit(4);
     }
-    if let Err(e) = test_sync_isolation() {
+    if let Err(e) = test_taskbar_identity() {
         eprintln!("[FAIL] {}", e);
         std::process::exit(5);
     }
 
-    println!("=== ALL 5 VIRTUALIZATION PILLARS PASSED SUCCESSFULLY! ===");
+    println!("=== ALL 5 BOUNDARY SUITES PASSED SUCCESSFULLY! ===");
     std::process::exit(0);
 }

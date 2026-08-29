@@ -24,28 +24,14 @@ pub struct PathConfig {
     pub local_appdata_w: Vec<u16>,
     pub roaming_appdata_w: Vec<u16>,
     pub documents_w: Vec<u16>,
-
-    // Per-deployment isolation key for kernel object names (FNV-1a-32 of the lowercased root)
-    pub session_id: String,
 }
 
 static PATHS: OnceLock<PathConfig> = OnceLock::new();
 static LOGGER_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
-fn compute_session_id(root: &Path) -> String {
-    let s = root.to_string_lossy().to_lowercase();
-    let mut hash: u32 = 0x811c_9dc5;
-    for b in s.as_bytes() {
-        hash ^= u32::from(*b);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    format!("{hash:08x}")
-}
-
 pub fn init_paths() -> &'static PathConfig {
     PATHS.get_or_init(|| {
         let root = resolve_root();
-        let session_id = compute_session_id(&root);
         let ppm_dir = root.join(".ppm");
         let system_dir = ppm_dir.join("system");
         let logs_dir = ppm_dir.join("logs");
@@ -76,9 +62,6 @@ pub fn init_paths() -> &'static PathConfig {
             local_appdata_w: to_wide(&local_appdata),
             roaming_appdata_w: to_wide(&roaming_appdata),
             documents_w: to_wide(&documents),
-
-            session_id,
-
             root,
             ppm_dir,
             system_dir,

@@ -4,7 +4,6 @@ pub mod paths;
 pub mod process;
 pub mod registry;
 pub mod shell;
-pub mod sync;
 
 pub type BOOL = i32;
 pub const TRUE: BOOL = 1;
@@ -34,12 +33,11 @@ pub unsafe extern "system" fn DllMain(
 
             tracing::info!("redirector.dll attached to process (PID: {})", std::process::id());
 
-            // Initialize all 5 virtualization pillars
+            // Initialize all 4 isolation boundaries
             registry::init_hooks();
             process::init_hooks();
             credentials::init_hooks();
             shell::init_hooks();
-            sync::init_hooks();
         }
         DLL_PROCESS_DETACH => {
             // Note: Keep DllMain clean on process detach to avoid TLS teardown issues

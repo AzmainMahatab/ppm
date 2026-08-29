@@ -18,7 +18,6 @@ A lightweight, single-binary portable application runner, virtualization engine,
   * **Isolated Credential Vault**: Intercepts `Cred*` APIs (`advapi32.dll`), persisting encrypted credentials to `.ppm/system/credentials.json`.
   * **Shell Path Redirection**: Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, and `FOLDERID_RoamingAppData` (`shell32.dll` / `userenv.dll`) to `Home/`.
   * **Taskbar Identity**: Establishes a root-scoped `AppUserModelID` (`PPM.Portable.<root-hash>.<App>`) at attach and stamps taskbar windows with a Portable Mode overlay badge.
-  * **Sync & Window Isolation**: Isolates kernel synchronization objects (mutexes/events/semaphores/file mappings), named pipes, and host window discovery (`FindWindow` / `EnumWindows` / `SendMessage`) behind per-deployment session namespaces.
 * **Dynamic Version Inspection**: Resolves installed versions directly from PE binary headers (`GetFileVersionInfoW`) and package manifests on disk.
 * **Isolated User Profile**: Maps user profile directories to the portable `Home/` directory.
 * **Deterministic Layout**: Structure organized into `.ppm/` (runtime configs, libraries, logs, and virtual hives), `Apps/` (binaries), and `Home/` (user data).
