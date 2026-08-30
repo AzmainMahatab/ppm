@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::AtomicPtr;
 
 use parking_lot::Mutex;
-use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, FILETIME, SetLastError};
+use windows_sys::Win32::Foundation::{ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_FOUND, FILETIME, SetLastError};
 use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CREDENTIALW};
 use windows_sys::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
@@ -43,6 +43,40 @@ impl OwnedAllocations {
 
 static OWNED_CRED_ALLOCATIONS: LazyLock<OwnedAllocations> =
     LazyLock::new(|| OwnedAllocations(Mutex::new(HashSet::new())));
+
+/// Owns the CoTaskMem allocations of a fabricated CREDENTIALW until it is published.
+///
+/// # Why
+/// The vault-hit path allocates the struct, both wide strings, and the blob before the
+/// pointer crosses the FFI boundary. Drop releases any allocation stranded by an early
+/// return inside that window; `publish` transfers ownership to the caller and disarms
+/// the guard. Beyond the publish, lifetime is the caller's - that regime is handled by
+/// the CredFree ownership registry, not by Rust scopes.
+struct FabricationGuard {
+    allocations: [*mut c_void; 4],
+}
+
+impl FabricationGuard {
+    /// Publishes the fully initialized struct to the caller, transferring ownership.
+    ///
+    /// # Safety
+    /// `out` must be the caller-owned, null-checked out-parameter of `CredReadW`, and
+    /// `cred` must be the fully initialized struct this guard was built from.
+    unsafe fn publish(mut self, out: *mut PCREDENTIALW, cred: PCREDENTIALW) {
+        unsafe { *out = cred };
+        self.allocations = [std::ptr::null_mut(); 4];
+    }
+}
+
+impl Drop for FabricationGuard {
+    fn drop(&mut self) {
+        // SAFETY: each non-null slot was returned by CoTaskMemAlloc and was not
+        // published to the caller.
+        for slot in self.allocations.iter().filter(|slot| !(*slot).is_null()) {
+            unsafe { CoTaskMemFree(*slot) };
+        }
+    }
+}
 
 type FnCredReadW = unsafe extern "system" fn(*const u16, u32, u32, *mut PCREDENTIALW) -> BOOL;
 type FnCredWriteW = unsafe extern "system" fn(PCREDENTIALW, u32) -> BOOL;
@@ -103,18 +137,33 @@ unsafe extern "system" fn hook_cred_read_w(
                     let cred_mem = unsafe { CoTaskMemAlloc(std::mem::size_of::<CREDENTIALW>()) };
                     let cred_struct = unsafe { cred_mem.cast::<CREDENTIALW>().as_mut() };
                     if let Some(cred_struct) = cred_struct {
+                        // Slot 0 is the struct itself; the string and blob slots fill in below.
+                        let mut guard = FabricationGuard {
+                            allocations: [
+                                cred_mem,
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                            ],
+                        };
+
                         cred_struct.Flags = 0;
                         cred_struct.Type = cred.cred_type;
 
                         let target_w = to_wide(&cred.target_name);
-                        cred_struct.TargetName = alloc_cotask_wide_string(&target_w);
+                        let target_mem = alloc_cotask_wide_string(&target_w);
+                        guard.allocations[1] = target_mem.cast();
+                        cred_struct.TargetName = target_mem;
 
                         let user_w = to_wide(&cred.user_name);
-                        cred_struct.UserName = alloc_cotask_wide_string(&user_w);
+                        let user_mem = alloc_cotask_wide_string(&user_w);
+                        guard.allocations[2] = user_mem.cast();
+                        cred_struct.UserName = user_mem;
 
                         cred_struct.CredentialBlobSize = blob_bytes.len() as u32;
                         if !blob_bytes.is_empty() {
                             let blob_mem = unsafe { CoTaskMemAlloc(blob_bytes.len()) };
+                            guard.allocations[3] = blob_mem;
                             if !blob_mem.is_null() {
                                 // SAFETY: `blob_mem` is non-null (checked above), freshly
                                 // allocated with room for `blob_bytes`, and the source slice
@@ -164,7 +213,17 @@ unsafe extern "system" fn hook_cred_read_w(
                         tracing::trace!(
                             "CredReadW [Vault Hit]: target '{target_str}' read from virtual store"
                         );
+
+                        // Transfer the four allocations to the caller; the guard disarms
+                        // and its Drop becomes a no-op.
+                        unsafe { guard.publish(credential_out, cred_mem.cast()) };
                         return TRUE;
+                    } else {
+                        // A vault hit that failed to materialize must not masquerade as
+                        // "absent" (the clean-room path below) - report the real failure.
+                        // SAFETY: SetLastError has no preconditions beyond the error code.
+                        unsafe { SetLastError(ERROR_NOT_ENOUGH_MEMORY) };
+                        return FALSE;
                     }
                 }
 

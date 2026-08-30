@@ -10,6 +10,20 @@ use windows_sys::Win32::Security::Credentials::{
 
 use crate::support::{from_wide_ptr, to_wide};
 
+/// RAII owner of a CREDENTIALW returned by CredReadW: the credential is freed through
+/// CredFree on every exit path, replacing duplicated manual cleanup calls.
+struct OwnedCredential(*mut CREDENTIALW);
+
+impl Drop for OwnedCredential {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: `self.0` is either null or a CredReadW-returned credential owned
+            // by this wrapper for its entire lifetime.
+            unsafe { CredFree(self.0.cast()) };
+        }
+    }
+}
+
 pub(crate) fn run() -> Result<(), String> {
     println!("[SUITE 3/5] Credentials Boundary...");
     unsafe {
@@ -38,7 +52,9 @@ pub(crate) fn run() -> Result<(), String> {
             return Err("CredReadW failed to retrieve credential".to_string());
         }
 
-        let read_cred = &*read_cred_ptr;
+        // The wrapper frees the credential on every exit path below.
+        let read_cred_owned = OwnedCredential(read_cred_ptr);
+        let read_cred = &*read_cred_owned.0;
         let read_user = from_wide_ptr(read_cred.UserName);
         let read_blob = if !read_cred.CredentialBlob.is_null() && read_cred.CredentialBlobSize > 0 {
             std::slice::from_raw_parts(read_cred.CredentialBlob, read_cred.CredentialBlobSize as usize)
@@ -47,14 +63,11 @@ pub(crate) fn run() -> Result<(), String> {
         };
 
         if read_user != "PPMUser" || read_blob != secret_bytes {
-            CredFree(read_cred_ptr as *const _);
             return Err(format!(
                 "CredReadW returned invalid data: user '{}', blob {:?}",
                 read_user, read_blob
             ));
         }
-
-        CredFree(read_cred_ptr as *const _);
 
         // Clean-room contract: a generic credential absent from the vault must fail with
         // ERROR_NOT_FOUND instead of falling through to the host credential store.
@@ -62,8 +75,8 @@ pub(crate) fn run() -> Result<(), String> {
         SetLastError(0);
         let mut absent_ptr: *mut CREDENTIALW = ptr::null_mut();
         let res = CredReadW(missing_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut absent_ptr);
+        let _absent = OwnedCredential(absent_ptr);
         if res != 0 {
-            CredFree(absent_ptr as *const _);
             return Err("CredReadW unexpectedly resolved an absent generic credential".to_string());
         }
         let err = GetLastError();
