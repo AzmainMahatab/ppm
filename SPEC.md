@@ -82,6 +82,14 @@ namespace; the shell-paths suite verifies all four redirected folders and the le
 `SHGetFolderPathW` CSIDL selector.
 
 Auxiliary modes: `--child` (verify virtualized environment in a spawned child),
+
+## Launch Environment Precedence
+
+Highest wins; conflicts resolve case-insensitively, and duplicate keys never reach the child block:
+1. Portable core vars - `USERPROFILE`, `HOME`, `LOCALAPPDATA`, `APPDATA`, `PPM_ROOT`, `PPM_APP_NAME`. These are the isolation boundary itself and cannot be redefined by any manifest block.
+2. The launching app's `env` block - app-specific values beat global ones.
+3. `global_env` blocks from every manifest entry - injected when *any* app launches, so an engine entry (e.g. `webview2`) provisions its SDK variables for all apps from its own block. Values expand the `{root}`, `{home}`, `{arch}` templates. No presence gating: the vars inject as declared; delete the block (or entry) to disable.
+
 `--echo-args` (argument passthrough echo), `--help` (passthrough help).
 The integration harness (`e2e_virtualization.rs`) asserts both process success and
 that the process identity suite executed.

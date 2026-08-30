@@ -61,6 +61,10 @@ pub const DEFAULT_APPS_JSON: &str = r#"{
       },
       "package": {
         "type": "cab"
+      },
+      "global_env": {
+        "WEBVIEW2_USER_DATA_FOLDER": "{root}/Home/AppData/WebViewData",
+        "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER": "{root}/Apps/{arch}/WebView2"
       }
     }
   }

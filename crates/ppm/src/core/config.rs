@@ -60,6 +60,11 @@ pub struct AppDefinition {
     pub dependencies: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// Environment injected when *any* app launches, not just this one. Entries carrying
+    /// shared runtimes (engines/SDKs) own their variables here, so one block can provision
+    /// the whole portable environment without per-app opt-in lists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_env: Option<HashMap<String, String>>,
     pub version_check: VersionCheckConfig,
     pub package: PackageConfig,
     #[serde(skip_serializing_if = "Option::is_none")]

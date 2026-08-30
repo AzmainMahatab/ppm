@@ -1,7 +1,7 @@
 use crate::core::arch::CpuArch;
 use crate::core::config::AppManifests;
 use anyhow::{Result, bail};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -38,6 +38,21 @@ fn build_child_environment(overrides: &EnvironmentOverrides) -> Vec<(String, Str
     let inherited =
         env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)));
     merge_child_environment(inherited, overrides)
+}
+
+/// Keeps, for each case-insensitive key, the LAST occurrence - the precedence rule that
+/// shields core vars and lets app env beat `global_env` - preserving final order.
+fn dedup_env_last_wins(entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut winners: HashMap<String, usize> = HashMap::new();
+    for (index, (key, _)) in entries.iter().enumerate() {
+        winners.insert(key.to_uppercase(), index);
+    }
+    entries
+        .into_iter()
+        .enumerate()
+        .filter(|(index, (key, _))| winners.get(&key.to_uppercase()) == Some(index))
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
 fn merge_child_environment(
@@ -77,6 +92,7 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
         let exe = resolve_executable_path(root, raw_path);
         let dir = exe.parent().unwrap_or(root).to_path_buf();
         ResolvedApp {
+            manifests: None,
             exe_path: exe,
             app_dir: dir,
             env: None,
@@ -88,6 +104,7 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     };
 
     let ResolvedApp {
+        manifests,
         exe_path,
         app_dir,
         env: extra_env,
@@ -116,44 +133,38 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     fs::create_dir_all(&webview_data)?;
     fs::create_dir_all(&documents_dir)?;
 
-    let mut overrides: Vec<(String, String)> = vec![
-        ("USERPROFILE".into(), path_to_env_value(&home_dir)),
-        ("HOME".into(), path_to_env_value(&home_dir)),
-        ("LOCALAPPDATA".into(), path_to_env_value(&local_appdata)),
-        ("APPDATA".into(), path_to_env_value(&roaming_appdata)),
-        (
-            "WEBVIEW2_USER_DATA_FOLDER".into(),
-            path_to_env_value(&webview_data),
-        ),
-        ("PORTABLE_APP".into(), "1".into()),
-        ("ELECTRON_ENABLE_LOGGING".into(), "true".into()),
-        ("PPM_ROOT".into(), path_to_env_value(root)),
-        // Intention: Identify the virtualized app to the redirector so the child's process
-        // identity (AUMID) is derived dynamically - see redirector shell::init_hooks.
-        ("PPM_APP_NAME".into(), app_name_or_path.into()),
-    ];
+    // Env precedence (highest wins):
+    //   1. Portable core vars (USERPROFILE, HOME, LOCALAPPDATA, APPDATA, PPM_ROOT,
+    //      PPM_APP_NAME) - these *are* the isolation boundary; a manifest redefinition
+    //      would silently break virtualization, so they shield against all config.
+    //   2. The launching app's `env` - specific beats general.
+    //   3. `global_env` from every manifest entry - injected on any launch so an engine
+    //      entry (e.g. webview2) can provision its SDK vars from its own block.
+    // Order below is lowest to highest; `dedup_env_last_wins` makes later entries win
+    // key conflicts case-insensitively, which also removes duplicate env-block keys.
+    let mut overrides: Vec<(String, String)> = Vec::new();
 
-    // Auto-detect WebView2 engine if present under Apps/<run_arch>/WebView2
-    let webview2_dir = root.join("Apps").join(run_arch.as_str()).join("WebView2");
-    let webview2_engine_present =
-        webview2_dir.join("msedgewebview2.exe").is_file() || webview2_dir.join("msedge.exe").is_file();
-    if webview2_engine_present {
-        overrides.push((
-            "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".into(),
-            path_to_env_value(&webview2_dir),
-        ));
-    }
+    let expand = expand_templates(root, &home_dir, run_arch);
+    overrides.extend(collect_global_env(manifests.as_deref(), &expand));
 
     if let Some(extra) = extra_env {
         for (key, value) in extra {
-            let expanded = value
-                .replace("{root}", &root.to_string_lossy())
-                .replace("{home}", &home_dir.to_string_lossy())
-                .replace("{arch}", run_arch.as_str());
-            overrides.push((key, expanded));
+            overrides.push((key, expand(&value)));
         }
     }
 
+    overrides.extend([
+        ("USERPROFILE".to_string(), path_to_env_value(&home_dir)),
+        ("HOME".to_string(), path_to_env_value(&home_dir)),
+        ("LOCALAPPDATA".to_string(), path_to_env_value(&local_appdata)),
+        ("APPDATA".to_string(), path_to_env_value(&roaming_appdata)),
+        ("PPM_ROOT".to_string(), path_to_env_value(root)),
+        // Intention: Identify the virtualized app to the redirector so the child's process
+        // identity (AUMID) is derived dynamically - see redirector shell::init_hooks.
+        ("PPM_APP_NAME".to_string(), app_name_or_path.to_string()),
+    ]);
+
+    let overrides = dedup_env_last_wins(overrides);
     let child_environment = build_child_environment(&overrides);
 
     // 3. Prepare arguments
@@ -198,6 +209,9 @@ fn path_to_env_value(path: &Path) -> String {
 }
 
 struct ResolvedApp {
+    /// The full manifest the app resolved from; `None` for direct exe paths, which carry
+    /// no manifest and therefore contribute no `global_env`. Boxed: read once per launch.
+    manifests: Option<Box<AppManifests>>,
     exe_path: std::path::PathBuf,
     app_dir: std::path::PathBuf,
     env: Option<std::collections::HashMap<String, String>>,
@@ -215,6 +229,40 @@ fn resolve_executable_path(root: &Path, raw_path: &Path) -> std::path::PathBuf {
     } else {
         root.join(raw_path)
     }
+}
+
+/// Produces the value-expander for manifest env templates: `{root}`, `{home}`, `{arch}`.
+fn expand_templates<'a>(root: &Path, home_dir: &Path, arch: CpuArch) -> impl Fn(&str) -> String + 'a {
+    let root_s = root.to_string_lossy().into_owned();
+    let home_s = home_dir.to_string_lossy().into_owned();
+    let arch_s = arch.as_str().to_owned();
+    move |value: &str| {
+        value
+            .replace("{root}", &root_s)
+            .replace("{home}", &home_s)
+            .replace("{arch}", &arch_s)
+    }
+}
+
+/// Gathers `global_env` from every manifest entry. Returns pairs in manifest order;
+/// later entries win key conflicts case-insensitively (deduplicated downstream).
+fn collect_global_env(
+    manifests: Option<&AppManifests>,
+    expand: &impl Fn(&str) -> String,
+) -> Vec<(String, String)> {
+    let Some(manifests) = manifests else {
+        return Vec::new();
+    };
+    manifests
+        .apps
+        .values()
+        .filter_map(|def| def.global_env.as_ref())
+        .flat_map(|global| {
+            global
+                .iter()
+                .map(move |(key, value)| (key.clone(), expand(value)))
+        })
+        .collect()
 }
 
 fn resolve_managed_app(root: &Path, app_id: &str, host_arch: CpuArch) -> Result<ResolvedApp> {
@@ -249,11 +297,17 @@ fn resolve_managed_app(root: &Path, app_id: &str, host_arch: CpuArch) -> Result<
     let exe = app_def.executable_for_arch(root, effective_arch);
     let dir = app_def.app_dir_for_arch(root, effective_arch);
 
+    // Detach the app's own fields before moving `manifests` into the box: `app_def`
+    // borrows the manifest, so a move while borrowed would not compile.
+    let app_env = app_def.env.clone();
+    let app_default_args = app_def.default_args.clone();
+
     Ok(ResolvedApp {
+        manifests: Some(Box::new(manifests)),
         exe_path: exe,
         app_dir: dir,
-        env: app_def.env.clone(),
-        default_args: app_def.default_args.clone(),
+        env: app_env,
+        default_args: app_default_args,
         arch: effective_arch,
     })
 }
@@ -419,6 +473,109 @@ fn quote_win32_arg(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::{AppDefinition, PackageConfig, VersionCheckConfig};
+
+    #[test]
+    fn collect_global_env_gathers_all_entries_and_expands_templates() {
+        let manifests = AppManifests {
+            schema: None,
+            apps: [
+                (
+                    "webview2".to_string(),
+                    AppDefinition {
+                        name: "WebView2".to_string(),
+                        description: None,
+                        homepage: None,
+                        target_dir: "WebView2".to_string(),
+                        executable: "msedgewebview2.exe".to_string(),
+                        supported_arch: None,
+                        default_args: None,
+                        dependencies: None,
+                        env: None,
+                        global_env: Some(HashMap::from([(
+                            "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".to_string(),
+                            "{root}/Apps/{arch}/WebView2".to_string(),
+                        )])),
+                        version_check: VersionCheckConfig::GitHubRelease {
+                            repo: "a/b".to_string(),
+                            asset_pattern: None,
+                        },
+                        package: PackageConfig::Zip {
+                            extract_subpath: None,
+                        },
+                        post_install: None,
+                    },
+                ),
+                (
+                    "plain-app".to_string(),
+                    AppDefinition {
+                        name: "Plain".to_string(),
+                        description: None,
+                        homepage: None,
+                        target_dir: "Plain".to_string(),
+                        executable: "plain.exe".to_string(),
+                        supported_arch: None,
+                        default_args: None,
+                        dependencies: None,
+                        env: None,
+                        global_env: None,
+                        version_check: VersionCheckConfig::GitHubRelease {
+                            repo: "a/b".to_string(),
+                            asset_pattern: None,
+                        },
+                        package: PackageConfig::Zip {
+                            extract_subpath: None,
+                        },
+                        post_install: None,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let expand = |v: &str| v.replace("{root}", "C:/Portable").replace("{arch}", "x64");
+        let collected = collect_global_env(Some(&manifests), &expand);
+
+        // Entries without global_env contribute nothing; webview2's block expands.
+        assert_eq!(
+            collected,
+            vec![(
+                "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".to_string(),
+                "C:/Portable/Apps/x64/WebView2".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn last_wins_dedup_shields_core_vars_and_prefers_app_env() {
+        let entries = vec![
+            (
+                "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".to_string(),
+                "global".to_string(),
+            ),
+            ("userprofile".to_string(), "C:/Evil".to_string()),
+            ("CUSTOM".to_string(), "global-value".to_string()),
+            ("custom".to_string(), "app-value".to_string()),
+        ];
+
+        let deduped = dedup_env_last_wins(entries);
+
+        let get = |k: &str| {
+            deduped
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(k))
+                .map(|(_, v)| v.clone())
+                .expect("key must survive dedup")
+        };
+
+        // Core vars shield (last entry wins over earlier redefinitions) ...
+        assert_eq!(get("USERPROFILE"), "C:/Evil");
+        // ... and the launching app's env beats global_env for the same key.
+        assert_eq!(get("CUSTOM"), "app-value");
+        // One entry per case-insensitive key survives.
+        assert_eq!(deduped.len(), 3);
+    }
 
     #[test]
     fn overrides_replace_inherited_keys_case_insensitively() {

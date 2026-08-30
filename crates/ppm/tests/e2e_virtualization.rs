@@ -15,6 +15,9 @@ const SINGLE_PROBE_MANIFEST: &str = r#"{
                 },
                 "package": {
                     "type": "zip"
+                },
+                "global_env": {
+                    "PPM_TEST_GLOBAL_ENV": "{root}/injected-by-global-env"
                 }
             }
         }
