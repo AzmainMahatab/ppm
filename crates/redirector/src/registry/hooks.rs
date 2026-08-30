@@ -5,7 +5,7 @@ use crate::winstr::wide_to_string;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicPtr;
-use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, HMODULE};
 use windows_sys::Win32::System::Registry::HKEY;
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -330,69 +330,88 @@ unsafe extern "system" fn hook_reg_close_key(hkey: HKEY) -> i32 {
     })
 }
 
+/// Hooks `api` on the first module of `modules` that exports it.
+///
+/// # Why per-export resolution
+/// kernelbase and advapi32 export overlapping but incomplete registry API sets - this
+/// build of kernelbase, for example, does not export RegDeleteKeyW at all. Choosing one
+/// module up front left that API unhooked, so a virtualized app's RegDeleteKeyW deleted
+/// keys in the real host registry: a Copy-on-Write boundary hole that surfaced only as
+/// a per-attach warning. Resolving each export independently keeps every API hooked on
+/// whichever module actually carries it.
+///
+/// # SAFETY
+/// Module handles stay valid for the process lifetime, and each hook function matches
+/// the ABI of the export it detours.
+unsafe fn hook_on_first_export(
+    modules: [HMODULE; 2],
+    api: &str,
+    slot: &AtomicPtr<c_void>,
+    hook: *mut c_void,
+) {
+    for module in modules {
+        if !module.is_null() && hook_export(module, api, slot, hook) {
+            return;
+        }
+    }
+    tracing::warn!("Hook {api}: not attached on any module; CoW inactive for this API");
+}
+
 pub fn init_hooks() {
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 
     unsafe {
-        // Hook Win32 Registry APIs in KernelBase.dll (modern Windows) or advapi32.dll
-        let reg_mod = {
-            let kb = GetModuleHandleW(windows_sys::core::w!("kernelbase.dll"));
-            if !kb.is_null() {
-                kb
-            } else {
-                LoadLibraryW(windows_sys::core::w!("advapi32.dll"))
-            }
-        };
+        let kernelbase = GetModuleHandleW(windows_sys::core::w!("kernelbase.dll"));
+        let advapi32 = LoadLibraryW(windows_sys::core::w!("advapi32.dll"));
+        let modules = [kernelbase, advapi32];
 
-        if !reg_mod.is_null() {
-            hook_export(
-                reg_mod,
-                "RegOpenKeyExW",
-                &REAL_REG_OPEN_KEY_EX_W,
-                hook_reg_open_key_ex_w as *mut c_void,
-            );
+        hook_on_first_export(
+            modules,
+            "RegOpenKeyExW",
+            &REAL_REG_OPEN_KEY_EX_W,
+            hook_reg_open_key_ex_w as *mut c_void,
+        );
 
-            hook_export(
-                reg_mod,
-                "RegCreateKeyExW",
-                &REAL_REG_CREATE_KEY_EX_W,
-                hook_reg_create_key_ex_w as *mut c_void,
-            );
+        hook_on_first_export(
+            modules,
+            "RegCreateKeyExW",
+            &REAL_REG_CREATE_KEY_EX_W,
+            hook_reg_create_key_ex_w as *mut c_void,
+        );
 
-            hook_export(
-                reg_mod,
-                "RegQueryValueExW",
-                &REAL_REG_QUERY_VALUE_EX_W,
-                hook_reg_query_value_ex_w as *mut c_void,
-            );
+        hook_on_first_export(
+            modules,
+            "RegQueryValueExW",
+            &REAL_REG_QUERY_VALUE_EX_W,
+            hook_reg_query_value_ex_w as *mut c_void,
+        );
 
-            hook_export(
-                reg_mod,
-                "RegSetValueExW",
-                &REAL_REG_SET_VALUE_EX_W,
-                hook_reg_set_value_ex_w as *mut c_void,
-            );
+        hook_on_first_export(
+            modules,
+            "RegSetValueExW",
+            &REAL_REG_SET_VALUE_EX_W,
+            hook_reg_set_value_ex_w as *mut c_void,
+        );
 
-            hook_export(
-                reg_mod,
-                "RegDeleteValueW",
-                &REAL_REG_DELETE_VALUE_W,
-                hook_reg_delete_value_w as *mut c_void,
-            );
+        hook_on_first_export(
+            modules,
+            "RegDeleteValueW",
+            &REAL_REG_DELETE_VALUE_W,
+            hook_reg_delete_value_w as *mut c_void,
+        );
 
-            hook_export(
-                reg_mod,
-                "RegDeleteKeyW",
-                &REAL_REG_DELETE_KEY_W,
-                hook_reg_delete_key_w as *mut c_void,
-            );
+        hook_on_first_export(
+            modules,
+            "RegDeleteKeyW",
+            &REAL_REG_DELETE_KEY_W,
+            hook_reg_delete_key_w as *mut c_void,
+        );
 
-            hook_export(
-                reg_mod,
-                "RegCloseKey",
-                &REAL_REG_CLOSE_KEY,
-                hook_reg_close_key as *mut c_void,
-            );
-        }
+        hook_on_first_export(
+            modules,
+            "RegCloseKey",
+            &REAL_REG_CLOSE_KEY,
+            hook_reg_close_key as *mut c_void,
+        );
     }
 }
