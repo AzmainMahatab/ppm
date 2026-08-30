@@ -6,6 +6,11 @@
 *.log
 *.part
 
+# Repo-root portable scaffold (repo-root `ppm init` regenerates manifests/apps.schema.json)
+/.ppm/
+/Home/
+/Apps/
+
 # Editor & OS files
 .DS_Store
 Thumbs.db

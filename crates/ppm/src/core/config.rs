@@ -37,6 +37,7 @@ impl From<&str> for ArchString {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AppManifests {
     #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -44,6 +45,7 @@ pub struct AppManifests {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AppDefinition {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +107,10 @@ impl AppDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+// No deny_unknown_fields: serde silently ignores it for internally tagged enums (verified
+// empirically), so it would advertise strictness the runtime does not enforce. Unknown
+// fields inside a variant are a documented gap here; the schema and editors cover
+// authoring-time detection.
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VersionCheckConfig {
     ElectronManifest {
@@ -136,6 +142,10 @@ pub enum VersionCheckConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+// No deny_unknown_fields: serde silently ignores it for internally tagged enums (verified
+// empirically), so it would advertise strictness the runtime does not enforce. Unknown
+// fields inside a variant are a documented gap here; the schema and editors cover
+// authoring-time detection.
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PackageConfig {
     #[serde(rename = "nsis_7z")]
@@ -192,6 +202,7 @@ pub enum PackageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PostInstallConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remove_files: Option<Vec<String>>,
@@ -222,6 +233,61 @@ impl AppManifests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::assets::DEFAULT_APPS_JSON;
+
+    #[test]
+    fn unknown_fields_are_rejected_at_every_level() {
+        // Struct-level strictness is enforced by serde...
+        let rejected = [
+            ("top level", r#"{"apps": {},"stray": 1}"#),
+            (
+                "app entry",
+                r#"{"apps": {"a": {"name": "A","target_dir": "t","executable": "a.exe","version_check": {"type": "github_release","repo": "o/r"},"package": {"type": "binary"},"bogus": 1}}}"#,
+            ),
+        ];
+        for (level, json) in rejected {
+            let err = serde_json::from_str::<AppManifests>(json)
+                .expect_err("deny_unknown_fields must reject unknown fields");
+            assert!(
+                err.to_string().contains("unknown field"),
+                "strictness must reject unknown field at {level}: {err}"
+            );
+        }
+
+        // ...but serde silently ignores deny_unknown_fields for internally tagged
+        // enums, so unknown fields inside version_check/package variants are a
+        // documented gap. Recorded in executable form: if serde ever enforces it,
+        // this parse fails and the strictness contract must be tightened here.
+        let variant_gap = r#"{"apps": {"a": {"name": "A","target_dir": "t","executable": "a.exe","version_check": {"type": "github_release","repo": "o/r","typo": 1},"package": {"type": "binary"}}}}"#;
+        serde_json::from_str::<AppManifests>(variant_gap)
+            .expect("invariant: documents the serde internally-tagged-enum strictness gap")
+            .apps
+            .contains_key("a");
+    }
+
+    #[test]
+    fn tracked_schema_is_fresh_against_the_type_model() {
+        let schema = schemars::schema_for!(AppManifests);
+        let generated = serde_json::to_string_pretty(&schema).expect("invariant: schema serializes");
+        let tracked = include_str!("../../../../manifests/apps.schema.json");
+        assert_eq!(
+            generated, tracked,
+            "manifests/apps.schema.json is stale: regenerate it by running `ppm init` at the repo root"
+        );
+    }
+
+    #[test]
+    fn default_manifest_satisfies_the_tracked_schema() {
+        let schema_json = include_str!("../../../../manifests/apps.schema.json");
+        let schema_value: serde_json::Value =
+            serde_json::from_str(schema_json).expect("invariant: tracked schema is valid JSON");
+        let validator = jsonschema::validator_for(&schema_value).expect("invariant: tracked schema compiles");
+        let default_value: serde_json::Value =
+            serde_json::from_str(DEFAULT_APPS_JSON).expect("invariant: default manifest is valid JSON");
+        validator
+            .validate(&default_value)
+            .expect("default manifest must satisfy the tracked schema");
+    }
 
     #[test]
     fn test_app_manifests_json_roundtrip() {

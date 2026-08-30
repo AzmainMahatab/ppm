@@ -16,6 +16,7 @@
       }
     }
   },
+  "additionalProperties": false,
   "required": [
     "apps"
   ],
@@ -59,6 +60,16 @@
         "executable": {
           "type": "string"
         },
+        "global_env": {
+          "description": "Environment injected when *any* app launches, not just this one. Entries carrying\nshared runtimes (engines/SDKs) own their variables here, so one block can provision\nthe whole portable environment without per-app opt-in lists.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "homepage": {
           "type": [
             "string",
@@ -97,6 +108,7 @@
           "$ref": "#/$defs/VersionCheckConfig"
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "target_dir",
@@ -280,7 +292,8 @@
             "type": "string"
           }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "VersionCheckConfig": {
       "oneOf": [

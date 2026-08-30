@@ -58,7 +58,8 @@ fn resolve_root_from(ppm_root: Option<&str>, cwd: Option<&Path>, exe_dir: Option
 }
 
 /// Loads the application manifest, preferring the deployed `.ppm/apps.json` over the
-/// development-time `manifests/apps.json`.
+/// repo-maintained `manifests/apps.json` (which is also the embedded default that
+/// `ppm init` seeds new roots with).
 pub(crate) fn load_manifest(root: &Path) -> anyhow::Result<AppManifests> {
     let apps_json_path = root.join(".ppm").join("apps.json");
     if apps_json_path.exists() {

@@ -90,6 +90,12 @@ Highest wins; conflicts resolve case-insensitively, and duplicate keys never rea
 2. The launching app's `env` block - app-specific values beat global ones.
 3. `global_env` blocks from every manifest entry - injected when *any* app launches, so an engine entry (e.g. `webview2`) provisions its SDK variables for all apps from its own block. Values expand the `{root}`, `{home}`, `{arch}` templates. No presence gating: the vars inject as declared; delete the block (or entry) to disable.
 
+## Manifest Strictness and Freshness
+
+- Unknown fields are rejected at every level of `apps.json` (`deny_unknown_fields`): typos fail loudly at load time instead of being silently dropped.
+- `apps.schema.json` is a derived artifact: generated from the Rust type model by `ppm init`, tracked for editor tooling, and guarded by a drift test - a schema/type mismatch fails the test battery.
+- The shipped default config is `manifests/apps.json` itself, embedded into the binary at build time; `ppm init` seeds roots with that exact file.
+
 `--echo-args` (argument passthrough echo), `--help` (passthrough help).
 The integration harness (`e2e_virtualization.rs`) asserts both process success and
 that the process identity suite executed.
