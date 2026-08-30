@@ -2,6 +2,8 @@
 
 use std::ptr;
 
+use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
 use windows_sys::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
 };
@@ -53,6 +55,23 @@ pub(crate) fn run() -> Result<(), String> {
         }
 
         CredFree(read_cred_ptr as *const _);
+
+        // Clean-room contract: a generic credential absent from the vault must fail with
+        // ERROR_NOT_FOUND instead of falling through to the host credential store.
+        let missing_w = to_wide("PPMTestAbsentTarget");
+        SetLastError(0);
+        let mut absent_ptr: *mut CREDENTIALW = ptr::null_mut();
+        let res = CredReadW(missing_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut absent_ptr);
+        if res != 0 {
+            CredFree(absent_ptr as *const _);
+            return Err("CredReadW unexpectedly resolved an absent generic credential".to_string());
+        }
+        let err = GetLastError();
+        if err != ERROR_NOT_FOUND {
+            return Err(format!(
+                "absent generic credential returned error {err}, expected ERROR_NOT_FOUND"
+            ));
+        }
 
         // Delete credential
         let res = CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0);
