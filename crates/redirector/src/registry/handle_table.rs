@@ -7,7 +7,6 @@ use windows_sys::Win32::Foundation::HANDLE;
 #[derive(Debug, Clone)]
 pub struct VirtualHandleEntry {
     pub path: String,
-    pub real_handle: Option<isize>,
     pub is_synthetic: bool,
 }
 
@@ -51,7 +50,6 @@ impl VirtualHandleTable {
             id,
             VirtualHandleEntry {
                 path,
-                real_handle: None,
                 is_synthetic: true,
             },
         );
@@ -69,7 +67,6 @@ impl VirtualHandleTable {
             id,
             VirtualHandleEntry {
                 path,
-                real_handle: Some(real_handle as isize),
                 is_synthetic: false,
             },
         );

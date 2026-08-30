@@ -350,13 +350,30 @@ fn launch_with_detours(
             );
         }
 
-        WaitForSingleObject(pi.hProcess, INFINITE);
-
+        let wait_result = WaitForSingleObject(pi.hProcess, INFINITE);
         let mut exit_code = 0u32;
-        GetExitCodeProcess(pi.hProcess, &mut exit_code);
+        let exit_result = GetExitCodeProcess(pi.hProcess, &mut exit_code);
 
         windows_sys::Win32::Foundation::CloseHandle(pi.hProcess);
         windows_sys::Win32::Foundation::CloseHandle(pi.hThread);
+
+        // A failed wait or exit-code query must not surface as a fabricated success
+        // exit code; both are environmental failures and report with full context.
+        if wait_result != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
+            bail!(
+                "WaitForSingleObject failed for '{}' (wait result 0x{:08X}): {}",
+                exe_path.display(),
+                wait_result,
+                std::io::Error::last_os_error()
+            );
+        }
+        if exit_result == 0 {
+            bail!(
+                "GetExitCodeProcess failed for '{}': {}",
+                exe_path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
 
         Ok(exit_code as i32)
     }

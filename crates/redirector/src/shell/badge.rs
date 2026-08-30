@@ -8,8 +8,8 @@ use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HICON, IsWindowVisible, WS_EX_TOOLWINDOW,
+    GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, HICON,
+    IsWindowVisible, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::{GUID, HRESULT};
 
@@ -227,7 +227,6 @@ fn create_badge_icon() -> HICON {
 unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
     unsafe {
         let hr_init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED as u32);
-        let mut p_taskbar_raw: *mut c_void = std::ptr::null_mut();
 
         let mut class_name_buf = [0u16; 256];
         let class_len = GetClassNameW(hwnd, class_name_buf.as_mut_ptr(), 256);
@@ -237,6 +236,7 @@ unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
         let title_len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), 256);
         let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
 
+        let mut p_taskbar_raw: *mut c_void = std::ptr::null_mut();
         let res = CoCreateInstance(
             &CLSID_TASKBAR_LIST,
             std::ptr::null_mut(),
@@ -245,6 +245,7 @@ unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
             &mut p_taskbar_raw,
         );
 
+        let mut applied = false;
         if res == S_OK && !p_taskbar_raw.is_null() {
             let taskbar = &*(p_taskbar_raw as *const ITaskbarList3);
             let vtbl = &*taskbar.lpVtbl;
@@ -255,9 +256,6 @@ unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
             let overlay_res = (vtbl.SetOverlayIcon)(p_taskbar_raw, hwnd, hicon, desc.as_ptr());
 
             let _ = (vtbl.Release)(p_taskbar_raw);
-            if hr_init == S_OK {
-                CoUninitialize();
-            }
 
             if overlay_res == S_OK {
                 tracing::info!(
@@ -266,7 +264,7 @@ unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
                     class_name,
                     title
                 );
-                return true;
+                applied = true;
             } else {
                 tracing::debug!(
                     "SetOverlayIcon returned 0x{:08X} (HrInit: 0x{:08X}) for HWND: 0x{:08x} ('{}' / '{}')",
@@ -281,10 +279,15 @@ unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
             tracing::warn!("CoCreateInstance for CLSID_TASKBAR_LIST returned 0x{:08X}", res);
         }
 
-        if hr_init == S_OK {
+        // Balance CoInitializeEx exactly once on every exit path: S_OK *and* S_FALSE
+        // (hr >= 0) both took a COM reference that CoUninitialize must return; a
+        // failure result left COM untouched and must not be balanced. The previous
+        // shape called CoUninitialize twice whenever the overlay failed.
+        if hr_init >= 0 {
             CoUninitialize();
         }
-        false
+
+        applied
     }
 }
 
@@ -321,25 +324,18 @@ unsafe fn is_window_owned_by_current_session(hwnd: HWND) -> bool {
 
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     unsafe {
+        // Structural ownership filter only: a window qualifies when it belongs to this
+        // process or to any process rooted in the portable tree, and it is a visible,
+        // non-tool window. Class-name and title heuristics are gone - ownership is the
+        // contract, so every qualifying window gets the badge.
         if is_window_owned_by_current_session(hwnd) {
             let is_visible = IsWindowVisible(hwnd) != FALSE;
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             let is_tool_window = (ex_style & WS_EX_TOOLWINDOW) != 0;
 
             if is_visible && !is_tool_window {
-                let mut class_name_buf = [0u16; 256];
-                let class_len = GetClassNameW(hwnd, class_name_buf.as_mut_ptr(), 256);
-                let class_name = String::from_utf16_lossy(&class_name_buf[..class_len as usize]);
-
-                if class_name.contains("Chrome_WidgetWin_1")
-                    || class_name.contains("Tauri")
-                    || class_name.contains("CabinetWClass")
-                    || class_name.contains("Window")
-                    || GetWindowTextLengthW(hwnd) > 0
-                {
-                    let list = &mut *(lparam as *mut Vec<HWND>);
-                    list.push(hwnd);
-                }
+                let list = &mut *(lparam as *mut Vec<HWND>);
+                list.push(hwnd);
             }
         }
         TRUE
@@ -355,7 +351,7 @@ pub fn start_taskbar_monitor() {
         return;
     }
 
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("taskbar_monitor".to_string())
         .spawn(|| {
             let hicon = get_or_create_badge_icon();
@@ -388,7 +384,11 @@ pub fn start_taskbar_monitor() {
                 }
             }
         })
-        .ok();
+    {
+        // Release the single-flight flag so a later attach can retry the monitor.
+        MONITOR_RUNNING.store(false, Ordering::SeqCst);
+        tracing::warn!("Taskbar badge monitor failed to spawn ({e}); portable-mode overlay badges inactive");
+    }
 }
 
 /// Runs the Portable Mode overlay badge monitor so the identity established by

@@ -49,6 +49,14 @@ const CSIDL_APPDATA: i32 = 0x001a;
 const CSIDL_LOCAL_APPDATA: i32 = 0x001c;
 const CSIDL_PROFILE: i32 = 0x0028;
 
+// HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER): the documented SHGetFolderPathW failure
+// when the caller's MAX_PATH buffer cannot hold the redirected path.
+const E_INSUFFICIENT_BUFFER: HRESULT = 0x8007_007A_u32 as i32;
+
+// SHGetFolderPathW documents the caller buffer as MAX_PATH (260) wide characters,
+// including the NUL terminator; the hook must honor that contract or overflow it.
+const CSIDL_BUFFER_WCHARS: usize = 260;
+
 type FnSHGetKnownFolderPath = unsafe extern "system" fn(*const GUID, u32, HANDLE, *mut PWSTR) -> HRESULT;
 type FnSHGetFolderPathW = unsafe extern "system" fn(HWND, i32, HANDLE, u32, PWSTR) -> HRESULT;
 type FnGetUserProfileDirectoryW = unsafe extern "system" fn(HANDLE, PWSTR, *mut u32) -> BOOL;
@@ -156,9 +164,13 @@ unsafe extern "system" fn hook_sh_get_folder_path_w(
                 };
 
                 if let Some(w) = target_w {
-                    // SAFETY: `path_out` is non-null (checked above) and is the caller-owned buffer,
-                    // which Win32 guarantees is at least MAX_PATH wide for CSIDL queries - enough
-                    // for the redirection targets written here.
+                    // A root-scoped target longer than the documented caller buffer must
+                    // report the documented error instead of silently overflowing it.
+                    if w.len() > CSIDL_BUFFER_WCHARS {
+                        return E_INSUFFICIENT_BUFFER;
+                    }
+                    // SAFETY: `path_out` is non-null (checked above), is the caller-owned
+                    // buffer, and `w` (NUL included) fits the documented MAX_PATH capacity.
                     unsafe {
                         std::ptr::copy_nonoverlapping(w.as_ptr(), path_out, w.len());
                     }
