@@ -9,7 +9,7 @@ the embedded `redirector.dll` engine enforces five isolation boundaries via Micr
 | # | Isolation Boundary | Intercepted APIs | Effect |
 | :--- | :--- | :--- | :--- |
 | 1 | Registry (Copy-on-Write) | `RegCreateKeyExW`, `RegSetValueExW`, `RegQueryValueExW`, `RegDeleteValueW`, `RegEnumKeyExW`, … | Host registry reads fall through; writes persist to `.ppm/system/registry.json` |
-| 2 | Process Spawning | `CreateProcessW` | Child processes are re-injected with the engine and inherit virtualization |
+| 2 | Process Spawning | `CreateProcessW` | Child processes are re-injected with the engine and inherit virtualization; injection is policy-gated (CIG/ACG kernel query) and fail-fast - unverifiable state refuses the spawn with the real error instead of running an unvirtualized child |
 | 3 | Credential Vault | `CredReadW`, `CredWriteW`, `CredDeleteW` | Windows generic credentials persist encrypted to `.ppm/system/credentials.json` |
 | 4 | Config-Driven Environment | `apps.json` `env` (per-app) and `global_env` (any-launch) blocks with `{root}`/`{home}`/`{arch}` templates; core portable vars shielded from redefinition |
 | 5 | Shell Paths | `SHGetKnownFolderPath`, `GetUserProfileDirectoryW` | Profile, AppData (Local/Roaming), Documents and shell folders resolve into `Home/` |

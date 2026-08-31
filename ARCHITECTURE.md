@@ -95,6 +95,7 @@ graph TD
 
 | Target API | Interception Layer | Virtualization Function |
 | :--- | :--- | :--- |
+| **`CreateProcessW`** | `kernelbase.dll` / `kernel32.dll` | Child is created frozen (`CREATE_SUSPENDED`), its mitigation policies queried from the kernel (CIG/ACG), and it is either resumed injected (clean) or terminated and recreated plainly (hardened); unverifiable state fails the spawn with the real OS error - see ADR-006. |
 | **`RegOpenKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Normalizes registry paths (`HKCU\...`, `HKLM\...`); tracks handle in `VirtualHandleTable`. |
 | **`RegCreateKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Creates key in virtual overlay; registers handle in `VirtualHandleTable`. |
 | **`RegQueryValueExW`** | `kernelbase.dll` / `advapi32.dll` | Queries virtual overlay and tombstones; falls back to host OS for unshadowed reads. |

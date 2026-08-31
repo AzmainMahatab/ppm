@@ -31,7 +31,7 @@ defines applications:
 | # | Boundary | Guarantee |
 | :--- | :--- | :--- |
 | 1 | Registry (CoW) | Host reads fall through unchanged; writes and deletes are virtualized with tombstones into `.ppm/system/registry.json`. |
-| 2 | Process Spawning | Every spawned child is re-injected with the engine and inherits all boundaries. |
+| 2 | Process Spawning | Every spawned child is re-injected with the engine and inherits all boundaries. Injection is fail-fast: if the engine cannot verify a child as injectable (mitigation-policy query failure) or the engine itself is missing, the spawn fails with the real OS error - a child never runs unvirtualized except when its own mitigation policy (CIG/ACG) forbids injection, in which case it runs in its own sandbox by documented design. |
 | 3 | Credentials | Generic Windows credentials are stored encrypted in `.ppm/system/credentials.json`; the host credential store is untouched. |
 | 4 | Shell Paths | `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` resolve under `Home/`. |
 | 5 | Process Identity | A root-scoped identity exists from the first instant of process execution; app-initiated identity calls are re-parented into the same namespace. |
