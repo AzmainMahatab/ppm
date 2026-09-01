@@ -1,0 +1,9 @@
+# Intention: Pin the embedded manifest artifacts to LF in the working tree.
+# Why: Both files are compiled into the binary with `include_str!`, and
+#      `apps.schema.json` is compared byte-for-byte against fresh `schemars` output by the
+#      schema-drift test. `schemars` emits LF, so a checkout that translates these files to
+#      CRLF - the Git-for-Windows default, `core.autocrlf=true` - makes that test fail on a
+#      fresh clone even though nothing is actually stale. Pinning the checkout encoding keeps
+#      the generator and the tracked artifact directly comparable on every machine.
+manifests/apps.json      text eol=lf
+manifests/apps.schema.json text eol=lf
