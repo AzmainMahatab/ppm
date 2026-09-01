@@ -139,127 +139,36 @@
       ]
     },
     "PackageConfig": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "const": "nsis_7z"
-            }
-          },
-          "required": [
-            "type"
+      "description": "How an installed package is unpacked.\n\n# Why a struct with a `type` discriminant instead of one enum variant per format\nSix of the seven formats carried an identical `extract_subpath` field, so the internally\ntagged enum repeated the same four-line serde attribute block six times. Worse, serde\nsilently ignores `deny_unknown_fields` for internally tagged enums, so a typo inside a\n`package` block was dropped without a word. A plain struct keeps the JSON shape\nbyte-for-byte identical and makes the strictness real instead of advertised.",
+      "type": "object",
+      "properties": {
+        "extract_subpath": {
+          "description": "Subdirectory of the extracted payload to install. Not meaningful for `binary`, which\nhas no archive to descend into.",
+          "type": [
+            "string",
+            "null"
           ]
         },
-        {
-          "type": "object",
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "const": "7z"
-            }
-          },
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "const": "zip"
-            }
-          },
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "const": "cab"
-            }
-          },
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "const": "msi"
-            }
-          },
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "extract_subpath": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "type": "string",
-              "const": "tar"
-            }
-          },
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "binary"
-            }
-          },
-          "required": [
-            "type"
-          ]
+        "type": {
+          "$ref": "#/$defs/PackageKind"
         }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "PackageKind": {
+      "description": "The archive format a package is distributed in.",
+      "type": "string",
+      "enum": [
+        "nsis_7z",
+        "7z",
+        "zip",
+        "cab",
+        "msi",
+        "tar",
+        "binary"
       ]
     },
     "PostInstallConfig": {

@@ -1,5 +1,6 @@
 use crate::core::arch::CpuArch;
 use crate::core::config::{AppDefinition, VersionCheckConfig};
+use crate::package::http;
 use crate::package::pe_info::{get_electron_package_version, get_pe_product_version};
 use anyhow::{Result, anyhow, bail};
 use regex::Regex;
@@ -33,6 +34,17 @@ pub fn detect_local_version(root: &Path, app_def: &AppDefinition, arch: CpuArch)
     None
 }
 
+/// Substitutes the release-template placeholders a `url_template` may carry.
+///
+/// # Why one expander
+/// Three of the four strategies spelled out the same two `replace` calls, so a new placeholder
+/// had to be added in three places or the strategies would diverge.
+fn expand_release_template(template: &str, version: &str, arch: CpuArch) -> String {
+    template
+        .replace("{version}", version)
+        .replace("{arch}", arch.as_str())
+}
+
 /// Fetches the latest upstream version and resolved download URL for a specific CPU architecture.
 pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
@@ -45,11 +57,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No manifest URL configured for arch '{}'", arch.as_str()))?;
 
-            let client = reqwest::blocking::Client::builder()
-                .user_agent("ppm-portable-package-manager/0.1")
-                .build()?;
-
-            let response = client.get(&manifest_url).send()?;
+            let response = http::metadata_client()?.get(&manifest_url).send()?;
             let text = response.text()?;
 
             let yaml: serde_yml::Value = serde_yml::from_str(&text)?;
@@ -65,9 +73,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                 let resolved_tpl = tpl
                     .resolve(arch)
                     .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
-                resolved_tpl
-                    .replace("{version}", &version_val)
-                    .replace("{arch}", arch.as_str())
+                expand_release_template(&resolved_tpl, &version_val, arch)
             } else if let Some(files) = yaml.get("files").and_then(|f| f.as_sequence()) {
                 let first_file = files
                     .first()
@@ -102,11 +108,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
 
         VersionCheckConfig::GitHubRelease { repo, asset_pattern } => {
             let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
-            let client = reqwest::blocking::Client::builder()
-                .user_agent("ppm-portable-package-manager/0.1")
-                .build()?;
-
-            let resp = client.get(&api_url).send()?;
+            let resp = http::metadata_client()?.get(&api_url).send()?;
             let json: Value = resp.json()?;
 
             let tag_name = json
@@ -170,11 +172,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No version_key configured for arch '{}'", arch.as_str()))?;
 
-            let client = reqwest::blocking::Client::builder()
-                .user_agent("ppm-portable-package-manager/0.1")
-                .build()?;
-
-            let resp = client.get(&api_url).send()?;
+            let resp = http::metadata_client()?.get(&api_url).send()?;
             let json: Value = resp.json()?;
 
             let version = resolve_json_query(&json, &v_key)?
@@ -186,9 +184,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                 let resolved_tpl = tpl
                     .resolve(arch)
                     .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
-                resolved_tpl
-                    .replace("{version}", &version)
-                    .replace("{arch}", arch.as_str())
+                expand_release_template(&resolved_tpl, &version, arch)
             } else if let Some(uk) = url_key {
                 let resolved_uk = uk
                     .resolve(arch)
@@ -224,11 +220,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
 
-            let client = reqwest::blocking::Client::builder()
-                .user_agent("ppm-portable-package-manager/0.1")
-                .build()?;
-
-            let resp = client.get(&scrape_url).send()?;
+            let resp = http::metadata_client()?.get(&scrape_url).send()?;
             let body = resp.text()?;
 
             let re = Regex::new(&regex_str)?;
@@ -253,9 +245,7 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                     .replace("{url}", &matched_url)
                     .replace("{0}", &matched_url)
             } else {
-                tpl_str
-                    .replace("{version}", &version)
-                    .replace("{arch}", arch.as_str())
+                expand_release_template(&tpl_str, &version, arch)
             };
 
             Ok(RemoteRelease {

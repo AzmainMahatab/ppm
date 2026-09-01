@@ -7,6 +7,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+// Only the non-Windows plain launch path uses std::process; the Windows path always goes
+// through Detours so the engine is injected.
+#[cfg(not(windows))]
 use std::process::Command;
 
 #[cfg(windows)]
@@ -179,29 +182,47 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
 
     #[cfg(windows)]
     {
-        if redirector_dll.exists() {
-            return launch_with_detours(
-                &exe_path,
-                &app_dir,
-                &final_args,
-                &redirector_dll,
-                &child_environment,
+        // Intention: Refuse to launch an application the engine cannot virtualize.
+        // Why: ADR-006 already makes a *child* whose injectability cannot be verified fail the
+        //      spawn rather than run outside the sandbox. The root launch is the same contract:
+        //      without redirector.dll the application would write to the real registry and the
+        //      real user profile while `ppm run` reported success. The environment block alone
+        //      redirects paths that ask for them - it is not the isolation boundary.
+        // Ex: [.ppm/lib/redirector.dll absent] -> [error naming `ppm init`], never a silent
+        //     unvirtualized launch.
+        if !redirector_dll.is_file() {
+            bail!(
+                "Virtualization engine missing at '{}'. Run 'ppm init' to deploy it; refusing to launch '{}' unvirtualized.",
+                redirector_dll.display(),
+                app_name_or_path
             );
         }
+
+        launch_with_detours(
+            &exe_path,
+            &app_dir,
+            &final_args,
+            &redirector_dll,
+            &child_environment,
+        )
     }
 
-    // Fallback standard launch
-    let mut cmd = Command::new(&exe_path);
-    cmd.current_dir(&app_dir);
-    cmd.args(&final_args);
-    cmd.envs(
-        child_environment
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    );
+    // Off Windows there is no engine to deploy and no virtualization is claimed, so a plain
+    // launch is the contract rather than a degradation of it.
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new(&exe_path);
+        cmd.current_dir(&app_dir);
+        cmd.args(&final_args);
+        cmd.envs(
+            child_environment
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
 
-    let status = cmd.status()?;
-    Ok(status.code().unwrap_or(0))
+        let status = cmd.status()?;
+        Ok(status.code().unwrap_or(0))
+    }
 }
 
 fn path_to_env_value(path: &Path) -> String {
@@ -266,15 +287,15 @@ fn collect_global_env(
 }
 
 fn resolve_managed_app(root: &Path, app_id: &str, host_arch: CpuArch) -> Result<ResolvedApp> {
-    let manifest_path = root.join(".ppm").join("apps.json");
-    let dev_manifest_path = root.join("manifests").join("apps.json");
-    let path_to_load = if manifest_path.exists() {
-        manifest_path
-    } else {
-        dev_manifest_path
+    let layout = crate::core::layout::PortableLayout::new(root);
+    let Some(manifest_path) = layout.manifest_source() else {
+        bail!(
+            "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
+            layout.deployed_manifest().display()
+        );
     };
 
-    let manifests = AppManifests::load_from_file(&path_to_load)?;
+    let manifests = AppManifests::load_from_file(&manifest_path)?;
     let Some(app_def) = manifests.apps.get(app_id) else {
         bail!("Application '{app_id}' not found in apps.json");
     };
@@ -473,7 +494,7 @@ fn quote_win32_arg(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{AppDefinition, PackageConfig, VersionCheckConfig};
+    use crate::core::config::{AppDefinition, PackageConfig, PackageKind, VersionCheckConfig};
 
     #[test]
     fn collect_global_env_gathers_all_entries_and_expands_templates() {
@@ -500,7 +521,8 @@ mod tests {
                             repo: "a/b".to_string(),
                             asset_pattern: None,
                         },
-                        package: PackageConfig::Zip {
+                        package: PackageConfig {
+                            kind: PackageKind::Zip,
                             extract_subpath: None,
                         },
                         post_install: None,
@@ -523,7 +545,8 @@ mod tests {
                             repo: "a/b".to_string(),
                             asset_pattern: None,
                         },
-                        package: PackageConfig::Zip {
+                        package: PackageConfig {
+                            kind: PackageKind::Zip,
                             extract_subpath: None,
                         },
                         post_install: None,

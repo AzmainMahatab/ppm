@@ -2,6 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use ppm::core::config::AppManifests;
+use ppm::core::layout::PortableLayout;
 
 /// Resolves the portable environment root.
 ///
@@ -32,7 +33,7 @@ fn resolve_root_from(ppm_root: Option<&str>, cwd: Option<&Path>, exe_dir: Option
 
     // 2. If current working directory has a portable environment (.ppm/apps.json or manifests/apps.json)
     if let Some(cwd) = cwd
-        && (cwd.join(".ppm").join("apps.json").is_file() || cwd.join("manifests").join("apps.json").is_file())
+        && PortableLayout::new(cwd).carries_portable_environment()
     {
         return cwd.to_path_buf();
     }
@@ -61,20 +62,14 @@ fn resolve_root_from(ppm_root: Option<&str>, cwd: Option<&Path>, exe_dir: Option
 /// repo-maintained `manifests/apps.json` (which is also the embedded default that
 /// `ppm init` seeds new roots with).
 pub(crate) fn load_manifest(root: &Path) -> anyhow::Result<AppManifests> {
-    let apps_json_path = root.join(".ppm").join("apps.json");
-    if apps_json_path.exists() {
-        AppManifests::load_from_file(&apps_json_path)
-    } else {
-        let dev_manifest = root.join("manifests").join("apps.json");
-        if dev_manifest.exists() {
-            AppManifests::load_from_file(&dev_manifest)
-        } else {
-            anyhow::bail!(
-                "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
-                apps_json_path.display()
-            );
-        }
-    }
+    let layout = PortableLayout::new(root);
+    let Some(source) = layout.manifest_source() else {
+        anyhow::bail!(
+            "Manifest file not found at '{}'. Run 'ppm init' to generate default configuration.",
+            layout.deployed_manifest().display()
+        );
+    };
+    AppManifests::load_from_file(&source)
 }
 
 #[cfg(test)]

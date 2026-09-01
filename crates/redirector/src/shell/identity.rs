@@ -62,21 +62,56 @@ fn sanitize_identity(raw: &str) -> String {
 }
 
 /// Builds the isolated AUMID for this (portable root, identity) pair.
-///
-/// The identity segment is truncated so the full AUMID stays within the strictest documented
-/// character budget; the root hash never is, and it alone carries the isolation boundary.
 fn synthetic_aumid(identity: &str) -> String {
     format_aumid(root_hash16(), identity)
 }
 
-/// Builds the isolated AUMID for this (root hash, identity) pair.
+// Intention: Bound the identity segment of the AUMID.
+// Why: Microsoft documents 128 characters as the maximum AppUserModelID length. The fixed
+//      `PPM.Portable.` prefix, the 16-hex root hash and two separators consume 30 of those, so
+//      this bound keeps the result far inside the limit and leaves headroom if the prefix or the
+//      hash width ever changes. The root hash is never truncated - it alone carries the
+//      isolation boundary.
+const MAX_IDENTITY_CHARS: usize = 34;
+
+/// The generic identity used when an application supplies nothing usable.
 ///
-/// The identity segment is truncated so the full AUMID stays within the strictest documented
-/// character budget; the root hash never is, and it alone carries the isolation boundary.
+/// # Why a fallback is required
+/// An empty identity segment yields `PPM.Portable.<hash>.`, a trailing-dot string that is not a
+/// well-formed AppUserModelID.
+const FALLBACK_IDENTITY: &str = "App";
+
+/// Truncates `identity` to the segment budget.
+///
+/// # Why by characters instead of `String::truncate`
+/// `String::truncate` panics when the byte index is not a character boundary, and these hooks
+/// run in a library built with `panic = "abort"`: an application whose name contains any
+/// multi-byte character - CJK, Cyrillic, an emoji - straddling byte 34 would have aborted the
+/// host process. Counting characters cannot land mid-character.
+fn truncate_identity(identity: &str) -> String {
+    identity.chars().take(MAX_IDENTITY_CHARS).collect()
+}
+
+/// Strips a namespace this engine already applied, so re-parenting is idempotent.
+///
+/// # Why
+/// An application that reads its own AUMID back and sets it again would otherwise be wrapped
+/// twice - `PPM.Portable.<hash>.PPM.Portable.<hash>.App` - and the truncation would then cut the
+/// real identity out of the middle of its own name.
+fn strip_existing_namespace<'a>(identity: &'a str, root_hash: &str) -> &'a str {
+    let applied = format!("PPM.Portable.{root_hash}.");
+    identity.strip_prefix(applied.as_str()).unwrap_or(identity)
+}
+
+/// Builds the isolated AUMID for this (root hash, identity) pair.
 fn format_aumid(root_hash: &str, identity: &str) -> String {
-    let mut identity = sanitize_identity(identity);
-    identity.truncate(34);
-    format!("PPM.Portable.{root_hash}.{identity}")
+    let sanitized = sanitize_identity(strip_existing_namespace(identity, root_hash));
+    let truncated = truncate_identity(&sanitized);
+    let segment = match truncated.is_empty() {
+        true => FALLBACK_IDENTITY,
+        false => &truncated,
+    };
+    format!("PPM.Portable.{root_hash}.{segment}")
 }
 
 /// Proactively establishes the isolated identity during DLL attach, before any window can
@@ -180,6 +215,57 @@ mod tests {
 
         let long_identity = "a".repeat(40);
         let aumid = format_aumid(hash, &long_identity);
-        assert_eq!(aumid, format!("PPM.Portable.{hash}.{}", "a".repeat(34)));
+        assert_eq!(
+            aumid,
+            format!("PPM.Portable.{hash}.{}", "a".repeat(MAX_IDENTITY_CHARS))
+        );
+    }
+
+    /// Regression: truncation used `String::truncate`, which panics on a non-character-boundary
+    /// byte index. In a `panic = "abort"` library that took the whole host process down.
+    #[test]
+    fn a_multibyte_identity_is_truncated_without_panicking() {
+        let hash = "0123456789abcdef";
+
+        // Each of these is multi-byte in UTF-8, so a byte-indexed truncation lands mid-character.
+        for identity in [
+            "日本語のアプリケーション名前".repeat(4),
+            "Ж".repeat(60),
+            "🙂".repeat(40),
+        ] {
+            let aumid = format_aumid(hash, &identity);
+            assert!(aumid.starts_with(&format!("PPM.Portable.{hash}.")));
+            let segment = aumid.trim_start_matches(&format!("PPM.Portable.{hash}."));
+            assert!(segment.chars().count() <= MAX_IDENTITY_CHARS);
+        }
+    }
+
+    /// Re-parenting must be idempotent: an application that reads its own AUMID back and sets it
+    /// again used to be wrapped a second time, which truncation then cut apart.
+    #[test]
+    fn re_parenting_an_already_namespaced_identity_is_idempotent() {
+        let hash = "0123456789abcdef";
+        let once = format_aumid(hash, "Some.App");
+        let twice = format_aumid(hash, &once);
+
+        assert_eq!(once, twice);
+        assert_eq!(twice, "PPM.Portable.0123456789abcdef.Some.App");
+    }
+
+    #[test]
+    fn an_unusable_identity_falls_back_instead_of_producing_a_trailing_dot() {
+        let hash = "0123456789abcdef";
+
+        for empty in ["", "!!!"] {
+            let aumid = format_aumid(hash, empty);
+            assert!(
+                !aumid.ends_with('.'),
+                "an AUMID must never end with the namespace separator: {aumid}"
+            );
+        }
+        assert_eq!(
+            format_aumid(hash, ""),
+            format!("PPM.Portable.{hash}.{FALLBACK_IDENTITY}")
+        );
     }
 }

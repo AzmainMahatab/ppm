@@ -1,4 +1,5 @@
 use crate::core::arch::CpuArch;
+use anyhow::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -141,64 +142,43 @@ pub enum VersionCheckConfig {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-// No deny_unknown_fields: serde silently ignores it for internally tagged enums (verified
-// empirically), so it would advertise strictness the runtime does not enforce. Unknown
-// fields inside a variant are a documented gap here; the schema and editors cover
-// authoring-time detection.
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PackageConfig {
+/// The archive format a package is distributed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageKind {
     #[serde(rename = "nsis_7z")]
-    Nsis7z {
-        #[serde(
-            rename = "extract_subpath",
-            alias = "subpath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        extract_subpath: Option<String>,
-    },
+    Nsis7z,
     #[serde(rename = "7z", alias = "seven_z")]
-    SevenZ {
-        #[serde(
-            rename = "extract_subpath",
-            alias = "subpath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        extract_subpath: Option<String>,
-    },
-    Zip {
-        #[serde(
-            rename = "extract_subpath",
-            alias = "subpath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        extract_subpath: Option<String>,
-    },
-    Cab {
-        #[serde(
-            rename = "extract_subpath",
-            alias = "subpath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        extract_subpath: Option<String>,
-    },
-    Msi {
-        #[serde(
-            rename = "extract_subpath",
-            alias = "subpath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        extract_subpath: Option<String>,
-    },
-    Tar {
-        #[serde(
-            rename = "extract_subpath",
-            alias = "subpath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        extract_subpath: Option<String>,
-    },
+    SevenZ,
+    Zip,
+    Cab,
+    Msi,
+    Tar,
     Binary,
+}
+
+/// How an installed package is unpacked.
+///
+/// # Why a struct with a `type` discriminant instead of one enum variant per format
+/// Six of the seven formats carried an identical `extract_subpath` field, so the internally
+/// tagged enum repeated the same four-line serde attribute block six times. Worse, serde
+/// silently ignores `deny_unknown_fields` for internally tagged enums, so a typo inside a
+/// `package` block was dropped without a word. A plain struct keeps the JSON shape
+/// byte-for-byte identical and makes the strictness real instead of advertised.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageConfig {
+    #[serde(rename = "type")]
+    pub kind: PackageKind,
+    /// Subdirectory of the extracted payload to install. Not meaningful for `binary`, which
+    /// has no archive to descend into.
+    #[serde(
+        default,
+        rename = "extract_subpath",
+        alias = "subpath",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extract_subpath: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -214,19 +194,11 @@ pub struct PostInstallConfig {
 
 impl AppManifests {
     pub fn load_from_file(path: &Path) -> anyhow::Result<Self> {
-        let content = fs::read_to_string(path)?;
-        let manifests: Self = serde_json::from_str(&content)?;
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read manifest '{}'", path.display()))?;
+        let manifests: Self = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse manifest '{}'", path.display()))?;
         Ok(manifests)
-    }
-
-    #[allow(dead_code)]
-    pub fn save_to_file(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
-        Ok(())
     }
 }
 

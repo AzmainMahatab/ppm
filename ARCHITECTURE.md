@@ -44,8 +44,8 @@ graph TD
 │   ├── apps.schema.json                # Generated JSON Schema
 │   │
 │   ├── system/                         # Virtual overlays
-│   │   ├── registry.json               # Virtual registry hive
-│   │   └── credentials.json            # Encrypted credential store
+│   │   ├── registry.jsonl              # Virtual registry hive (append-only journal)
+│   │   └── credentials.json            # Portable credential store (plaintext at rest)
 │   │
 │   ├── lib/                            # Runtime libraries
 │   │   └── redirector.dll              # Injected virtualization library
@@ -86,8 +86,8 @@ graph TD
 │ Subsystem            │ Interception Boundary         │ Scope & Target DLL              │
 ├──────────────────────┼───────────────────────────────┼─────────────────────────────────┤
 │ 1. Registry (CoW)    │ kernelbase.dll / advapi32.dll │ Win32 Application Registry APIs │
-│ 2. Process Spawning  │ kernelbase.dll / kernel32.dll │ CreateProcessW                  │
-│ 3. Credentials       │ advapi32.dll                  │ CredReadW / CredWriteW / Delete │
+│ 2. Process Spawning  │ kernelbase.dll / kernel32.dll │ CreateProcess W / A / AsUserW   │
+│ 3. Credentials       │ advapi32.dll                  │ Cred Read/Write/Delete/Enumerate│
 │ 4. Shell Paths       │ shell32.dll + userenv.dll     │ Known Folders / Profile Paths   │
 │ 5. Process Identity  │ shell32.dll                   │ SetCurrentProcessExplicitAppId  │
 └──────────────────────┴───────────────────────────────┴─────────────────────────────────┘
@@ -95,18 +95,30 @@ graph TD
 
 | Target API | Interception Layer | Virtualization Function |
 | :--- | :--- | :--- |
-| **`CreateProcessW`** | `kernelbase.dll` / `kernel32.dll` | Child is created frozen (`CREATE_SUSPENDED`), its mitigation policies queried from the kernel (CIG/ACG), and it is either resumed injected (clean) or terminated and recreated plainly (hardened); unverifiable state fails the spawn with the real OS error - see ADR-006. |
+| **`CreateProcessW`, `CreateProcessA`, `CreateProcessAsUserW`** | `kernelbase.dll` / `kernel32.dll` | Injects `redirector.dll` into every spawned child via Microsoft Detours. Each entry point reaches `CreateProcessInternal*` on its own, so all three are hooked. The child is created frozen (`CREATE_SUSPENDED`), its mitigation policies queried from the kernel (CIG/ACG), and it is either started injected (clean) or run uninjected in its own sandbox (hardened); an unverifiable policy, a failed injection or a failed resume all fail the spawn with the real OS error - see ADR-006. |
 | **`RegOpenKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Normalizes registry paths (`HKCU\...`, `HKLM\...`); tracks handle in `VirtualHandleTable`. |
 | **`RegCreateKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Creates key in virtual overlay; registers handle in `VirtualHandleTable`. |
-| **`RegQueryValueExW`** | `kernelbase.dll` / `advapi32.dll` | Queries virtual overlay and tombstones; falls back to host OS for unshadowed reads. |
-| **`RegSetValueExW`** | `kernelbase.dll` / `advapi32.dll` | Stores typed value in memory and atomically persists to `.ppm/system/registry.json`. |
-| **`RegDeleteValueW` / `RegDeleteKeyW`** | `kernelbase.dll` / `advapi32.dll` | Records tombstones in virtual store, masking host values. |
+| **`RegQueryValueExW`** | `kernelbase.dll` / `advapi32.dll` | Queries virtual overlay and tombstones; falls back to host OS for unshadowed reads. Unreadable stored bytes read as absent rather than unmasking host data. |
+| **`RegGetValueW`** | `kernelbase.dll` / `advapi32.dll` | Resolves `lpSubKey` against the overlay. Without this hook the API opened its subkey through an internal entry point and the read escaped to the host. Applies the `RRF_RT_*` type filter, REG_EXPAND_SZ expansion and the string NUL-termination guarantee. |
+| **`RegSetValueExW`** | `kernelbase.dll` / `advapi32.dll` | Stores the typed value in memory and appends one record to the `.ppm/system/registry.jsonl` journal. Appending is O(1) and cannot erase another process's records - the previous shape re-serialized the whole hive per write, so one injected process's snapshot silently dropped the keys another had written. |
+| **`RegDeleteValueW`, `RegDeleteKeyW`, `RegDeleteKeyExW`, `RegDeleteTreeW`** | `kernelbase.dll` / `advapi32.dll` | Records tombstones in the virtual store, masking host values and keys. `RegDeleteKeyExW` and `RegDeleteTreeW` reach `RegDeleteKeyExInternalW` without passing through `RegDeleteKeyW`, so leaving them unhooked deleted keys in the **real host registry**. Tombstones resolve through ancestors, so a deleted key also masks host-only children; `RegDeleteTreeW` keeps the key and masks its subkeys and values. |
+| **`RegOpenCurrentUser`** | `kernelbase.dll` / `advapi32.dll` | Registers the returned handle as the `HKCU` hive so operations on it stay tracked. |
 | **`RegCloseKey`** | `kernelbase.dll` / `advapi32.dll` | Cleans up handles in `VirtualHandleTable`. |
-| **`CreateProcessW`** | `kernelbase.dll` / `kernel32.dll` | Injects `redirector.dll` into spawned child processes via Microsoft Detours. |
-| **`CredReadW`, `CredWriteW`, `CredDeleteW`** | `advapi32.dll` | Intercepts credentials and persists to encrypted `.ppm/system/credentials.json`. |
+| **`CredReadW`, `CredWriteW`, `CredDeleteW`, `CredEnumerateW`** | `advapi32.dll` | Intercepts credentials and persists to `.ppm/system/credentials.json` (plaintext at rest - see SPEC §3). Reads, deletes and enumerations are clean-roomed: the host credential store is never modified and never leaks into the application. |
 | **`SHGetKnownFolderPath`** | `shell32.dll` | Redirects `FOLDERID_Profile`, `FOLDERID_LocalAppData`, `FOLDERID_RoamingAppData`, `FOLDERID_Documents` to `<root>\Home\...`. |
 | **`GetUserProfileDirectoryW`** | `userenv.dll` | Returns `<root>\Home` as user profile directory. |
 | **`SetCurrentProcessExplicitAppUserModelID`** | `shell32.dll` | Proactively sets a root-scoped identity (`PPM.Portable.<root-hash>.<App>`) during DLL attach, and maps app-initiated calls into the same isolated domain. |
+A registry handle the engine never watched being opened has no knowable key path. Reads on such
+a handle fall through to the host (the documented copy-on-write behavior), while mutations are
+refused with `ERROR_INVALID_HANDLE`: writing through to the host would breach the boundary, and
+accepting the write under a placeholder key would store it where no read could reach it.
+
+ANSI registry APIs (`RegSetValueExA`, `RegQueryValueExA`, `RegEnumValueA`, …) are independent
+implementations in kernelbase that do not route through their wide counterparts, and value and
+key **enumeration** (`RegEnumValueW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`) is not intercepted
+yet: an application that writes a value through the boundary and then enumerates its key will
+not see its own write. Both are known gaps, not covered surface.
+
 Kernel synchronization objects, named pipes, and host window discovery are intentionally **not**
 intercepted. An exploration of that boundary (33 additional Win32 detours) is preserved on the
 `explore/sync-isolation` branch and can be resurrected if a real application exhibits fixed-name
@@ -144,17 +156,18 @@ crates/redirector/src/
 │
 ├── registry/                       # Registry Virtualization
 │   ├── mod.rs                      # Registry module export & initialization
-│   ├── store.rs                    # In-Memory Hive & Atomic JSON Persistence (.ppm/system/registry.json)
-│   ├── handle_table.rs             # Virtual Handle Table & Pseudo-Handle Mapping
+│   ├── store.rs                    # In-Memory Hive, Ancestor-Aware Tombstones & Op Model
+│   ├── journal.rs                  # Append-Only Op Journal, Replay & Compaction (.ppm/system/registry.jsonl)
+│   ├── handle_table.rs             # Virtual Handle Table, Key Scope & Pseudo-Handle Mapping
 │   └── hooks.rs                    # Win32 (KernelBase / advapi32) Detour Hooks
 │
 ├── process/                        # Process Virtualization
 │   ├── mod.rs                      # Process module export & initialization
-│   └── hooks.rs                    # CreateProcessW Detour Hook
+│   └── hooks.rs                    # CreateProcessW / A / AsUserW Detour Hooks
 │
 ├── credentials/                    # Credential Store Virtualization
 │   ├── mod.rs                      # Credentials module export & initialization
-│   ├── vault.rs                    # Encrypted Credential Vault (.ppm/system/credentials.json)
+│   ├── vault.rs                    # Portable Credential Vault, keyed by target+type (.ppm/system/credentials.json)
 │   └── hooks.rs                    # Cred* API Detours
 │
 └── shell/                            # Shell & Profile Virtualization

@@ -1,4 +1,4 @@
-use ppm::core::config::{PackageConfig, PostInstallConfig};
+use ppm::core::config::{PackageConfig, PackageKind, PostInstallConfig};
 use ppm::package::extractor::extract_package;
 use ppm::package::sanitizer::sanitize_package;
 use std::fs;
@@ -23,7 +23,8 @@ fn test_zip_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_zip");
 
-    let config = PackageConfig::Zip {
+    let config = PackageConfig {
+        kind: PackageKind::Zip,
         extract_subpath: None,
     };
     let res = extract_package(&fixture_path, &config, &dest_dir);
@@ -40,7 +41,8 @@ fn test_sevenz_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_7z");
 
-    let config = PackageConfig::SevenZ {
+    let config = PackageConfig {
+        kind: PackageKind::SevenZ,
         extract_subpath: None,
     };
     let res = extract_package(&fixture_path, &config, &dest_dir);
@@ -57,7 +59,8 @@ fn test_cab_pure_rust_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_cab");
 
-    let config = PackageConfig::Cab {
+    let config = PackageConfig {
+        kind: PackageKind::Cab,
         extract_subpath: None,
     };
     let res = extract_package(&fixture_path, &config, &dest_dir);
@@ -74,7 +77,8 @@ fn test_msi_embedded_pure_rust_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_msi_embedded");
 
-    let config = PackageConfig::Msi {
+    let config = PackageConfig {
+        kind: PackageKind::Msi,
         extract_subpath: None,
     };
     let res = extract_package(&fixture_path, &config, &dest_dir);
@@ -95,7 +99,8 @@ fn test_msi_external_cab_pure_rust_extraction_with_real_fixture() {
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let dest_dir = temp_dir.path().join("extracted_msi_external");
 
-    let config = PackageConfig::Msi {
+    let config = PackageConfig {
+        kind: PackageKind::Msi,
         extract_subpath: None,
     };
     let res = extract_package(&fixture_path, &config, &dest_dir);
@@ -119,7 +124,10 @@ fn test_binary_package_deployment() {
     let binary_bytes = b"MZ\x90\x00_standalone_utility_raw_bytes";
     fs::write(&bin_path, binary_bytes).unwrap();
 
-    let config = PackageConfig::Binary;
+    let config = PackageConfig {
+        kind: PackageKind::Binary,
+        extract_subpath: None,
+    };
     let res = extract_package(&bin_path, &config, &dest_dir);
     assert!(res.is_ok(), "Binary package deployment must succeed: {:?}", res);
 
@@ -135,7 +143,8 @@ fn test_staging_directory_raii_cleanup_on_failure() {
     fs::write(&invalid_file, b"corrupted_non_zip_header").unwrap();
 
     let dest_dir = temp_dir.path().join("test_app_dir");
-    let config = PackageConfig::Zip {
+    let config = PackageConfig {
+        kind: PackageKind::Zip,
         extract_subpath: None,
     };
 

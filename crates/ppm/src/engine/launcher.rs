@@ -1,35 +1,47 @@
 use crate::core::config::AppManifests;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
+
+/// The launcher script for one application id.
+///
+/// # Why one builder
+/// `generate_launchers` and `generate_single_launcher` each carried a full copy of this
+/// template, so every change to the script had to be made twice or the two would drift.
+fn launcher_script(app_id: &str) -> String {
+    format!(
+        "@echo off
+        setlocal
+        set \"ROOT_DIR=%~dp0\"
+        set \"PPM_EXE=%ROOT_DIR%ppm.exe\"
+        
+        if not exist \"%PPM_EXE%\" (
+            echo [ERROR] ppm.exe not found at root: %ROOT_DIR%
+            pause
+            exit /b 1
+        )
+        
+        start \"\" \"%PPM_EXE%\" run {app_id} %*
+        exit /b 0
+"
+    )
+}
+
+/// Writes one launcher and returns its file name.
+fn write_launcher(root: &Path, app_id: &str) -> Result<String> {
+    let bat_filename = format!("{app_id}.bat");
+    let bat_path = root.join(&bat_filename);
+    fs::write(&bat_path, launcher_script(app_id))
+        .with_context(|| format!("Failed to write launcher '{}'", bat_path.display()))?;
+    Ok(bat_filename)
+}
 
 pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<String>> {
     let mut generated = Vec::new();
 
     for (app_id, app_def) in &manifests.apps {
         if app_def.is_installed_any_arch(root) {
-            let bat_filename = format!("{}.bat", app_id);
-            let bat_path = root.join(&bat_filename);
-
-            let content = format!(
-                "@echo off\r\n\
-                setlocal\r\n\
-                set \"ROOT_DIR=%~dp0\"\r\n\
-                set \"PPM_EXE=%ROOT_DIR%ppm.exe\"\r\n\
-                \r\n\
-                if not exist \"%PPM_EXE%\" (\r\n\
-                    echo [ERROR] ppm.exe not found at root: %ROOT_DIR%\r\n\
-                    pause\r\n\
-                    exit /b 1\r\n\
-                )\r\n\
-                \r\n\
-                start \"\" \"%PPM_EXE%\" run {} %*\r\n\
-                exit /b 0\r\n",
-                app_id
-            );
-
-            fs::write(&bat_path, content)?;
-            generated.push(bat_filename);
+            generated.push(write_launcher(root, app_id)?);
         }
     }
 
@@ -37,27 +49,7 @@ pub fn generate_launchers(root: &Path, manifests: &AppManifests) -> Result<Vec<S
 }
 
 pub fn generate_single_launcher(root: &Path, app_id: &str) -> Result<()> {
-    let bat_filename = format!("{}.bat", app_id);
-    let bat_path = root.join(&bat_filename);
-
-    let content = format!(
-        "@echo off\r\n\
-        setlocal\r\n\
-        set \"ROOT_DIR=%~dp0\"\r\n\
-        set \"PPM_EXE=%ROOT_DIR%ppm.exe\"\r\n\
-        \r\n\
-        if not exist \"%PPM_EXE%\" (\r\n\
-            echo [ERROR] ppm.exe not found at root: %ROOT_DIR%\r\n\
-            pause\r\n\
-            exit /b 1\r\n\
-        )\r\n\
-        \r\n\
-        start \"\" \"%PPM_EXE%\" run {} %*\r\n\
-        exit /b 0\r\n",
-        app_id
-    );
-
-    fs::write(&bat_path, content)?;
+    write_launcher(root, app_id)?;
     Ok(())
 }
 

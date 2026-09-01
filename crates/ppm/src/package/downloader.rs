@@ -5,11 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<()> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("ppm-portable-package-manager/0.1")
-        .build()?;
-
-    let mut response = client.get(url).send()?;
+    let mut response = crate::package::http::download_client()?.get(url).send()?;
 
     if !response.status().is_success() {
         bail!("Download failed with HTTP status code: {}", response.status());

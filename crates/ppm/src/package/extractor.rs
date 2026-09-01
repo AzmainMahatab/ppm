@@ -1,4 +1,4 @@
-use crate::core::config::PackageConfig;
+use crate::core::config::{PackageConfig, PackageKind};
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -295,7 +295,11 @@ pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
 
 pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest_dir: &Path) -> Result<()> {
     let stage_dir = dest_dir.join("__stage_extract");
-    if let Err(error) = fs::remove_dir_all(&stage_dir) {
+    // A staging directory left over from an interrupted run must go; its *absence* is the
+    // normal case and was previously reported as a warning on every single install.
+    if let Err(error) = fs::remove_dir_all(&stage_dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
         eprintln!(
             "Warning: failed to clear stale staging directory '{}': {error}",
             stage_dir.display()
@@ -305,13 +309,12 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
 
     let _guard = StagingGuard(&stage_dir);
 
-    let extract_subpath = match package_config {
-        PackageConfig::Nsis7z { extract_subpath } => {
+    match package_config.kind {
+        PackageKind::Nsis7z => {
             let offset = find_7z_offset(archive_path)?;
             extract_7z_stream(archive_path, offset, &stage_dir)?;
-            extract_subpath.as_deref()
         }
-        PackageConfig::SevenZ { extract_subpath } => {
+        PackageKind::SevenZ => {
             if let Err(e) = sevenz_rust::decompress_file(archive_path, &stage_dir) {
                 bail!(
                     "7-Zip decompression failed for '{}': {}",
@@ -319,41 +322,45 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
                     e
                 );
             }
-            extract_subpath.as_deref()
         }
-        PackageConfig::Zip { extract_subpath } => {
-            extract_zip(archive_path, &stage_dir)?;
-            extract_subpath.as_deref()
+        PackageKind::Zip => extract_zip(archive_path, &stage_dir)?,
+        PackageKind::Cab => extract_cab(archive_path, &stage_dir)?,
+        PackageKind::Msi => extract_msi(archive_path, &stage_dir)?,
+        PackageKind::Tar => {
+            // Honest halt: this arm used to dispatch to `extract_zip`, which cannot read a tar
+            // archive and failed with a ZIP parse error that named the wrong format. No tar
+            // reader is linked into this build, so the manifest declares a format the engine
+            // cannot unpack - say so instead of mis-dispatching.
+            bail!(
+                "package type 'tar' is declared for '{}' but no tar extractor is implemented in this build;                  repackage the release as zip/7z or add a tar reader",
+                archive_path.display()
+            );
         }
-        PackageConfig::Cab { extract_subpath } => {
-            extract_cab(archive_path, &stage_dir)?;
-            extract_subpath.as_deref()
-        }
-        PackageConfig::Msi { extract_subpath } => {
-            extract_msi(archive_path, &stage_dir)?;
-            extract_subpath.as_deref()
-        }
-        PackageConfig::Tar { extract_subpath } => {
-            extract_zip(archive_path, &stage_dir)?;
-            extract_subpath.as_deref()
-        }
-        PackageConfig::Binary => {
+        PackageKind::Binary => {
             let file_name = archive_path.file_name().unwrap_or_default();
             let dest_file = stage_dir.join(file_name);
             fs::copy(archive_path, &dest_file)?;
-            None
         }
+    }
+
+    // `binary` has no archive to descend into, so a subpath cannot apply to it.
+    let extract_subpath = match package_config.kind {
+        PackageKind::Binary => None,
+        _ => package_config.extract_subpath.as_deref(),
     };
 
-    let source_root = if let Some(sub) = extract_subpath {
-        let custom_sub = stage_dir.join(sub);
-        if custom_sub.exists() {
-            custom_sub
-        } else {
-            stage_dir.clone()
+    let source_root = match extract_subpath {
+        Some(sub) => {
+            let declared = stage_dir.join(sub);
+            if !declared.is_dir() {
+                bail!(
+                    "extract_subpath '{sub}' does not exist in the extracted payload of '{}';                      refusing to install the archive root instead of the declared subdirectory",
+                    archive_path.display()
+                );
+            }
+            declared
         }
-    } else {
-        find_payload_root(&stage_dir)
+        None => find_payload_root(&stage_dir),
     };
 
     fs::create_dir_all(dest_dir)?;

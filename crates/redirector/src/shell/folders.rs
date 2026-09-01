@@ -4,7 +4,7 @@ use crate::{BOOL, TRUE};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicPtr;
-use windows_sys::Win32::Foundation::{HANDLE, HWND, S_OK};
+use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, HWND, S_OK, SetLastError};
 use windows_sys::core::{GUID, HRESULT};
 
 #[allow(clippy::upper_case_acronyms)]
@@ -57,6 +57,10 @@ const E_INSUFFICIENT_BUFFER: HRESULT = 0x8007_007A_u32 as i32;
 // including the NUL terminator; the hook must honor that contract or overflow it.
 const CSIDL_BUFFER_WCHARS: usize = 260;
 
+// HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY): the documented result when a known-folder
+// query cannot allocate the buffer it must hand back to the caller.
+const E_OUTOFMEMORY: HRESULT = 0x8007_000E_u32 as i32;
+
 type FnSHGetKnownFolderPath = unsafe extern "system" fn(*const GUID, u32, HANDLE, *mut PWSTR) -> HRESULT;
 type FnSHGetFolderPathW = unsafe extern "system" fn(HWND, i32, HANDLE, u32, PWSTR) -> HRESULT;
 type FnGetUserProfileDirectoryW = unsafe extern "system" fn(HANDLE, PWSTR, *mut u32) -> BOOL;
@@ -108,10 +112,19 @@ unsafe extern "system" fn hook_sh_get_known_folder_path(
                 };
 
                 if let Some(w) = target_w {
+                    let allocated = alloc_cotask_wide_string(w);
+                    if allocated.is_null() {
+                        // Publishing a null path alongside S_OK would hand the caller a pointer
+                        // it is contractually entitled to dereference and then free.
+                        tracing::error!(
+                            "SHGetKnownFolderPath: CoTaskMemAlloc failed for the redirected path"
+                        );
+                        return E_OUTOFMEMORY;
+                    }
                     // SAFETY: `path_out` is non-null (checked above) and is the caller-owned
-                    // PWSTR out-parameter.
+                    // PWSTR out-parameter; `allocated` is a live CoTaskMem buffer.
                     unsafe {
-                        *path_out = alloc_cotask_wide_string(w);
+                        *path_out = allocated;
                     }
                     return S_OK;
                 }
@@ -200,6 +213,10 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
             unsafe {
                 if profile_dir.is_null() || *size < needed_len {
                     *size = needed_len;
+                    // GetUserProfileDirectoryW documents ERROR_INSUFFICIENT_BUFFER for this
+                    // case; without setting it the caller reads whatever error happened to be
+                    // left on the thread and cannot tell a short buffer from a real failure.
+                    SetLastError(ERROR_INSUFFICIENT_BUFFER);
                     return windows_sys::Win32::Foundation::FALSE;
                 }
 

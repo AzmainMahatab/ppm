@@ -123,13 +123,23 @@ fn test_e2e_virtualization_with_probe() {
         stderr_str
     );
 
-    let reg_json = env.root().join(".ppm").join("system").join("registry.json");
-    assert!(reg_json.is_file(), "registry.json should exist in .ppm/system");
-    let reg_content = fs::read_to_string(reg_json).unwrap();
+    // The hive is an append-only journal: one record per intercepted mutation, so the probe's
+    // registry writes must be durable in it rather than in a rewritten snapshot file.
+    let reg_journal = env.root().join(".ppm").join("system").join("registry.jsonl");
+    assert!(
+        reg_journal.is_file(),
+        "registry.jsonl should exist in .ppm/system"
+    );
+    let reg_content = fs::read_to_string(&reg_journal).unwrap();
     assert!(
         reg_content.contains("PPMTESTPROBE") || reg_content.contains("PPMTestProbe"),
-        "registry.json must contain intercepted keys"
+        "the registry journal must contain the intercepted keys"
     );
+    // Every record is one line of JSON; a torn or concatenated record would break replay.
+    for (index, line) in reg_content.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("registry journal record {index} is not valid JSON: {e}"));
+    }
 
     let cred_json = env.root().join(".ppm").join("system").join("credentials.json");
     assert!(
@@ -313,5 +323,43 @@ fn test_e2e_cross_directory_invocation() {
     assert!(
         stdout_str.contains("[ARGS_ECHO]"),
         "Child process must run and echo args in cross-directory invocation"
+    );
+}
+
+/// The root launch obeys the same fail-fast injection contract as a spawned child (ADR-006):
+/// without the engine deployed, `ppm run` must refuse rather than start the application
+/// unvirtualized, where it would write to the real registry and the real user profile while
+/// reporting success.
+#[test]
+#[cfg(windows)]
+fn test_e2e_run_refuses_to_launch_without_the_engine() {
+    let env = TestEnvironment::new();
+    env.deploy_binary("TestProbe", "test-probe.exe");
+    env.write_manifest(SINGLE_PROBE_MANIFEST);
+
+    let engine = env.root().join(".ppm").join("lib").join("redirector.dll");
+    assert!(engine.is_file(), "init must have deployed the engine");
+    fs::remove_file(&engine).expect("the engine must be removable for this test");
+
+    let output = Command::new(env.root().join("ppm.exe"))
+        .args(["run", "test-probe"])
+        .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
+        .output()
+        .expect("Failed to run ppm run test-probe");
+
+    assert!(
+        !output.status.success(),
+        "ppm run must fail when the engine is absent instead of launching unvirtualized"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Virtualization engine missing"),
+        "the refusal must name the missing engine. Stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("ppm init"),
+        "the refusal must tell the user how to fix it. Stderr: {stderr}"
     );
 }

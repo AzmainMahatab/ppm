@@ -8,9 +8,9 @@ the embedded `redirector.dll` engine enforces five isolation boundaries via Micr
 
 | # | Isolation Boundary | Intercepted APIs | Effect |
 | :--- | :--- | :--- | :--- |
-| 1 | Registry (Copy-on-Write) | `RegCreateKeyExW`, `RegSetValueExW`, `RegQueryValueExW`, `RegDeleteValueW`, `RegEnumKeyExW`, … | Host registry reads fall through; writes persist to `.ppm/system/registry.json` |
-| 2 | Process Spawning | `CreateProcessW` | Child processes are re-injected with the engine and inherit virtualization; injection is policy-gated (CIG/ACG kernel query) and fail-fast - unverifiable state refuses the spawn with the real error instead of running an unvirtualized child |
-| 3 | Credential Vault | `CredReadW`, `CredWriteW`, `CredDeleteW` | Windows generic credentials persist encrypted to `.ppm/system/credentials.json` |
+| 1 | Registry (Copy-on-Write) | `RegOpenKeyExW`, `RegCreateKeyExW`, `RegQueryValueExW`, `RegGetValueW`, `RegSetValueExW`, `RegDeleteValueW`, `RegDeleteKeyW`, `RegDeleteKeyExW`, `RegDeleteTreeW`, `RegOpenCurrentUser`, `RegCloseKey` | Host registry reads fall through; writes and deletes are virtualized into the append-only `.ppm/system/registry.jsonl` journal - O(1) per write, and no injected process can erase another's keys - with tombstones resolved through ancestors so a deleted key hides host-only children |
+| 2 | Process Spawning | `CreateProcessW`, `CreateProcessA`, `CreateProcessAsUserW` | Child processes are re-injected with the engine and inherit virtualization. All three entry points are hooked because each reaches `CreateProcessInternal*` independently. Injection is policy-gated (CIG/ACG kernel query) and fail-fast - an unverifiable policy, a failed injection or a failed resume refuses the spawn with the real error instead of running an unvirtualized child. `ppm run` refuses the root launch the same way when the engine is missing |
+| 3 | Credential Vault | `CredReadW`, `CredWriteW`, `CredDeleteW`, `CredEnumerateW`, `CredFree` | Credentials persist to `.ppm/system/credentials.json`, indexed by target *and* type. Plaintext at rest by design - see [SPEC.md](SPEC.md) §3. Reads, deletes and enumerations never touch or reveal the host credential store |
 | 4 | Config-Driven Environment | `apps.json` `env` (per-app) and `global_env` (any-launch) blocks with `{root}`/`{home}`/`{arch}` templates; core portable vars shielded from redefinition |
 | 5 | Shell Paths | `SHGetKnownFolderPath`, `GetUserProfileDirectoryW` | Profile, AppData (Local/Roaming), Documents and shell folders resolve into `Home/` |
 | 5 | Process Identity | `SetCurrentProcessExplicitAppUserModelID` | Root-scoped identity established proactively; app-initiated calls are re-parented |
@@ -30,8 +30,9 @@ the embedded `redirector.dll` engine enforces five isolation boundaries via Micr
   with host-architecture routing via `GetNativeSystemInfo`.
 * **Dependency-aware operations**: `install`/`update` resolve the application dependency DAG
   (dependencies installed first, cycles rejected).
-* **Broad package support**: zip, 7z (incl. LZMA2), tar, and MSI (embedded and external-CAB
-  layouts), with post-install sanitization.
+* **Broad package support**: zip, 7z (incl. LZMA2, and NSIS-embedded payloads), CAB, and MSI
+  (embedded and external-CAB layouts), with post-install sanitization. A `tar` package type is
+  accepted by the manifest schema but has no extractor in this build and fails loudly.
 * **Version intelligence**: local versions extracted from PE headers
   (`GetFileVersionInfoW`); remote versions resolved from configurable release endpoints.
 * **1-click launchers**: generated root-level `.bat` files for installed applications.

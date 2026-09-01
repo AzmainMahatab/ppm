@@ -1,5 +1,6 @@
 use crate::core::assets::{DEFAULT_APPS_JSON, EMBEDDED_REDIRECTOR_DLL};
-use crate::core::config::AppManifests;
+use crate::core::layout::PortableLayout;
+use crate::core::schema::write_schema_artifacts;
 use anyhow::{Context, bail};
 use std::fs;
 use std::path::Path;
@@ -57,7 +58,7 @@ fn extract_redirector_dll(root: &Path) -> anyhow::Result<()> {
 
 // Intention: Seed configuration exactly once; user-authored manifests are authoritative.
 fn ensure_default_config(root: &Path) -> anyhow::Result<()> {
-    let apps_json_path = root.join(".ppm").join("apps.json");
+    let apps_json_path = PortableLayout::new(root).deployed_manifest();
     let config_is_absent = !apps_json_path.exists();
 
     if config_is_absent {
@@ -71,21 +72,7 @@ fn ensure_default_config(root: &Path) -> anyhow::Result<()> {
 
 // Intention: Always regenerate schema artifacts so they can never drift from the code-defined model.
 fn regenerate_schema(root: &Path) -> anyhow::Result<()> {
-    let schema = schemars::schema_for!(AppManifests);
-    let schema_json = serde_json::to_string_pretty(&schema).context("Failed to serialize apps schema")?;
-
-    let schema_targets = [
-        root.join(".ppm").join("apps.schema.json"),
-        root.join("manifests").join("apps.schema.json"),
-    ];
-
-    for target in &schema_targets {
-        if target.parent().is_some_and(|parent| parent.is_dir()) {
-            fs::write(target, &schema_json)
-                .with_context(|| format!("Failed to write '{}'", target.display()))?;
-        }
-    }
-
+    write_schema_artifacts(root)?;
     println!("  ✓ Regenerated apps.schema.json");
 
     Ok(())

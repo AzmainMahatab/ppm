@@ -37,8 +37,8 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 │   ├── apps.schema.json                # Generated JSON Schema
 │   │
 │   ├── system/                         # Virtual overlays
-│   │   ├── registry.json               # Virtual registry hive
-│   │   └── credentials.json            # Encrypted credential store
+│   │   ├── registry.jsonl              # Virtual registry hive (append-only journal)
+│   │   └── credentials.json            # Portable credential store (plaintext at rest)
 │   │
 │   ├── lib/                            # Runtime libraries
 │   │   └── redirector.dll              # Injected virtualization library

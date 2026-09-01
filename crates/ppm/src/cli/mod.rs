@@ -8,10 +8,12 @@ use std::path::Path;
 use ppm::core::arch::ArchTarget;
 
 #[derive(Parser)]
+// `version` with no value takes CARGO_PKG_VERSION, so `ppm --version` can never drift from
+// the crate version the way the previous hard-coded literal did.
 #[command(
     name = "ppm",
     about = "Portable Package Manager & Virtualization Runner",
-    version = "0.1.0"
+    version
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
