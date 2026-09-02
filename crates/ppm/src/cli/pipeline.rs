@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use ppm::core::arch::CpuArch;
-use ppm::core::config::{AppDefinition, AppManifests};
+use ppm::core::config::{AppDefinition, AppManifests, PackageKind};
+use ppm::engine;
 use ppm::package;
 
 /// Resolves the dependency-closed install/update order for the target application.
@@ -63,20 +64,88 @@ pub(crate) fn resolve_install_order(
     Ok(order)
 }
 
-/// Installs a single application: fetch, download, extract, sanitize, clean.
-pub(crate) fn perform_install(
+/// The file extension a downloaded package is cached under.
+///
+/// # Why the URL is parsed rather than split
+/// This used to be `rsplit_once('.')` over the whole URL, which is a guess about a structured
+/// value: `https://host/v1.2/download` yields "2/download", producing a cache path with a
+/// separator inside it. Parsing the URL and reading the extension of its final path segment asks
+/// the question properly, and the manifest's declared package type answers it when the URL
+/// carries no extension at all.
+///
+/// # Ex
+/// `https://h/App-1.0.zip` -> `zip`; `https://h/v1.2/download` (nsis_7z) -> `exe`
+fn cache_extension(download_url: &str, kind: PackageKind) -> String {
+    let from_url = reqwest::Url::parse(download_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back().map(str::to_string))
+        })
+        .and_then(|segment| {
+            Path::new(&segment)
+                .extension()
+                .map(|extension| extension.to_string_lossy().into_owned())
+        })
+        .filter(|extension| !extension.is_empty());
+
+    from_url.unwrap_or_else(|| declared_extension(kind).to_string())
+}
+
+/// The archive extension implied by a manifest package type.
+fn declared_extension(kind: PackageKind) -> &'static str {
+    match kind {
+        // An NSIS installer is an executable carrying a 7z payload.
+        PackageKind::Nsis7z => "exe",
+        PackageKind::SevenZ => "7z",
+        PackageKind::Zip => "zip",
+        PackageKind::Cab => "cab",
+        PackageKind::Msi => "msi",
+        PackageKind::Tar => "tar",
+        PackageKind::Binary => "bin",
+    }
+}
+
+/// What to do about an application that is already installed for the target architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReinstallPolicy {
+    /// Leave it alone when its installed version already matches the latest release. This is
+    /// what both `install` and `update` do: installing something already current is a refresh,
+    /// and re-downloading it would be pure cost.
+    SkipWhenCurrent,
+    /// Fetch and reinstall regardless of what is present, for a repair after a damaged install.
+    Always,
+}
+
+/// What happened to one application for one architecture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InstallOutcome {
+    Installed { version: String },
+    AlreadyCurrent { version: String },
+    Unsupported,
+}
+
+/// Decides whether `installed` already satisfies `available` under `policy`.
+///
+/// Extracted so the rule is testable without a network round trip: the whole point of the
+/// policy is what it does with a version pair.
+fn is_already_current(policy: ReinstallPolicy, installed: Option<&str>, available: &str) -> bool {
+    match policy {
+        ReinstallPolicy::Always => false,
+        ReinstallPolicy::SkipWhenCurrent => installed == Some(available),
+    }
+}
+
+/// Installs or refreshes a single application: resolve, fetch, download, extract, sanitize.
+pub(crate) fn install_app(
     root: &Path,
     app_id: &str,
     app_def: &AppDefinition,
     arch: CpuArch,
-) -> anyhow::Result<()> {
+    policy: ReinstallPolicy,
+) -> anyhow::Result<InstallOutcome> {
     if !app_def.is_supported_on_arch(arch) {
-        println!(
-            "  • Skipping '{}' (Not supported on {})",
-            app_def.name,
-            arch.as_str()
-        );
-        return Ok(());
+        return Ok(InstallOutcome::Unsupported);
     }
 
     println!(
@@ -86,7 +155,11 @@ pub(crate) fn perform_install(
         arch.as_str()
     );
 
-    // 1. Fetch remote release metadata
+    // 1. Fetch remote release metadata.
+    //
+    // Why once: the update path used to check the remote version here and then call an
+    // installer that checked it again, paying two round trips per application to learn the
+    // same answer.
     println!("  • Checking online release for {}...", arch.as_str());
     let release = package::version::check_remote_version(&app_def.version_check, arch)?;
     println!(
@@ -94,21 +167,23 @@ pub(crate) fn perform_install(
         release.version, release.download_url
     );
 
+    let installed = package::version::detect_local_version(root, app_def, arch);
+    if is_already_current(policy, installed.as_deref(), &release.version) {
+        return Ok(InstallOutcome::AlreadyCurrent {
+            version: release.version,
+        });
+    }
+
     // 2. Download archive to isolated .ppm/cache/
     let temp_cache_dir = root.join(".ppm").join("cache");
     std::fs::create_dir_all(&temp_cache_dir)?;
 
-    let ext = release
-        .download_url
-        .rsplit_once('.')
-        .map(|(_, e)| e)
-        .unwrap_or("pkg");
     let temp_archive = temp_cache_dir.join(format!(
         "{}_{}_{}.{}",
         app_id,
         arch.as_str(),
         release.version,
-        ext
+        cache_extension(&release.download_url, app_def.package.kind)
     ));
 
     println!("  • Downloading package...");
@@ -135,12 +210,74 @@ pub(crate) fn perform_install(
         );
     }
 
-    println!(
-        "  ✓ Successfully installed {} [{}] (v{})",
-        app_def.name,
-        arch.as_str(),
-        release.version
-    );
+    Ok(InstallOutcome::Installed {
+        version: release.version,
+    })
+}
+
+/// Runs one install/refresh cycle over the dependency-closed order for `app`.
+///
+/// # Why `install` and `update` share this
+/// They differed only in whether they compared versions first, and the copies had already
+/// drifted: the update loop swallowed a failed remote check and still reported success, so
+/// `ppm update all` exited 0 with nothing updated. One cycle attempts every application and
+/// then reports what failed.
+pub(crate) fn run_install_cycle(
+    root: &Path,
+    manifests: &AppManifests,
+    app: &str,
+    target_archs: &[CpuArch],
+    policy: ReinstallPolicy,
+) -> anyhow::Result<()> {
+    let order = resolve_install_order(manifests, app)?;
+    let mut failures: Vec<String> = Vec::new();
+
+    for &arch in target_archs {
+        println!("\n=======================================================");
+        println!("  Targeting Architecture: [{}]", arch.as_str());
+        println!("=======================================================");
+
+        for app_id in &order {
+            let app_def = manifests
+                .apps
+                .get(app_id)
+                .expect("invariant: resolve_install_order only yields ids the manifest defines");
+
+            match install_app(root, app_id, app_def, arch, policy) {
+                Ok(InstallOutcome::Installed { version }) => println!(
+                    "  ✓ Successfully installed {} [{}] (v{version})",
+                    app_def.name,
+                    arch.as_str()
+                ),
+                Ok(InstallOutcome::AlreadyCurrent { version }) => println!(
+                    "  ✓ {} [{}] is already up to date (v{version})",
+                    app_def.name,
+                    arch.as_str()
+                ),
+                Ok(InstallOutcome::Unsupported) => println!(
+                    "  • Skipping '{}' (Not supported on {})",
+                    app_def.name,
+                    arch.as_str()
+                ),
+                Err(error) => {
+                    // Keep going so one unreachable endpoint does not strand every other
+                    // application, but remember it: the cycle must not report success.
+                    eprintln!("  ✗ {} [{}]: {error:#}", app_def.name, arch.as_str());
+                    failures.push(format!("{} [{}]: {error:#}", app_def.name, arch.as_str()));
+                }
+            }
+        }
+    }
+
+    engine::launcher::generate_launchers(root, manifests)?;
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} of the requested installations failed:\n  - {}",
+            failures.len(),
+            failures.join("\n  - ")
+        );
+    }
 
     Ok(())
 }
@@ -167,6 +304,61 @@ mod tests {
             def["dependencies"] = json!(deps);
         }
         def
+    }
+
+    #[test]
+    fn a_current_installation_is_skipped_unless_forced() {
+        assert!(is_already_current(
+            ReinstallPolicy::SkipWhenCurrent,
+            Some("1.2.3"),
+            "1.2.3"
+        ));
+        assert!(!is_already_current(
+            ReinstallPolicy::SkipWhenCurrent,
+            Some("1.2.2"),
+            "1.2.3"
+        ));
+        // Nothing installed is never "already current", whatever the policy.
+        assert!(!is_already_current(
+            ReinstallPolicy::SkipWhenCurrent,
+            None,
+            "1.2.3"
+        ));
+        // Force reinstalls even an exact match - that is what repairs a damaged install.
+        assert!(!is_already_current(
+            ReinstallPolicy::Always,
+            Some("1.2.3"),
+            "1.2.3"
+        ));
+    }
+
+    #[test]
+    fn the_cache_extension_comes_from_the_url_path() {
+        assert_eq!(
+            cache_extension("https://host/releases/App-1.0.zip", PackageKind::Zip),
+            "zip"
+        );
+        assert_eq!(
+            cache_extension("https://host/releases/App.tar.gz", PackageKind::Zip),
+            "gz"
+        );
+        // Query strings and fragments are not part of the path.
+        assert_eq!(
+            cache_extension("https://host/App-1.0.7z?token=abc", PackageKind::SevenZ),
+            "7z"
+        );
+    }
+
+    /// Regression: the extension was taken by splitting the whole URL on its last dot, so a
+    /// versioned path with no file extension produced a cache name containing a separator.
+    #[test]
+    fn an_extensionless_url_falls_back_to_the_declared_package_type() {
+        assert_eq!(
+            cache_extension("https://host/v1.2/download", PackageKind::Nsis7z),
+            "exe"
+        );
+        assert_eq!(cache_extension("https://host/download", PackageKind::Msi), "msi");
+        assert_eq!(cache_extension("not a url at all", PackageKind::Zip), "zip");
     }
 
     #[test]

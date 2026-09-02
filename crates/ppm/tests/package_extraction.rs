@@ -2,7 +2,7 @@ use ppm::core::config::{PackageConfig, PackageKind, PostInstallConfig};
 use ppm::package::extractor::extract_package;
 use ppm::package::sanitizer::sanitize_package;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn find_fixture_path(name: &str) -> PathBuf {
     let candidates = [
@@ -151,12 +151,84 @@ fn test_staging_directory_raii_cleanup_on_failure() {
     let res = extract_package(&invalid_file, &config, &dest_dir);
     assert!(res.is_err(), "Corrupted package extraction must fail");
 
-    // Staging directory __stage_extract must be completely cleaned up by RAII guard
-    let stage_dir = dest_dir.join("__stage_extract");
-    assert!(
-        !stage_dir.exists(),
-        "Staging directory must not remain on failure"
+    // The staging directory is a sibling of the destination and must not survive the failure.
+    let staging = dest_dir.parent().unwrap().join(format!(
+        ".{}.staging",
+        dest_dir.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(!staging.exists(), "Staging directory must not remain on failure");
+}
+/// Regression: the payload was copied over the previous installation, so every file the new
+/// release no longer ships survived - an update produced the union of both versions.
+#[test]
+fn reinstall_removes_files_the_new_release_no_longer_ships() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let dest_dir = temp_dir.path().join("Apps").join("x64").join("DemoApp");
+    let config = PackageConfig {
+        kind: PackageKind::Zip,
+        extract_subpath: None,
+    };
+
+    // A first release carrying a module that the second one drops.
+    let first = temp_dir.path().join("first.zip");
+    write_zip(&first, &[("app.exe", b"v1"), ("legacy_module.dll", b"obsolete")]);
+    extract_package(&first, &config, &dest_dir).expect("first install");
+    assert!(dest_dir.join("legacy_module.dll").is_file());
+
+    // The second release ships only the executable.
+    let second = temp_dir.path().join("second.zip");
+    write_zip(&second, &[("app.exe", b"v2")]);
+    extract_package(&second, &config, &dest_dir).expect("reinstall");
+
+    assert_eq!(
+        fs::read(dest_dir.join("app.exe")).unwrap(),
+        b"v2",
+        "the new payload must be in place"
     );
+    assert!(
+        !dest_dir.join("legacy_module.dll").exists(),
+        "a file the new release no longer ships must not survive the update"
+    );
+}
+
+/// The scratch directories live beside the destination so the payload can be moved into place,
+/// and neither may outlive the extraction.
+#[test]
+fn swap_scratch_directories_do_not_survive_an_install() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let dest_dir = temp_dir.path().join("Apps").join("x64").join("DemoApp");
+    let config = PackageConfig {
+        kind: PackageKind::Zip,
+        extract_subpath: None,
+    };
+
+    let archive = temp_dir.path().join("payload.zip");
+    write_zip(&archive, &[("app.exe", b"v1")]);
+    extract_package(&archive, &config, &dest_dir).expect("install");
+
+    let parent = dest_dir.parent().unwrap();
+    assert!(
+        !parent.join(".DemoApp.staging").exists(),
+        "staging must be cleaned"
+    );
+    assert!(
+        !parent.join(".DemoApp.previous").exists(),
+        "retired tree must be cleaned"
+    );
+    assert!(dest_dir.join("app.exe").is_file());
+}
+
+/// Builds a zip fixture from in-memory entries.
+fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+    use std::io::Write;
+    let file = fs::File::create(path).expect("create zip");
+    let mut zip = zip::ZipWriter::new(file);
+    for (name, contents) in entries {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .expect("start entry");
+        zip.write_all(contents).expect("write entry");
+    }
+    zip.finish().expect("finish zip");
 }
 
 #[test]

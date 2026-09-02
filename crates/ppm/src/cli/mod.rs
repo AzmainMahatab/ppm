@@ -43,7 +43,10 @@ pub(crate) enum Commands {
         arch: ArchTarget,
     },
 
-    /// Install one or all configured applications (resolves dependencies)
+    /// Install or refresh one or all configured applications (resolves dependencies).
+    ///
+    /// An application already installed at the latest version is left alone, so `install`
+    /// doubles as `update`; pass `--force` to reinstall it regardless.
     Install {
         /// Application identifier to install, or 'all'
         app: String,
@@ -51,6 +54,10 @@ pub(crate) enum Commands {
         /// Target CPU architecture (defaults to current host architecture)
         #[arg(short, long)]
         arch: Option<ArchTarget>,
+
+        /// Reinstall even when the installed version is already current
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Update outdated applications to the latest online release
@@ -91,7 +98,7 @@ pub(crate) fn execute(command: &Commands, root: &Path) -> anyhow::Result<()> {
         Commands::Init => commands::init::run(root),
         Commands::Run { app, args } => commands::run::run(root, app, args),
         Commands::Check { arch } => commands::check::run(root, *arch),
-        Commands::Install { app, arch } => commands::install::run(root, app, *arch),
+        Commands::Install { app, arch, force } => commands::install::run(root, app, *arch, *force),
         Commands::Update { app, arch } => commands::update::run(root, app, *arch),
         Commands::Link { app } => commands::link::run(root, app),
         Commands::List { arch } => commands::list::run(root, *arch),

@@ -15,7 +15,7 @@ A lightweight, single-binary portable application runner, virtualization engine,
   child-process re-injection, and root-scoped process identity (`AppUserModelID` +
   Portable Mode overlay badge).
 * **Multi-Architecture Package Management** — x64/arm64 binary organization, host-architecture
-  routing, dependency-DAG resolution, PE-header version detection, and zip/7z/tar/MSI installs.
+  routing, dependency-DAG resolution, PE-header version detection, and zip/7z/CAB/MSI installs.
 * **Deterministic Portable Layout** — fully self-contained `.ppm/` + `Apps/` + `Home/` structure.
 * **Verified Isolation** — a live Win32 probe exercises every boundary under full injection
   as part of the standard test suite.
@@ -100,8 +100,8 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 | :--- | :--- |
 | `ppm.exe init [--force]` | Scaffolds `.ppm/system/`, `.ppm/lib/`, `.ppm/cache/`, `.ppm/logs/`, `Apps/x64/`, `Apps/arm64/`, `Home/`. |
 | `ppm.exe check [--arch <x64\|arm64\|all>]` | Queries remote release endpoints for the latest versions. |
-| `ppm.exe install <app\|all> [--arch <x64\|arm64\|all>]` | Downloads and installs applications, resolving dependency DAGs. |
-| `ppm.exe update <app\|all> [--arch <x64\|arm64\|all>]` | Upgrades installed applications to the latest upstream release. |
+| `ppm.exe install <app\|all> [--arch <x64\|arm64\|all>] [--force]` | Downloads and installs applications, resolving dependency DAGs. An application already at the latest release is left alone, so this doubles as `update`; `--force` reinstalls it regardless. |
+| `ppm.exe update <app\|all> [--arch <x64\|arm64\|all>]` | Upgrades installed applications to the latest upstream release — the same cycle `install` runs. |
 | `ppm.exe run <app> [args...]` | Auto-detects host architecture and launches app with lowest-boundary virtualization. |
 | `ppm.exe list [--arch <x64\|arm64\|all>]` | Lists all configured apps and dynamic presence status across architectures. |
 | `ppm.exe link [app\|all]` | Generates prefix-free 1-click `.bat` root launchers for installed apps. |

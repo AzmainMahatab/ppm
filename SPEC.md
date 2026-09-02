@@ -137,7 +137,39 @@ Highest wins; conflicts resolve case-insensitively, and duplicate keys never rea
 - `apps.schema.json` is a derived artifact: generated from the Rust type model by `ppm init`, tracked for editor tooling, and guarded by a drift test - a schema/type mismatch fails the test battery.
 - The shipped default config is `manifests/apps.json` itself, embedded into the binary at build time; `ppm init` seeds roots with that exact file.
 
-## 6. Intentional Non-Goals
+## 6. Package Trust and Install Atomicity
+
+### 6.1 Trust model
+
+`ppm` treats **the latest release published by the upstream host as authoritative**. There is no
+hash pinning and no trust-on-first-use comparison, because an application that resolves to
+"latest" has no hash to pin ahead of time: a changed hash is the expected outcome of a new
+release, so warning about one would only train the user to ignore the warning.
+
+That leaves the transport as the trust boundary. Downloads are therefore refused unless the URL's
+scheme is `https`, since TLS is the only thing authenticating that the bytes came from the host
+the manifest names - and the payload is executed afterwards. A manifest pointing at `http://`
+fails the download rather than silently degrading to an unauthenticated fetch.
+
+Stated plainly: whoever controls the release endpoint controls what `ppm` installs and runs. Point
+the manifest only at endpoints you would trust with code execution.
+
+### 6.2 Install atomicity
+
+An install extracts into a staging directory beside the destination, then swaps it in by rename:
+the previous installation is moved aside, the new payload is moved into place, and the retired
+copy is deleted. Three consequences follow.
+
+* An update **removes files the new release no longer ships**. Copying the payload over the
+  previous installation produced the union of both releases, which is how an application ends up
+  loading a module its own release notes say was removed.
+* The payload is moved rather than copied byte by byte, so install cost does not scale with the
+  size of the payload.
+* If the new payload cannot be moved into place, the retired installation is restored before the
+  error propagates. If a file in the current installation is open - the application is running -
+  the update fails and changes nothing.
+
+## 7. Intentional Non-Goals
 
 Kernel synchronization objects, named pipes, and host window discovery are **not**
 intercepted. An exploration of that boundary lives on the `explore/sync-isolation`

@@ -8,17 +8,110 @@ use std::process::Command;
 
 const SEVENZ_SIGNATURE: &[u8] = &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
-struct StagingGuard<'a>(&'a Path);
+/// The scratch directories one extraction needs.
+///
+/// Both sit beside the destination rather than inside it, so they share its volume - which is
+/// what lets the payload be moved into place by rename instead of copied - and so a staging
+/// directory can never be mistaken for part of the payload it is feeding.
+struct SwapPaths {
+    staging: PathBuf,
+    retired: PathBuf,
+}
 
-impl Drop for StagingGuard<'_> {
+fn swap_paths_for(dest_dir: &Path) -> Result<SwapPaths> {
+    let parent = dest_dir.parent().with_context(|| {
+        format!(
+            "Install destination '{}' has no parent directory to stage beside",
+            dest_dir.display()
+        )
+    })?;
+    let name = dest_dir
+        .file_name()
+        .with_context(|| format!("Install destination '{}' has no name", dest_dir.display()))?
+        .to_string_lossy()
+        .into_owned();
+
+    Ok(SwapPaths {
+        staging: parent.join(format!(".{name}.staging")),
+        retired: parent.join(format!(".{name}.previous")),
+    })
+}
+
+/// Removes a directory tree, treating its absence as success.
+fn remove_tree_if_present(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Failed to remove directory '{}'", path.display())),
+    }
+}
+
+struct StagingGuard(PathBuf);
+
+impl Drop for StagingGuard {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(self.0) {
-            eprintln!(
-                "Warning: failed to clean staging directory '{}': {error}",
-                self.0.display()
-            );
+        // The staging directory is often already gone by now - it becomes the installation
+        // itself when the payload sits at the archive root - so only a real failure is worth
+        // reporting.
+        if let Err(error) = remove_tree_if_present(&self.0) {
+            eprintln!("Warning: {error:#}");
         }
     }
+}
+
+/// Moves the extracted payload into place, replacing any previous installation wholesale.
+///
+/// # Why a rename rather than a copy
+/// Copying the payload over the previous installation left behind every file the new version no
+/// longer ships, so an update produced the union of both releases - which is how an application
+/// ends up loading a module its own release notes say was removed. Replacing the directory
+/// deletes what is gone by construction. The move is also a metadata operation instead of a byte
+/// copy of a payload that routinely runs to hundreds of megabytes.
+///
+/// # Why the previous tree is set aside rather than deleted
+/// Deleting first would leave the application missing outright if the new payload then failed to
+/// move into place. Retiring it keeps a restore available for exactly that window.
+fn install_payload(source_root: &Path, dest_dir: &Path, retired: &Path) -> Result<()> {
+    // A retired tree can only be left over from an interrupted run; the current one is about to
+    // take its place.
+    remove_tree_if_present(retired)?;
+
+    if let Some(parent) = dest_dir.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create the install parent directory '{}'",
+                parent.display()
+            )
+        })?;
+    }
+
+    let had_previous = dest_dir.exists();
+    if had_previous {
+        fs::rename(dest_dir, retired).with_context(|| {
+            format!(
+                "Failed to set aside the previous installation at '{}' - a file in it is most likely still open",
+                dest_dir.display()
+            )
+        })?;
+    }
+
+    if let Err(error) = fs::rename(source_root, dest_dir) {
+        if had_previous && let Err(restore) = fs::rename(retired, dest_dir) {
+            bail!(
+                "Failed to move the new payload into '{}' ({error}), and the previous installation could not be restored from '{}' ({restore}) - the application is left retired at that path",
+                dest_dir.display(),
+                retired.display()
+            );
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "Failed to move the extracted payload into '{}'",
+                dest_dir.display()
+            )
+        });
+    }
+
+    remove_tree_if_present(retired)
 }
 
 fn to_cmd_path(path: &Path) -> String {
@@ -294,20 +387,18 @@ pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
 }
 
 pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest_dir: &Path) -> Result<()> {
-    let stage_dir = dest_dir.join("__stage_extract");
-    // A staging directory left over from an interrupted run must go; its *absence* is the
-    // normal case and was previously reported as a warning on every single install.
-    if let Err(error) = fs::remove_dir_all(&stage_dir)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!(
-            "Warning: failed to clear stale staging directory '{}': {error}",
-            stage_dir.display()
-        );
-    }
-    fs::create_dir_all(&stage_dir)?;
+    let swap = swap_paths_for(dest_dir)?;
+    // Anything left at these paths is debris from an interrupted run.
+    remove_tree_if_present(&swap.staging)?;
+    fs::create_dir_all(&swap.staging).with_context(|| {
+        format!(
+            "Failed to create the staging directory '{}'",
+            swap.staging.display()
+        )
+    })?;
 
-    let _guard = StagingGuard(&stage_dir);
+    let stage_dir = swap.staging.clone();
+    let _guard = StagingGuard(swap.staging);
 
     match package_config.kind {
         PackageKind::Nsis7z => {
@@ -332,7 +423,7 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
             // reader is linked into this build, so the manifest declares a format the engine
             // cannot unpack - say so instead of mis-dispatching.
             bail!(
-                "package type 'tar' is declared for '{}' but no tar extractor is implemented in this build;                  repackage the release as zip/7z or add a tar reader",
+                "package type 'tar' is declared for '{}' but no tar extractor is implemented in this build; repackage the release as zip/7z or add a tar reader",
                 archive_path.display()
             );
         }
@@ -354,7 +445,7 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
             let declared = stage_dir.join(sub);
             if !declared.is_dir() {
                 bail!(
-                    "extract_subpath '{sub}' does not exist in the extracted payload of '{}';                      refusing to install the archive root instead of the declared subdirectory",
+                    "extract_subpath '{sub}' does not exist in the extracted payload of '{}'; refusing to install the archive root instead of the declared subdirectory",
                     archive_path.display()
                 );
             }
@@ -363,10 +454,7 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
         None => find_payload_root(&stage_dir),
     };
 
-    fs::create_dir_all(dest_dir)?;
-    copy_dir_recursive(&source_root, dest_dir)?;
-
-    Ok(())
+    install_payload(&source_root, dest_dir, &swap.retired)
 }
 
 fn find_payload_root(dir: &Path) -> PathBuf {
@@ -414,32 +502,6 @@ fn find_payload_root(dir: &Path) -> PathBuf {
     }
 
     dir.to_path_buf()
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-
-    if src.is_dir() {
-        fs::create_dir_all(dst)?;
-        let entries = fs::read_dir(src)?;
-
-        for entry in entries.flatten() {
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-
-            if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dst_path)?;
-            } else {
-                fs::copy(&src_path, &dst_path)?;
-            }
-        }
-    } else {
-        fs::copy(src, dst)?;
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

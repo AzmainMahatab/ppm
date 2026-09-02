@@ -29,7 +29,14 @@ the embedded `redirector.dll` engine enforces five isolation boundaries via Micr
 * **Dual-target installs**: native binaries organized per CPU (`Apps/x64/`, `Apps/arm64/`),
   with host-architecture routing via `GetNativeSystemInfo`.
 * **Dependency-aware operations**: `install`/`update` resolve the application dependency DAG
-  (dependencies installed first, cycles rejected).
+  (dependencies installed first, cycles rejected). Both run the same cycle: an application
+  already at the latest release is skipped, so `install` doubles as `update`, and `--force`
+  reinstalls regardless. One application failing does not strand the rest, and the command
+  reports that failure instead of exiting successfully with nothing done.
+* **Atomic installs**: the payload is staged beside the destination and swapped in by rename,
+  so an update deletes files the new release dropped instead of merging two versions, and a
+  failed swap restores the previous installation. Downloads require HTTPS - see
+  [SPEC.md](SPEC.md) section 6 for the trust model.
 * **Broad package support**: zip, 7z (incl. LZMA2, and NSIS-embedded payloads), CAB, and MSI
   (embedded and external-CAB layouts), with post-install sanitization. A `tar` package type is
   accepted by the manifest schema but has no extractor in this build and fails loudly.
