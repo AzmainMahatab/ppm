@@ -1,13 +1,15 @@
-use crate::detour::{guard_detour, hook_export, load_trampoline};
+use crate::detour::{guard_detour, hook_export, load_trampoline, try_load_trampoline};
+use crate::registry::enumeration::{HostListing, KeyView, ValueOrigin, cached_view, merge};
 use crate::registry::handle_table::{KeyScope, get_handle_table};
 use crate::registry::store::{KeyResolution, ValueResolution, get_registry_store};
-use crate::winstr::wide_to_string;
+use crate::winstr::{to_wide, wide_to_string};
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::sync::atomic::AtomicPtr;
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_SUCCESS,
-    HMODULE,
+    ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_KEY_DELETED, ERROR_MORE_DATA,
+    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, FILETIME, HMODULE,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ, RRF_NOEXPAND, RRF_RT_ANY,
@@ -248,6 +250,32 @@ type FnRegDeleteValueW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
 type FnRegDeleteKeyW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
 type FnRegDeleteKeyExW = unsafe extern "system" fn(HKEY, *const u16, u32, u32) -> i32;
 type FnRegDeleteTreeW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
+type FnRegEnumKeyExW = unsafe extern "system" fn(
+    HKEY,
+    u32,
+    *mut u16,
+    *mut u32,
+    *const u32,
+    *mut u16,
+    *mut u32,
+    *mut FILETIME,
+) -> i32;
+type FnRegEnumValueW =
+    unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *const u32, *mut u32, *mut u8, *mut u32) -> i32;
+type FnRegQueryInfoKeyW = unsafe extern "system" fn(
+    HKEY,
+    *mut u16,
+    *mut u32,
+    *const u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut FILETIME,
+) -> i32;
 type FnRegCloseKey = unsafe extern "system" fn(HKEY) -> i32;
 type FnRegOpenCurrentUser = unsafe extern "system" fn(u32, *mut HKEY) -> i32;
 
@@ -260,6 +288,9 @@ static REAL_REG_DELETE_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::nul
 static REAL_REG_DELETE_KEY_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_DELETE_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_DELETE_TREE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_ENUM_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_ENUM_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_QUERY_INFO_KEY_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_CLOSE_KEY: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_OPEN_CURRENT_USER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -662,6 +693,10 @@ unsafe extern "system" fn hook_reg_delete_tree_w(hkey: HKEY, lp_sub_key: *const 
 unsafe extern "system" fn hook_reg_close_key(hkey: HKEY) -> i32 {
     let real_fn: FnRegCloseKey = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_CLOSE_KEY)) };
     guard_detour!(&IN_REG_HOOK, unsafe { real_fn(hkey) }, {
+        // The cached listing is keyed by handle value, and handle values are reused: a stale
+        // entry would answer the next key opened at this address.
+        crate::registry::enumeration::forget(hkey as usize);
+
         if let Some(entry) = get_handle_table().close_handle(hkey.cast())
             && entry.is_synthetic
         {
@@ -691,6 +726,469 @@ unsafe extern "system" fn hook_reg_open_current_user(sam_desired: u32, phk_resul
         }
         status
     })
+}
+
+// ---------------------- ENUMERATION ----------------------
+
+/// Copies `name` into a caller name buffer that counts characters.
+///
+/// # Why this is not `serve_value`
+/// The value-data parameters count *bytes* and the caller's cell carries the buffer size on
+/// input; the name parameters of `RegEnumKeyExW` and `RegEnumValueW` count *characters*, with
+/// the input size including the terminator and the output size excluding it. Two conventions,
+/// two helpers - sharing one would have to branch on which meaning the cell currently holds.
+///
+/// # Safety
+/// `buffer` and `size` must be the caller-owned name out-parameters of the intercepted API.
+unsafe fn serve_name(name: &str, buffer: *mut u16, size: *mut u32) -> i32 {
+    if size.is_null() {
+        // The size cell is mandatory: without it the name buffer has no bound.
+        return ERROR_INVALID_PARAMETER as i32;
+    }
+
+    let encoded: Vec<u16> = name.encode_utf16().collect();
+    let required = encoded.len() as u32;
+
+    unsafe {
+        let capacity = *size;
+        if buffer.is_null() {
+            *size = required;
+            return ERROR_SUCCESS as i32;
+        }
+        // The caller's capacity includes room for the terminator; the reported length does not.
+        if capacity <= required {
+            *size = required;
+            return ERROR_MORE_DATA as i32;
+        }
+
+        std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer, encoded.len());
+        *buffer.add(encoded.len()) = 0;
+        *size = required;
+    }
+    ERROR_SUCCESS as i32
+}
+
+/// Walks an index-based Win32 name enumerator until it stops yielding entries.
+///
+/// Stopping at the first non-success is correct for this use: the enumerator reports
+/// `ERROR_NO_MORE_ITEMS` when the key is exhausted, and any other failure means the host has no
+/// further entries this engine can offer.
+///
+/// # Safety
+/// `step` must invoke a live registry enumerator with the index, name buffer and size cell it
+/// is given, and must not retain them.
+unsafe fn collect_host_names(mut step: impl FnMut(u32, *mut u16, *mut u32) -> i32) -> Vec<String> {
+    // A registry key name is bounded at 255 characters and a value name at 16383 (winreg.h), so
+    // one buffer at the larger bound serves both walks without a resize loop.
+    const MAX_REGISTRY_NAME_CHARS: usize = 16_384;
+
+    let mut names = Vec::new();
+    let mut buffer = vec![0u16; MAX_REGISTRY_NAME_CHARS];
+
+    for index in 0.. {
+        // The APIs overwrite the size cell, so the capacity is republished every iteration.
+        let mut size = MAX_REGISTRY_NAME_CHARS as u32;
+        if step(index, buffer.as_mut_ptr(), &mut size) != ERROR_SUCCESS as i32 {
+            break;
+        }
+        names.push(String::from_utf16_lossy(&buffer[..size as usize]));
+    }
+
+    names
+}
+
+/// Collects what the host registry itself lists under `hkey`.
+///
+/// Returns an empty listing for a synthetic key, which has no host counterpart to enumerate.
+///
+/// # Safety
+/// `hkey` must be a live host key handle, or the caller must pass `synthetic` for a handle this
+/// engine fabricated.
+unsafe fn host_listing(hkey: HKEY, synthetic: bool) -> HostListing {
+    if synthetic {
+        return HostListing::default();
+    }
+
+    // A trampoline this hook does not own may never have been published: the export could be
+    // absent on every module, in which case its slot stays null for the life of the process.
+    // Waiting for it - which is what `load_trampoline` does - would hang the application inside
+    // a registry call. The host's contribution to that axis is dropped instead, loudly: the
+    // overlay's own entries still enumerate correctly, and the omission reaches the log rather
+    // than silently changing what an application sees.
+    let enum_key: Option<FnRegEnumKeyExW> = try_load_trampoline(&REAL_REG_ENUM_KEY_EX_W)
+        .map(|trampoline| unsafe { std::mem::transmute(trampoline) });
+    let enum_value: Option<FnRegEnumValueW> = try_load_trampoline(&REAL_REG_ENUM_VALUE_W)
+        .map(|trampoline| unsafe { std::mem::transmute(trampoline) });
+    if enum_key.is_none() || enum_value.is_none() {
+        tracing::error!(
+            "Registry enumeration: a host enumerator is not hooked (RegEnumKeyExW: {}, RegEnumValueW: {}); host entries are omitted from the merged listing",
+            enum_key.is_some(),
+            enum_value.is_some()
+        );
+    }
+
+    let mut listing = HostListing::default();
+
+    // SAFETY: `hkey` is the caller's live host handle, and each closure forwards the buffer and
+    // size cell `collect_host_names` owns for the duration of the call.
+    unsafe {
+        if let Some(enum_key) = enum_key {
+            listing.subkeys = collect_host_names(|index, buffer, size| {
+                enum_key(
+                    hkey,
+                    index,
+                    buffer,
+                    size,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            });
+        }
+        if let Some(enum_value) = enum_value {
+            listing.values = collect_host_names(|index, buffer, size| {
+                enum_value(
+                    hkey,
+                    index,
+                    buffer,
+                    size,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            });
+        }
+    }
+
+    listing
+}
+
+/// The key an enumeration addresses, together with its merged listing.
+struct Listing {
+    path: String,
+    view: Arc<KeyView>,
+}
+
+/// The merged listing for an intercepted enumeration call, or the status to return instead.
+///
+/// # Safety
+/// `hkey` must be the handle the intercepted call was made on.
+unsafe fn listing_for(hkey: HKEY) -> Result<Listing, i32> {
+    let Target::Resolved { path, synthetic } = resolve_target(hkey, std::ptr::null()) else {
+        return Err(UNTRACKED_FORWARD);
+    };
+
+    let store = get_registry_store();
+    let Some(overlay) = store.overlay_key_view(&path) else {
+        // The key was deleted through the boundary while this handle was open.
+        return Err(ERROR_KEY_DELETED as i32);
+    };
+
+    let generation = store.generation();
+    let view = cached_view(hkey as usize, generation, || {
+        // SAFETY: `hkey` is the caller's live handle; `synthetic` tells the collector there is
+        // no host key behind it.
+        let host = unsafe { host_listing(hkey, synthetic) };
+        merge(&overlay, &host)
+    });
+
+    Ok(Listing { path, view })
+}
+
+/// Sentinel telling an enumeration hook to forward to the trampoline: the handle is unknown to
+/// the engine, so - as with every other read - the host answer stands.
+const UNTRACKED_FORWARD: i32 = -1;
+
+unsafe extern "system" fn hook_reg_enum_key_ex_w(
+    hkey: HKEY,
+    dw_index: u32,
+    lp_name: *mut u16,
+    lpcch_name: *mut u32,
+    lp_reserved: *const u32,
+    lp_class: *mut u16,
+    lpcch_class: *mut u32,
+    lpft_last_write_time: *mut FILETIME,
+) -> i32 {
+    let real_fn: FnRegEnumKeyExW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_KEY_EX_W)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                dw_index,
+                lp_name,
+                lpcch_name,
+                lp_reserved,
+                lp_class,
+                lpcch_class,
+                lpft_last_write_time,
+            )
+        },
+        {
+            let listing = match unsafe { listing_for(hkey) } {
+                Ok(listing) => listing,
+                Err(UNTRACKED_FORWARD) => {
+                    return unsafe {
+                        real_fn(
+                            hkey,
+                            dw_index,
+                            lp_name,
+                            lpcch_name,
+                            lp_reserved,
+                            lp_class,
+                            lpcch_class,
+                            lpft_last_write_time,
+                        )
+                    };
+                }
+                Err(status) => return status,
+            };
+
+            let Some(name) = listing.view.subkeys.get(dw_index as usize) else {
+                return ERROR_NO_MORE_ITEMS as i32;
+            };
+
+            // SAFETY: the class and timestamp cells are caller-owned out-parameters, each
+            // null-checked before use.
+            unsafe {
+                // The overlay records no class for a key, and the merged index does not map to
+                // a host index, so neither the class nor the last-write time can be answered
+                // truthfully. They are reported empty and zeroed - the documented "unknown" -
+                // rather than filled with a plausible-looking value.
+                if !lpcch_class.is_null() {
+                    *lpcch_class = 0;
+                }
+                if !lp_class.is_null() {
+                    *lp_class = 0;
+                }
+                if !lpft_last_write_time.is_null() {
+                    *lpft_last_write_time = std::mem::zeroed::<FILETIME>();
+                }
+
+                serve_name(name, lp_name, lpcch_name)
+            }
+        }
+    )
+}
+
+unsafe extern "system" fn hook_reg_enum_value_w(
+    hkey: HKEY,
+    dw_index: u32,
+    lp_value_name: *mut u16,
+    lpcch_value_name: *mut u32,
+    lp_reserved: *const u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> i32 {
+    let real_fn: FnRegEnumValueW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_VALUE_W)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                dw_index,
+                lp_value_name,
+                lpcch_value_name,
+                lp_reserved,
+                lp_type,
+                lp_data,
+                lpcb_data,
+            )
+        },
+        {
+            let listing = match unsafe { listing_for(hkey) } {
+                Ok(listing) => listing,
+                Err(UNTRACKED_FORWARD) => {
+                    return unsafe {
+                        real_fn(
+                            hkey,
+                            dw_index,
+                            lp_value_name,
+                            lpcch_value_name,
+                            lp_reserved,
+                            lp_type,
+                            lp_data,
+                            lpcb_data,
+                        )
+                    };
+                }
+                Err(status) => return status,
+            };
+
+            let Some(entry) = listing.view.values.get(dw_index as usize) else {
+                return ERROR_NO_MORE_ITEMS as i32;
+            };
+
+            let name_status = unsafe { serve_name(&entry.name, lp_value_name, lpcch_value_name) };
+            if name_status != ERROR_SUCCESS as i32 {
+                return name_status;
+            }
+
+            // The name is the caller's index into the listing; the data comes from whichever
+            // side of the boundary actually holds it.
+            match entry.origin {
+                ValueOrigin::Host => {
+                    let Some(trampoline) = try_load_trampoline(&REAL_REG_QUERY_VALUE_EX_W) else {
+                        tracing::error!(
+                            "RegEnumValueW: RegQueryValueExW is not hooked, so the host value '{}' cannot be read",
+                            entry.name
+                        );
+                        return ERROR_FILE_NOT_FOUND as i32;
+                    };
+                    let query: FnRegQueryValueExW = unsafe { std::mem::transmute(trampoline) };
+                    let name_wide = to_wide(&entry.name);
+                    // SAFETY: `hkey` is the caller's live host handle and `name_wide` is a
+                    // NUL-terminated name; the remaining pointers are the caller's own.
+                    unsafe {
+                        query(
+                            hkey,
+                            name_wide.as_ptr(),
+                            std::ptr::null_mut(),
+                            lp_type,
+                            lp_data,
+                            lpcb_data,
+                        )
+                    }
+                }
+                ValueOrigin::Overlay => {
+                    match get_registry_store().resolve_value(&listing.path, &entry.name) {
+                        ValueResolution::Virtual { val_type, data } => {
+                            // SAFETY: caller-owned out-parameters, bounded inside `serve_value`.
+                            unsafe { serve_value(val_type, &data, lp_type, lp_data, lpcb_data) }
+                        }
+                        // The listing named this value a moment ago, so its disappearance means
+                        // the overlay changed underneath; report it the way a deleted value reads.
+                        _ => ERROR_FILE_NOT_FOUND as i32,
+                    }
+                }
+            }
+        }
+    )
+}
+
+/// Reports the key's shape from the same merged listing the enumerators walk.
+///
+/// # Why the counts must come from that listing
+/// Applications call this to size the buffers and bound the loop they then enumerate with. A
+/// count larger than the listing makes a caller stop early on `ERROR_NO_MORE_ITEMS`; a count
+/// smaller makes it miss entries entirely. The maximum lengths may only ever over-estimate.
+unsafe extern "system" fn hook_reg_query_info_key_w(
+    hkey: HKEY,
+    lp_class: *mut u16,
+    lpcch_class: *mut u32,
+    lp_reserved: *const u32,
+    lpc_sub_keys: *mut u32,
+    lpcb_max_sub_key_len: *mut u32,
+    lpcb_max_class_len: *mut u32,
+    lpc_values: *mut u32,
+    lpcb_max_value_name_len: *mut u32,
+    lpcb_max_value_len: *mut u32,
+    lpcb_security_descriptor: *mut u32,
+    lpft_last_write_time: *mut FILETIME,
+) -> i32 {
+    let real_fn: FnRegQueryInfoKeyW =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_QUERY_INFO_KEY_W)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                lp_class,
+                lpcch_class,
+                lp_reserved,
+                lpc_sub_keys,
+                lpcb_max_sub_key_len,
+                lpcb_max_class_len,
+                lpc_values,
+                lpcb_max_value_name_len,
+                lpcb_max_value_len,
+                lpcb_security_descriptor,
+                lpft_last_write_time,
+            )
+        },
+        {
+            let listing = match unsafe { listing_for(hkey) } {
+                Ok(listing) => listing,
+                Err(UNTRACKED_FORWARD) => {
+                    return unsafe {
+                        real_fn(
+                            hkey,
+                            lp_class,
+                            lpcch_class,
+                            lp_reserved,
+                            lpc_sub_keys,
+                            lpcb_max_sub_key_len,
+                            lpcb_max_class_len,
+                            lpc_values,
+                            lpcb_max_value_name_len,
+                            lpcb_max_value_len,
+                            lpcb_security_descriptor,
+                            lpft_last_write_time,
+                        )
+                    };
+                }
+                Err(status) => return status,
+            };
+
+            // Let the host fill everything this engine does not model - class, security
+            // descriptor, timestamp - and report its own longest value. A synthetic key has no
+            // host counterpart, so those cells stay as the caller left them.
+            let mut host_max_value_len = 0u32;
+            let host_answered = unsafe {
+                real_fn(
+                    hkey,
+                    lp_class,
+                    lpcch_class,
+                    lp_reserved,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    lpcb_max_class_len,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut host_max_value_len,
+                    lpcb_security_descriptor,
+                    lpft_last_write_time,
+                )
+            } == ERROR_SUCCESS as i32;
+            if !host_answered {
+                host_max_value_len = 0;
+            }
+
+            let overlay_max_value_len = listing
+                .view
+                .values
+                .iter()
+                .filter_map(|entry| get_registry_store().overlay_value_len(&listing.path, &entry.name))
+                .max()
+                .unwrap_or(0) as u32;
+
+            // SAFETY: every cell below is a caller-owned out-parameter, null-checked first.
+            unsafe {
+                if !lpc_sub_keys.is_null() {
+                    *lpc_sub_keys = listing.view.subkeys.len() as u32;
+                }
+                if !lpcb_max_sub_key_len.is_null() {
+                    *lpcb_max_sub_key_len = listing.view.max_subkey_chars();
+                }
+                if !lpc_values.is_null() {
+                    *lpc_values = listing.view.values.len() as u32;
+                }
+                if !lpcb_max_value_name_len.is_null() {
+                    *lpcb_max_value_name_len = listing.view.max_value_name_chars();
+                }
+                if !lpcb_max_value_len.is_null() {
+                    // Over-estimating is safe - the caller allocates more than it needs - while
+                    // under-estimating truncates a value it is about to read.
+                    *lpcb_max_value_len = host_max_value_len.max(overlay_max_value_len);
+                }
+            }
+
+            ERROR_SUCCESS as i32
+        }
+    )
 }
 
 /// Hooks `api` on the first module of `modules` that exports it.
@@ -733,7 +1231,7 @@ pub fn init_hooks() {
         //      as a missing row instead of hiding it among a dozen near-identical call blocks -
         //      which is how RegDeleteKeyExW and RegDeleteTreeW stayed unhooked while their
         //      sibling RegDeleteKeyW was fixed.
-        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 11] = [
+        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 14] = [
             (
                 "RegOpenKeyExW",
                 &REAL_REG_OPEN_KEY_EX_W,
@@ -778,6 +1276,21 @@ pub fn init_hooks() {
                 "RegDeleteTreeW",
                 &REAL_REG_DELETE_TREE_W,
                 hook_reg_delete_tree_w as *mut c_void,
+            ),
+            (
+                "RegEnumKeyExW",
+                &REAL_REG_ENUM_KEY_EX_W,
+                hook_reg_enum_key_ex_w as *mut c_void,
+            ),
+            (
+                "RegEnumValueW",
+                &REAL_REG_ENUM_VALUE_W,
+                hook_reg_enum_value_w as *mut c_void,
+            ),
+            (
+                "RegQueryInfoKeyW",
+                &REAL_REG_QUERY_INFO_KEY_W,
+                hook_reg_query_info_key_w as *mut c_void,
             ),
             (
                 "RegCloseKey",

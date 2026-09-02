@@ -1,3 +1,4 @@
+pub(crate) mod enumeration;
 pub mod handle_table;
 pub mod hooks;
 pub(crate) mod journal;

@@ -102,6 +102,7 @@ graph TD
 | **`RegGetValueW`** | `kernelbase.dll` / `advapi32.dll` | Resolves `lpSubKey` against the overlay. Without this hook the API opened its subkey through an internal entry point and the read escaped to the host. Applies the `RRF_RT_*` type filter, REG_EXPAND_SZ expansion and the string NUL-termination guarantee. |
 | **`RegSetValueExW`** | `kernelbase.dll` / `advapi32.dll` | Stores the typed value in memory and appends one record to the `.ppm/system/registry.jsonl` journal. Appending is O(1) and cannot erase another process's records - the previous shape re-serialized the whole hive per write, so one injected process's snapshot silently dropped the keys another had written. |
 | **`RegDeleteValueW`, `RegDeleteKeyW`, `RegDeleteKeyExW`, `RegDeleteTreeW`** | `kernelbase.dll` / `advapi32.dll` | Records tombstones in the virtual store, masking host values and keys. `RegDeleteKeyExW` and `RegDeleteTreeW` reach `RegDeleteKeyExInternalW` without passing through `RegDeleteKeyW`, so leaving them unhooked deleted keys in the **real host registry**. Tombstones resolve through ancestors, so a deleted key also masks host-only children; `RegDeleteTreeW` keeps the key and masks its subkeys and values. |
+| **`RegEnumKeyExW`, `RegEnumValueW`, `RegQueryInfoKeyW`** | `kernelbase.dll` / `advapi32.dll` | Serve one merged listing: the host's own entries, minus everything the overlay masks, plus everything it added, with names spelled as the application wrote them. All three read the same per-handle snapshot, because `RegQueryInfoKeyW` reports the counts a caller sizes its buffers and bounds its loop from - a count that disagreed with the walk would make callers miss entries or stop early. The snapshot is invalidated by an overlay generation counter and dropped when the handle closes. |
 | **`RegOpenCurrentUser`** | `kernelbase.dll` / `advapi32.dll` | Registers the returned handle as the `HKCU` hive so operations on it stay tracked. |
 | **`RegCloseKey`** | `kernelbase.dll` / `advapi32.dll` | Cleans up handles in `VirtualHandleTable`. |
 | **`CredReadW`, `CredWriteW`, `CredDeleteW`, `CredEnumerateW`** | `advapi32.dll` | Intercepts credentials and persists to `.ppm/system/credentials.json` (plaintext at rest - see SPEC §3). Reads, deletes and enumerations are clean-roomed: the host credential store is never modified and never leaks into the application. |
@@ -114,10 +115,12 @@ refused with `ERROR_INVALID_HANDLE`: writing through to the host would breach th
 accepting the write under a placeholder key would store it where no read could reach it.
 
 ANSI registry APIs (`RegSetValueExA`, `RegQueryValueExA`, `RegEnumValueA`, …) are independent
-implementations in kernelbase that do not route through their wide counterparts, and value and
-key **enumeration** (`RegEnumValueW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`) is not intercepted
-yet: an application that writes a value through the boundary and then enumerates its key will
-not see its own write. Both are known gaps, not covered surface.
+implementations in kernelbase that do not route through their wide counterparts, so they remain
+a known gap rather than covered surface.
+
+An enumeration reports no class string and a zeroed last-write time for a subkey: the overlay
+records neither, and the merged index does not map back to a host index that could supply them.
+Zero is the documented "unknown" here, not a fabricated value.
 
 Kernel synchronization objects, named pipes, and host window discovery are intentionally **not**
 intercepted. An exploration of that boundary (33 additional Win32 detours) is preserved on the
@@ -158,6 +161,7 @@ crates/redirector/src/
 │   ├── mod.rs                      # Registry module export & initialization
 │   ├── store.rs                    # In-Memory Hive, Ancestor-Aware Tombstones & Op Model
 │   ├── journal.rs                  # Append-Only Op Journal, Replay & Compaction (.ppm/system/registry.jsonl)
+│   ├── enumeration.rs              # Host+Overlay Merged Listing & Per-Handle Snapshot Cache
 │   ├── handle_table.rs             # Virtual Handle Table, Key Scope & Pseudo-Handle Mapping
 │   └── hooks.rs                    # Win32 (KernelBase / advapi32) Detour Hooks
 │

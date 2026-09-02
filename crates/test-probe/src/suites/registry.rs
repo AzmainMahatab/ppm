@@ -13,11 +13,11 @@
 
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegDeleteValueW, RegGetValueW, RegQueryValueExW,
-    RegSetValueExW,
+    RegDeleteKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW,
+    RegGetValueW, RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW,
 };
 
 use crate::support::{from_wide_ptr, to_wide};
@@ -33,6 +33,7 @@ pub(crate) fn run() -> Result<(), String> {
     reg_get_value_with_subkey_reads_the_overlay()?;
     delete_key_ex_does_not_reach_the_host()?;
     delete_tree_does_not_reach_the_host()?;
+    enumeration_reflects_the_boundary()?;
     // Runs last: it tombstones the whole probe subtree.
     delete_key_does_not_reach_the_host()?;
 
@@ -245,6 +246,201 @@ fn delete_tree_does_not_reach_the_host() -> Result<(), String> {
         assert_host_key_survived(&child, "RegDeleteTreeW")?;
         assert_host_key_survived(&tree, "RegDeleteTreeW")
     }
+}
+
+/// Lists every value name an enumeration of `hkey` yields.
+unsafe fn enumerate_value_names(hkey: HKEY) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    unsafe {
+        for index in 0.. {
+            let mut buffer = [0u16; 256];
+            let mut length = buffer.len() as u32;
+            let status = RegEnumValueW(
+                hkey,
+                index,
+                buffer.as_mut_ptr(),
+                &mut length,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status != ERROR_SUCCESS {
+                return Err(format!("RegEnumValueW({index}) failed with code {status}"));
+            }
+            names.push(from_wide_ptr(buffer.as_ptr()));
+        }
+    }
+    Ok(names)
+}
+
+/// Lists every subkey name an enumeration of `hkey` yields.
+unsafe fn enumerate_subkey_names(hkey: HKEY) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    unsafe {
+        for index in 0.. {
+            let mut buffer = [0u16; 256];
+            let mut length = buffer.len() as u32;
+            let status = RegEnumKeyExW(
+                hkey,
+                index,
+                buffer.as_mut_ptr(),
+                &mut length,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status != ERROR_SUCCESS {
+                return Err(format!("RegEnumKeyExW({index}) failed with code {status}"));
+            }
+            names.push(from_wide_ptr(buffer.as_ptr()));
+        }
+    }
+    Ok(names)
+}
+
+/// Regression: value and key enumeration were never intercepted, so an application could write
+/// a value through the boundary and then not see it when it enumerated its own key, and a key
+/// it had deleted through the boundary kept appearing because the host copy survives by design.
+fn enumeration_reflects_the_boundary() -> Result<(), String> {
+    let enum_key = format!("{PROBE_ROOT}\\Enumerated");
+    let doomed = format!("{enum_key}\\Doomed");
+    let kept = format!("{enum_key}\\Kept");
+
+    unsafe {
+        let (hkey, _) = create_probe_key(&enum_key)?;
+
+        // Values written through the boundary live only in the overlay: the host key is empty,
+        // so anything enumeration reports here came from the virtual store.
+        let written =
+            set_string_value(hkey, "ProxyServer", "on").and_then(|()| set_string_value(hkey, "Beta", "two"));
+        if let Err(error) = written {
+            let _ = RegCloseKey(hkey);
+            return Err(error);
+        }
+
+        // Two host-backed children, one of which is then deleted through the boundary. The
+        // host copy of the deleted one survives - that is the copy-on-write contract - so an
+        // unfiltered host enumeration would still list it.
+        for child in [&doomed, &kept] {
+            let (child_key, _) = create_probe_key(child)?;
+            let _ = RegCloseKey(child_key);
+        }
+        let doomed_wide = to_wide(&doomed);
+        let status = RegDeleteKeyW(HKEY_CURRENT_USER, doomed_wide.as_ptr());
+        if status != ERROR_SUCCESS {
+            let _ = RegCloseKey(hkey);
+            return Err(format!(
+                "RegDeleteKeyW on the doomed child failed with code {status}"
+            ));
+        }
+
+        let value_names = enumerate_value_names(hkey).inspect_err(|_| {
+            let _ = RegCloseKey(hkey);
+        })?;
+        let subkey_names = enumerate_subkey_names(hkey).inspect_err(|_| {
+            let _ = RegCloseKey(hkey);
+        })?;
+
+        // RegQueryInfoKeyW sizes the caller's buffers and bounds its loop, so it must agree
+        // with the walk exactly - a larger count stops a caller early, a smaller one hides
+        // entries it will never ask for.
+        let mut reported_subkeys = 0u32;
+        let mut reported_values = 0u32;
+        let mut max_subkey_len = 0u32;
+        let mut max_value_name_len = 0u32;
+        let info_status = RegQueryInfoKeyW(
+            hkey,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null(),
+            &mut reported_subkeys,
+            &mut max_subkey_len,
+            ptr::null_mut(),
+            &mut reported_values,
+            &mut max_value_name_len,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+        let _ = RegCloseKey(hkey);
+        if info_status != ERROR_SUCCESS {
+            return Err(format!("RegQueryInfoKeyW failed with code {info_status}"));
+        }
+
+        // The overlay's own values must be visible to an enumeration of their key ...
+        for expected in ["ProxyServer", "Beta"] {
+            if !value_names.iter().any(|name| name == expected) {
+                return Err(format!(
+                    "value '{expected}' was written through the boundary but RegEnumValueW listed {value_names:?}: enumeration did not reach the virtual overlay"
+                ));
+            }
+        }
+
+        // ... spelled the way the application wrote them, not case-folded by the index.
+        if !value_names.iter().any(|name| name == "ProxyServer") {
+            return Err(format!(
+                "RegEnumValueW returned {value_names:?}; the stored casing of 'ProxyServer' was lost"
+            ));
+        }
+
+        // A key deleted through the boundary must not surface, even though its host copy lives.
+        if subkey_names.iter().any(|name| name == "Doomed") {
+            return Err(format!(
+                "RegEnumKeyExW listed {subkey_names:?}: a key deleted through the boundary is still enumerated from the host"
+            ));
+        }
+        if !subkey_names.iter().any(|name| name == "Kept") {
+            return Err(format!(
+                "RegEnumKeyExW listed {subkey_names:?}, missing the surviving child 'Kept'"
+            ));
+        }
+
+        if reported_values as usize != value_names.len() {
+            return Err(format!(
+                "RegQueryInfoKeyW reported {reported_values} values but the walk yielded {}: an application would size its loop wrongly",
+                value_names.len()
+            ));
+        }
+        if reported_subkeys as usize != subkey_names.len() {
+            return Err(format!(
+                "RegQueryInfoKeyW reported {reported_subkeys} subkeys but the walk yielded {}",
+                subkey_names.len()
+            ));
+        }
+
+        // The reported maxima must cover every name the walk returns, or a caller sizing from
+        // them truncates the very entries it is about to read.
+        let longest_value = value_names
+            .iter()
+            .map(|name| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let longest_subkey = subkey_names
+            .iter()
+            .map(|name| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        if (max_value_name_len as usize) < longest_value {
+            return Err(format!(
+                "RegQueryInfoKeyW reported a longest value name of {max_value_name_len} but the walk returned one of {longest_value}"
+            ));
+        }
+        if (max_subkey_len as usize) < longest_subkey {
+            return Err(format!(
+                "RegQueryInfoKeyW reported a longest subkey of {max_subkey_len} but the walk returned one of {longest_subkey}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// The already-covered contract, kept last because it tombstones the whole probe subtree.

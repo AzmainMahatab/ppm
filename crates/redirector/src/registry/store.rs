@@ -4,11 +4,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerializedValue {
     pub val_type: u32,
     pub data_hex: String,
+    // Intention: Remember the value name as the application spelled it.
+    // Why: The index key is case-folded so lookups are case-insensitive, but an enumeration
+    //      must hand back the caller's own casing - an application that writes "ProxyServer"
+    //      and enumerates would otherwise be told its value is named "proxyserver", and code
+    //      that compares the returned name case-sensitively breaks. Absent for entries written
+    //      before this field existed, where the folded name is the only name on record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 fn is_not_set(flag: &bool) -> bool {
@@ -19,6 +28,11 @@ fn is_not_set(flag: &bool) -> bool {
 pub struct SerializedKey {
     #[serde(default)]
     pub values: HashMap<String, SerializedValue>,
+    // Intention: Remember this key's own last segment as the application spelled it.
+    // Why: Same reason as `SerializedValue::display_name`, for the subkey axis of an
+    //      enumeration. Only the leaf segment is stored: a key's ancestors carry their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub deleted_values: HashSet<String>,
     #[serde(default, skip_serializing_if = "is_not_set")]
@@ -71,6 +85,26 @@ pub enum ValueResolution {
     PassThrough,
 }
 
+/// The overlay's contribution to one key's enumeration.
+///
+/// Names are returned as the application spelled them; the masking sets are normalized,
+/// because they are matched against host names that carry the host's own casing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OverlayKeyView {
+    /// Immediate child keys the overlay holds live.
+    pub child_keys: Vec<String>,
+    /// Values the overlay holds live.
+    pub value_names: Vec<String>,
+    /// Normalized names of immediate child keys the overlay tombstones individually.
+    pub masked_child_keys: HashSet<String>,
+    /// Normalized names of values the overlay tombstones individually.
+    pub masked_values: HashSet<String>,
+    /// Every value the host holds for this key is masked.
+    pub host_values_masked: bool,
+    /// Every subkey the host holds under this key is masked.
+    pub host_subkeys_masked: bool,
+}
+
 pub struct VirtualRegistry {
     data: RwLock<VirtualRegistryData>,
     // Intention: Serialize journal access independently of the hive lock.
@@ -79,6 +113,13 @@ pub struct VirtualRegistry {
     //      does not match the order their in-memory states applied them. The lock order is
     //      always journal-then-data.
     journal: Mutex<Journal>,
+    // Intention: Let an enumeration snapshot know when the overlay has moved under it.
+    // Why: RegQueryInfoKeyW reports the counts an application sizes its buffers from, and the
+    //      enumerators must then walk exactly that many entries. Recomputing the merged view
+    //      per call would let a write between two calls change the answer mid-walk; caching it
+    //      against this counter keeps one enumeration internally consistent and invalidates it
+    //      the moment the overlay actually changes.
+    generation: AtomicU64,
 }
 
 static REGISTRY_STORE: LazyLock<VirtualRegistry> = LazyLock::new(|| {
@@ -99,17 +140,49 @@ pub fn get_registry_store() -> &'static VirtualRegistry {
 /// tombstone on a parent miss its own children.
 fn normalize_key(key: &str) -> String {
     let mut normalized = String::with_capacity(key.len());
-    for segment in key.split('\\').filter(|segment| !segment.is_empty()) {
+    for segment in key_segments(key) {
         if !normalized.is_empty() {
             normalized.push('\\');
         }
-        normalized.extend(segment.chars().flat_map(char::to_uppercase));
+        normalized.push_str(&normalized_segment(segment));
     }
     normalized
 }
 
-fn normalize_val_name(val_name: &str) -> String {
+/// The non-empty segments of a registry path, in order.
+///
+/// One definition so `normalize_key` and `key_chain` cannot disagree about what a segment is;
+/// they must agree, or a key's normalized form and its recorded display names would misalign.
+fn key_segments(key: &str) -> impl Iterator<Item = &str> {
+    key.split('\\').filter(|segment| !segment.is_empty())
+}
+
+/// Case-folds one path segment into the overlay's key space.
+pub(crate) fn normalized_segment(segment: &str) -> String {
+    segment.chars().flat_map(char::to_uppercase).collect()
+}
+
+pub(crate) fn normalize_val_name(val_name: &str) -> String {
     val_name.to_lowercase()
+}
+
+/// The key and each of its ancestors, nearest first, paired with the segment name as the
+/// application spelled it.
+///
+/// # Ex
+/// `HKCU\Software\MyApp` -> `[(HKCU\SOFTWARE\MYAPP, MyApp), (HKCU\SOFTWARE, Software), (HKCU, HKCU)]`
+fn key_chain(key_path: &str) -> Vec<(String, String)> {
+    let mut chain = Vec::new();
+    let mut normalized = String::new();
+    for segment in key_segments(key_path) {
+        if !normalized.is_empty() {
+            normalized.push('\\');
+        }
+        normalized.push_str(&normalized_segment(segment));
+        chain.push((normalized.clone(), segment.to_string()));
+    }
+    chain.reverse();
+    chain
 }
 
 /// Yields `norm_key` then each ancestor, nearest first, ending at the hive name.
@@ -151,17 +224,26 @@ fn resolve_key_in(data: &VirtualRegistryData, norm_key: &str) -> KeyResolution {
 /// `Masked`, the new entries are therefore born with both host masks set.
 ///
 /// # Invariant
-/// On return, `data.keys[norm_key]` exists and is not a tombstone.
-fn materialize_chain(data: &mut VirtualRegistryData, norm_key: &str) {
-    let born_masked = matches!(resolve_key_in(data, norm_key), KeyResolution::Masked);
-    let chain: Vec<String> = key_and_ancestors(norm_key).map(str::to_string).collect();
+/// On return, `data.keys[..]` holds the returned normalized key and it is not a tombstone.
+fn materialize_chain(data: &mut VirtualRegistryData, key_path: &str) -> String {
+    let chain = key_chain(key_path);
+    let norm_key = chain
+        .first()
+        .map(|(normalized, _)| normalized.clone())
+        .unwrap_or_default();
+    let born_masked = matches!(resolve_key_in(data, &norm_key), KeyResolution::Masked);
 
-    for (depth, candidate) in chain.into_iter().enumerate() {
+    for (depth, (candidate, display)) in chain.into_iter().enumerate() {
         let is_self = depth == 0;
         let existed = data.keys.contains_key(&candidate);
         let node = data.keys.entry(candidate).or_default();
 
         node.is_tombstone = false;
+        // First writer names the key: a later differently-cased reference must not rewrite the
+        // spelling an enumeration has already been handing back.
+        if node.display_name.is_none() {
+            node.display_name = Some(display);
+        }
         if born_masked {
             node.host_values_masked = true;
             node.host_subkeys_masked = true;
@@ -174,6 +256,8 @@ fn materialize_chain(data: &mut VirtualRegistryData, norm_key: &str) {
             break;
         }
     }
+
+    norm_key
 }
 
 /// Tombstones every overlay entry strictly under `norm_key`.
@@ -210,6 +294,7 @@ impl VirtualRegistry {
         VirtualRegistry {
             data: RwLock::new(data),
             journal: Mutex::new(journal),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -233,6 +318,82 @@ impl VirtualRegistry {
 
         op.apply(&mut data);
         journal.append(&op);
+
+        // Published last, under both locks, so no reader can observe a bumped generation
+        // against a hive that has not yet taken the mutation.
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Counts every mutation this process has applied. An enumeration snapshot taken at one
+    /// generation stays valid until the number changes.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// The overlay's side of an enumeration of `key_path`, or `None` when the key is masked.
+    ///
+    /// # Why the child scan is a full pass
+    /// The hive is a flat map keyed by full path, so immediate children are found by scanning.
+    /// The result is cached per handle against [`generation`](Self::generation), so a complete
+    /// enumeration pays for this once rather than once per index.
+    pub fn overlay_key_view(&self, key_path: &str) -> Option<OverlayKeyView> {
+        let norm_key = normalize_key(key_path);
+        if norm_key.is_empty() {
+            return None;
+        }
+
+        let data = self.data.read();
+        if resolve_key_in(&data, &norm_key) == KeyResolution::Masked {
+            return None;
+        }
+
+        let mut view = OverlayKeyView::default();
+
+        let child_prefix = format!("{norm_key}\\");
+        for (path, child) in &data.keys {
+            let Some(relative) = path.strip_prefix(&child_prefix) else {
+                continue;
+            };
+            // Only immediate children: anything with a further separator is a grandchild.
+            if relative.contains('\\') {
+                continue;
+            }
+            match child.is_tombstone {
+                true => {
+                    view.masked_child_keys.insert(relative.to_string());
+                }
+                false => view
+                    .child_keys
+                    .push(child.display_name.clone().unwrap_or_else(|| relative.to_string())),
+            }
+        }
+
+        if let Some(node) = data.keys.get(&norm_key) {
+            view.value_names = node
+                .values
+                .iter()
+                .map(|(normalized, value)| value.display_name.clone().unwrap_or_else(|| normalized.clone()))
+                .collect();
+            view.masked_values = node.deleted_values.clone();
+            view.host_values_masked = node.host_values_masked;
+            view.host_subkeys_masked = node.host_subkeys_masked;
+        }
+
+        // `HashMap` iteration order is arbitrary; an enumeration must not reorder between two
+        // walks of an unchanged hive.
+        view.child_keys.sort();
+        view.value_names.sort();
+
+        Some(view)
+    }
+
+    /// The stored byte length of one overlay value, for `RegQueryInfoKeyW`'s longest-value
+    /// figure. `None` when the overlay does not hold the value or cannot decode it.
+    pub fn overlay_value_len(&self, key_path: &str, val_name: &str) -> Option<usize> {
+        match self.resolve_value(key_path, val_name) {
+            ValueResolution::Virtual { data, .. } => Some(data.len()),
+            _ => None,
+        }
     }
 
     pub fn resolve_key(&self, key_path: &str) -> KeyResolution {
@@ -279,8 +440,8 @@ impl VirtualRegistry {
 
     pub fn set_value(&self, key_path: &str, val_name: &str, val_type: u32, data: &[u8]) {
         self.record(RegistryOp::SetValue {
-            key: normalize_key(key_path),
-            name: normalize_val_name(val_name),
+            key: key_path.to_string(),
+            name: val_name.to_string(),
             val_type,
             data_hex: hex::encode(data),
         });
@@ -288,21 +449,21 @@ impl VirtualRegistry {
 
     pub fn delete_value(&self, key_path: &str, val_name: &str) {
         self.record(RegistryOp::DeleteValue {
-            key: normalize_key(key_path),
-            name: normalize_val_name(val_name),
+            key: key_path.to_string(),
+            name: val_name.to_string(),
         });
     }
 
     pub fn create_key(&self, key_path: &str) {
         self.record(RegistryOp::CreateKey {
-            key: normalize_key(key_path),
+            key: key_path.to_string(),
         });
     }
 
     /// Masks the key and its whole subtree - the `RegDeleteKeyW` / `RegDeleteKeyExW` contract.
     pub fn delete_key(&self, key_path: &str) {
         self.record(RegistryOp::DeleteKey {
-            key: normalize_key(key_path),
+            key: key_path.to_string(),
         });
     }
 
@@ -310,7 +471,7 @@ impl VirtualRegistry {
     /// the `RegDeleteTreeW` contract.
     pub fn delete_tree(&self, key_path: &str) {
         self.record(RegistryOp::DeleteTree {
-            key: normalize_key(key_path),
+            key: key_path.to_string(),
         });
     }
 }
@@ -321,7 +482,14 @@ impl RegistryOp {
     /// # Why replay and live mutation share this path
     /// A hive reloaded from the journal must be indistinguishable from the one the writes
     /// produced. Giving replay its own copy of the tombstone and mask rules is exactly how
-    /// the two drift apart, so both go through here. Keys arrive already normalized.
+    /// the two drift apart, so both go through here.
+    ///
+    /// # Why the op carries un-normalized text
+    /// Records hold the key and value names as the application spelled them, and normalization
+    /// happens here. That keeps the journal readable, keeps one normalization implementation,
+    /// and is what lets an enumeration return the caller's own casing. Normalization is
+    /// idempotent, so records written before this change - which already held folded names -
+    /// replay to exactly the same hive.
     pub(crate) fn apply(&self, data: &mut VirtualRegistryData) {
         match self {
             RegistryOp::Snapshot { keys } => {
@@ -330,48 +498,53 @@ impl RegistryOp {
             RegistryOp::CreateKey { key } => {
                 materialize_chain(data, key);
             }
+
             RegistryOp::SetValue {
                 key,
                 name,
                 val_type,
                 data_hex,
             } => {
-                materialize_chain(data, key);
+                let norm_key = materialize_chain(data, key);
+                let norm_val = normalize_val_name(name);
                 let node = data
                     .keys
-                    .get_mut(key)
+                    .get_mut(&norm_key)
                     .expect("invariant: materialize_chain leaves the key present and live");
-                node.deleted_values.remove(name);
+                node.deleted_values.remove(&norm_val);
                 node.values.insert(
-                    name.clone(),
+                    norm_val,
                     SerializedValue {
                         val_type: *val_type,
                         data_hex: data_hex.clone(),
+                        display_name: Some(name.clone()),
                     },
                 );
             }
             RegistryOp::DeleteValue { key, name } => {
-                materialize_chain(data, key);
+                let norm_key = materialize_chain(data, key);
+                let norm_val = normalize_val_name(name);
                 let node = data
                     .keys
-                    .get_mut(key)
+                    .get_mut(&norm_key)
                     .expect("invariant: materialize_chain leaves the key present and live");
-                node.values.remove(name);
-                node.deleted_values.insert(name.clone());
+                node.values.remove(&norm_val);
+                node.deleted_values.insert(norm_val);
             }
             RegistryOp::DeleteKey { key } => {
-                tombstone_descendants(data, key);
-                let node = data.keys.entry(key.clone()).or_default();
+                let norm_key = normalize_key(key);
+                tombstone_descendants(data, &norm_key);
+                let node = data.keys.entry(norm_key).or_default();
                 node.is_tombstone = true;
                 node.values.clear();
                 node.deleted_values.clear();
             }
             RegistryOp::DeleteTree { key } => {
-                tombstone_descendants(data, key);
-                materialize_chain(data, key);
+                tombstone_descendants(data, &normalize_key(key));
+                let norm_key = materialize_chain(data, key);
                 let node = data
                     .keys
-                    .get_mut(key)
+                    .get_mut(&norm_key)
                     .expect("invariant: materialize_chain leaves the key present and live");
                 node.values.clear();
                 node.deleted_values.clear();
@@ -440,10 +613,13 @@ mod tests {
         assert_eq!(keep_type, 3);
         assert_eq!(keep_bytes, b"ok");
 
-        // The on-disk journal carries one record per mutation, in the order they happened.
+        // The on-disk journal carries one record per mutation, in the order they happened,
+        // spelled the way the application wrote it - normalization is applied on replay, so a
+        // record stays readable and still carries the casing an enumeration must hand back.
         let journal =
             std::fs::read_to_string(reg_file.with_extension("jsonl")).expect("registry.jsonl must exist");
-        assert!(journal.contains("MYAPP"));
+        assert!(journal.contains("MyApp"));
+        assert!(journal.contains("Greeting"));
         assert!(journal.contains(&hex::encode(b"HelloVirtualWorld\0")));
         assert!(journal.contains("set_value"));
         assert!(journal.contains("delete_value"));
@@ -572,6 +748,114 @@ mod tests {
             ValueResolution::Masked,
             "the wildcard host mask must survive an unrelated write to the same key"
         );
+    }
+
+    #[test]
+    fn the_overlay_view_lists_immediate_children_with_the_spelling_the_app_used() {
+        let (_dir, store) = store();
+        store.create_key("HKCU\\Software\\MyApp");
+        store.create_key("HKCU\\Software\\MyApp\\Nested\\Deeper");
+        store.create_key("HKCU\\Software\\Sibling");
+        store.set_value("HKCU\\Software\\MyApp", "ProxyServer", 1, b"x");
+
+        let view = store
+            .overlay_key_view("hkcu\\software\\myapp")
+            .expect("a live key has a view");
+
+        // Immediate children only - the grandchild must not surface here.
+        assert_eq!(view.child_keys, vec!["Nested"]);
+        // Casing is the application's, not the index's.
+        assert_eq!(view.value_names, vec!["ProxyServer"]);
+        assert!(!view.host_values_masked);
+        assert!(!view.host_subkeys_masked);
+    }
+
+    #[test]
+    fn the_overlay_view_reports_masks_rather_than_hiding_them() {
+        let (_dir, store) = store();
+        store.create_key("HKCU\\Software\\App\\Doomed");
+        store.set_value("HKCU\\Software\\App", "Gone", 1, b"x");
+        store.delete_key("HKCU\\Software\\App\\Doomed");
+        store.delete_value("HKCU\\Software\\App", "Gone");
+
+        let view = store
+            .overlay_key_view("HKCU\\Software\\App")
+            .expect("a live key has a view");
+
+        assert!(view.child_keys.is_empty());
+        assert!(view.value_names.is_empty());
+        // The merge needs the masks by name to filter the host's own listing.
+        assert!(view.masked_child_keys.contains("DOOMED"));
+        assert!(view.masked_values.contains("gone"));
+    }
+
+    #[test]
+    fn delete_tree_reports_wildcard_masks_to_the_view() {
+        let (_dir, store) = store();
+        store.create_key("HKCU\\Software\\App");
+        store.delete_tree("HKCU\\Software\\App");
+
+        let view = store
+            .overlay_key_view("HKCU\\Software\\App")
+            .expect("delete_tree keeps the key itself");
+
+        assert!(view.host_values_masked);
+        assert!(view.host_subkeys_masked);
+    }
+
+    #[test]
+    fn a_masked_key_has_no_view_at_all() {
+        let (_dir, store) = store();
+        store.delete_key("HKCU\\Software\\Gone");
+
+        assert!(store.overlay_key_view("HKCU\\Software\\Gone").is_none());
+        assert!(
+            store.overlay_key_view("HKCU\\Software\\Gone\\Child").is_none(),
+            "a child masked by its deleted parent has no view either"
+        );
+    }
+
+    /// The spelling an enumeration hands back must survive the journal, or a reloaded hive
+    /// would start reporting case-folded names for keys the application already knows.
+    #[test]
+    fn display_names_survive_a_reload() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let reg_file = temp_dir.path().join("registry.json");
+
+        {
+            let store = VirtualRegistry::new(reg_file.clone());
+            store.create_key("HKCU\\Software\\MyApp\\SubKey");
+            store.set_value("HKCU\\Software\\MyApp", "ProxyServer", 1, b"x");
+        }
+
+        let reopened = VirtualRegistry::new(reg_file);
+        let view = reopened
+            .overlay_key_view("HKCU\\Software\\MyApp")
+            .expect("the reloaded key is live");
+
+        assert_eq!(view.child_keys, vec!["SubKey"]);
+        assert_eq!(view.value_names, vec!["ProxyServer"]);
+    }
+
+    #[test]
+    fn the_generation_advances_on_every_mutation_and_not_on_reads() {
+        let (_dir, store) = store();
+        let start = store.generation();
+
+        store.create_key("HKCU\\Software\\App");
+        let after_create = store.generation();
+        assert!(after_create > start);
+
+        let _ = store.overlay_key_view("HKCU\\Software\\App");
+        let _ = store.resolve_key("HKCU\\Software\\App");
+        assert_eq!(
+            store.generation(),
+            after_create,
+            "queries must not invalidate an enumeration snapshot"
+        );
+
+        store.set_value("HKCU\\Software\\App", "V", 1, b"x");
+        assert!(store.generation() > after_create);
     }
 
     /// Regression: unreadable stored bytes used to fall through to the host registry,

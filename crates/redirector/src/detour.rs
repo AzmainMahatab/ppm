@@ -80,6 +80,23 @@ pub(crate) fn load_trampoline(slot: &AtomicPtr<c_void>) -> *mut c_void {
     }
 }
 
+/// Loads the published trampoline for `slot` without waiting, yielding `None` when the API was
+/// never hooked.
+///
+/// # Why a non-blocking variant exists
+/// [`load_trampoline`] may spin because a hook body is entitled to assume its *own* API
+/// attached: the hook is running, so the attach happened. That assumption does not carry to a
+/// hook that needs a *different* API's trampoline. The registry enumerators read the host's
+/// listing through `RegEnumKeyExW` and `RegEnumValueW`, and if either export could not be hooked
+/// its slot stays null for the life of the process, so spinning there would hang the application
+/// inside a registry call instead of degrading.
+pub(crate) fn try_load_trampoline(slot: &AtomicPtr<c_void>) -> Option<*mut c_void> {
+    match slot.load(Ordering::Acquire) {
+        trampoline if trampoline.is_null() => None,
+        trampoline => Some(trampoline),
+    }
+}
+
 /// Re-entrancy guard for detour hook bodies.
 ///
 /// # Why
