@@ -1,3 +1,12 @@
+# Set default behavior to automatically normalize line endings to LF for all text files.
+* text=auto eol=lf
+
+# Explicitly declare binary files to prevent Git from attempting line-ending normalization.
+*.cab binary
+*.msi binary
+*.7z  binary
+*.zip binary
+
 # Intention: Pin the embedded manifest artifacts to LF in the working tree.
 # Why: Both files are compiled into the binary with `include_str!`, and
 #      `apps.schema.json` is compared byte-for-byte against fresh `schemars` output by the
