@@ -54,8 +54,7 @@ graph TD
 │   │   └── ...
 │   │
 │   └── logs/                           # Runtime logs
-│       ├── ppm.log
-│       └── redirector.log
+│       └── redirector.log              # Engine log (filter: PPM_LOG)
 │
 ├── Apps/                               # Multi-architecture binaries
 │   ├── x64/                            # x64 Application Binaries
@@ -197,7 +196,10 @@ crates/ppm/src/
 ├── core/                           # Core Domain
 │   ├── mod.rs
 │   ├── arch.rs                     # CpuArch, ArchTarget & Win32 CPU Detection (GetNativeSystemInfo)
-│   ├── config.rs                   # AppManifests, AppDefinition (serde/schemars)
+│   ├── config.rs                   # AppManifests, AppDefinition (serde/schemars), reference checks
+│   ├── layout.rs                   # PortableLayout: the single owner of on-disk locations
+│   ├── relpath.rs                  # Relative paths confined to their base directory
+│   ├── schema.rs                   # JSON Schema artifact writer
 │   └── assets.rs                   # Embedded redirector.dll & default apps.json
 │
 ├── engine/                         # Engine Domain
@@ -210,8 +212,9 @@ crates/ppm/src/
     ├── mod.rs
     ├── pe_info.rs                  # PE Version Header Extractor (GetFileVersionInfoW)
     ├── version.rs                  # Version Resolution & Update Checking
-    ├── downloader.rs               # HTTP Downloader with Progress Reporting
-    ├── extractor.rs                # Archive Extractor (7z, Zip, Tar, MSI)
+    ├── http.rs                     # Shared HTTP clients (User-Agent, timeouts)
+    ├── downloader.rs               # HTTPS-only Downloader with Progress Reporting
+    ├── extractor.rs                # Archive Extractor (NSIS-7z, 7z, Zip, CAB, MSI) & atomic swap-in
     └── sanitizer.rs                # Post-Install Cleanup
 ```
 
@@ -228,7 +231,10 @@ crates/test-probe/                  # Isolated probe package (bin-artifact dev-d
     └── identity.rs                 # Taskbar AUMID Contract
 
 crates/ppm/tests/
-└── e2e_virtualization.rs           # Integration test consuming the probe via CARGO_BIN_FILE_* edge
+├── e2e_virtualization.rs           # Integration test consuming the probe via CARGO_BIN_FILE_* edge
+├── init_semantics.rs               # `ppm init` idempotency and engine deployment
+├── package_extraction.rs           # Extractor fixtures (zip, 7z/LZMA2, CAB, MSI embedded/external)
+└── fixtures/                       # Sample archives
 ```
 
 The toolchain is pinned to a dated nightly in `rust-toolchain.toml`; `.cargo/config.toml` opts into

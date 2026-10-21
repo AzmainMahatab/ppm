@@ -1,6 +1,6 @@
 # Portable Package Manager (`ppm`)
 
-[![Language: Rust](https://img.shields.io/badge/Language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
+[![Language: Rust](https://img.shields.io/badge/Language-Rust_2024-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows_x64%20%7C%20arm64-blue.svg)](https://microsoft.com)
 [![Virtualization: Win32 CoW](https://img.shields.io/badge/Virtualization-Win32%20Registry%20CoW-green.svg)](#)
 [![Isolation: Pre--ALPC Vault](https://img.shields.io/badge/Isolation-Pre--ALPC%20Vault-teal.svg)](#)
@@ -47,8 +47,7 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 │   │   └── ...
 │   │
 │   └── logs/                           # Runtime logs
-│       ├── ppm.log
-│       └── redirector.log
+│       └── redirector.log              # Engine log (filter: PPM_LOG)
 │
 ├── Apps/                               # Multi-architecture binaries
 │   ├── x64/                            # x64 Application Binaries
@@ -98,7 +97,7 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 
 | Command | Description |
 | :--- | :--- |
-| `ppm.exe init [--force]` | Scaffolds `.ppm/system/`, `.ppm/lib/`, `.ppm/cache/`, `.ppm/logs/`, `Apps/x64/`, `Apps/arm64/`, `Home/`. |
+| `ppm.exe init` | Idempotent: redeploys the engine DLL and regenerates the schema; never overwrites an existing `apps.json`. Scaffolds `.ppm/system/`, `.ppm/lib/`, `.ppm/cache/`, `.ppm/logs/`, `Apps/x64/`, `Apps/arm64/`, `Home/`. |
 | `ppm.exe check [--arch <x64\|arm64\|all>]` | Queries remote release endpoints for the latest versions. |
 | `ppm.exe install <app\|all> [--arch <x64\|arm64\|all>] [--force]` | Downloads and installs applications, resolving dependency DAGs. An application already at the latest release is left alone, so this doubles as `update`; `--force` reinstalls it regardless. |
 | `ppm.exe update <app\|all> [--arch <x64\|arm64\|all>]` | Upgrades installed applications to the latest upstream release — the same cycle `install` runs. |
@@ -106,7 +105,7 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 | `ppm.exe list [--arch <x64\|arm64\|all>]` | Lists all configured apps and dynamic presence status across architectures. |
 | `ppm.exe link [app\|all]` | Generates prefix-free 1-click `.bat` root launchers for installed apps. |
 | `ppm.exe schema` | Regenerates JSON Schema (`apps.schema.json`) via `schemars`. |
-| `ppm.exe validate` | Validates `apps.json` against the schema. |
+| `ppm.exe validate` | Validates `apps.json`: strict field parsing, install-relative paths, defined and acyclic dependencies. |
 
 ---
 

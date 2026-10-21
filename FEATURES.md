@@ -11,9 +11,12 @@ the embedded `redirector.dll` engine enforces five isolation boundaries via Micr
 | 1 | Registry (Copy-on-Write) | `RegOpenKeyExW`, `RegCreateKeyExW`, `RegQueryValueExW`, `RegGetValueW`, `RegSetValueExW`, `RegDeleteValueW`, `RegDeleteKeyW`, `RegDeleteKeyExW`, `RegDeleteTreeW`, `RegEnumKeyExW`, `RegEnumValueW`, `RegQueryInfoKeyW`, `RegOpenCurrentUser`, `RegCloseKey` | Host registry reads fall through; writes and deletes are virtualized into the append-only `.ppm/system/registry.jsonl` journal - O(1) per write, and no injected process can erase another's keys - with tombstones resolved through ancestors so a deleted key hides host-only children. Enumeration merges the host listing with the overlay, so an application sees its own writes and never sees what it deleted |
 | 2 | Process Spawning | `CreateProcessW`, `CreateProcessA`, `CreateProcessAsUserW` | Child processes are re-injected with the engine and inherit virtualization. All three entry points are hooked because each reaches `CreateProcessInternal*` independently. Injection is policy-gated (CIG/ACG kernel query) and fail-fast - an unverifiable policy, a failed injection or a failed resume refuses the spawn with the real error instead of running an unvirtualized child. `ppm run` refuses the root launch the same way when the engine is missing |
 | 3 | Credential Vault | `CredReadW`, `CredWriteW`, `CredDeleteW`, `CredEnumerateW`, `CredFree` | Credentials persist to `.ppm/system/credentials.json`, indexed by target *and* type. Plaintext at rest by design - see [SPEC.md](SPEC.md) §3. Reads, deletes and enumerations never touch or reveal the host credential store |
-| 4 | Config-Driven Environment | `apps.json` `env` (per-app) and `global_env` (any-launch) blocks with `{root}`/`{home}`/`{arch}` templates; core portable vars shielded from redefinition |
-| 5 | Shell Paths | `SHGetKnownFolderPath`, `GetUserProfileDirectoryW` | Profile, AppData (Local/Roaming), Documents and shell folders resolve into `Home/` |
+| 4 | Shell Paths | `SHGetKnownFolderPath`, `GetUserProfileDirectoryW` | Profile, AppData (Local/Roaming), Documents and shell folders resolve into `Home/` |
 | 5 | Process Identity | `SetCurrentProcessExplicitAppUserModelID` | Root-scoped identity established proactively; app-initiated calls are re-parented |
+
+Alongside the hooks, the runner builds the child's environment block from `apps.json`: `env`
+(per-app) and `global_env` (any-launch) blocks with `{root}`/`{home}`/`{arch}` templates, with the
+core portable variables shielded from redefinition - see [SPEC.md](SPEC.md) section 3.4.
 
 ## Process Identity & Presentation
 

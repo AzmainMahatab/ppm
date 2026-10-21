@@ -26,6 +26,14 @@ defines applications:
 
 `ppm schema` regenerates the JSON Schema via `schemars`; `ppm validate` checks the manifest.
 
+### 2.1 Manifest Strictness and Freshness
+
+- Unknown fields are rejected on every struct level of `apps.json` (`deny_unknown_fields`): typos fail loudly at load time instead of being silently dropped. The exception is the internally tagged `version_check` variants, where serde ignores the attribute; the schema catches those at authoring time.
+- Every path a manifest field contributes (`target_dir`, `executable`, `extract_subpath`, `post_install` rules) must be relative and free of `..`, so it cannot leave the directory it is joined onto. Archive entry names are held to the same rule during extraction.
+- Every dependency must name a defined application; `ppm validate` also rejects cycles.
+- `apps.schema.json` is a derived artifact: generated from the Rust type model by `ppm init`, tracked for editor tooling, and guarded by a drift test - a schema/type mismatch fails the test battery.
+- The shipped default config is `manifests/apps.json` itself, embedded into the binary at build time; `ppm init` seeds roots with that exact file.
+
 ## 3. Isolation Boundary Contracts
 
 | # | Boundary | Guarantee |
@@ -88,6 +96,13 @@ opening the file with no sharing, so it never runs beside an appender; a reader 
 rewrite invalidated detects the shrink and replays from the start. A pre-journal `registry.json`
 is migrated into the journal's first snapshot record rather than discarded.
 
+### 3.4 Launch Environment Precedence
+
+Highest wins; conflicts resolve case-insensitively, and duplicate keys never reach the child block:
+1. Portable core vars - `USERPROFILE`, `HOME`, `LOCALAPPDATA`, `APPDATA`, `PPM_ROOT`, `PPM_APP_NAME`. These are the isolation boundary itself and cannot be redefined by any manifest block.
+2. The launching app's `env` block - app-specific values beat global ones.
+3. `global_env` blocks from every manifest entry - injected when *any* app launches, so an engine entry (e.g. `webview2`) provisions its SDK variables for all apps from its own block. Values expand the `{root}`, `{home}`, `{arch}` templates. No presence gating: the vars inject as declared; delete the block (or entry) to disable.
+
 ## 4. On-Disk Layout Invariants
 
 ```
@@ -96,7 +111,7 @@ is migrated into the journal's first snapshot record rather than discarded.
 .ppm/system/            registry.jsonl (op journal), credentials.json (virtual hives)
 .ppm/lib/redirector.dll engine library (deployed by init from embedded asset)
 .ppm/cache/             download staging
-.ppm/logs/              ppm.log, redirector.log
+.ppm/logs/              redirector.log (filter directive: PPM_LOG)
 Apps/<arch>/<target>/    installed binaries
 Home/                    virtualized user profile
 ```
@@ -123,19 +138,6 @@ Auxiliary modes: `--child` (verify virtualized environment in a spawned child),
 `--echo-args` (argument passthrough echo), `--help` (passthrough help).
 The integration harness (`e2e_virtualization.rs`) asserts both process success and
 that the process identity suite executed.
-
-## Launch Environment Precedence
-
-Highest wins; conflicts resolve case-insensitively, and duplicate keys never reach the child block:
-1. Portable core vars - `USERPROFILE`, `HOME`, `LOCALAPPDATA`, `APPDATA`, `PPM_ROOT`, `PPM_APP_NAME`. These are the isolation boundary itself and cannot be redefined by any manifest block.
-2. The launching app's `env` block - app-specific values beat global ones.
-3. `global_env` blocks from every manifest entry - injected when *any* app launches, so an engine entry (e.g. `webview2`) provisions its SDK variables for all apps from its own block. Values expand the `{root}`, `{home}`, `{arch}` templates. No presence gating: the vars inject as declared; delete the block (or entry) to disable.
-
-## Manifest Strictness and Freshness
-
-- Unknown fields are rejected at every level of `apps.json` (`deny_unknown_fields`): typos fail loudly at load time instead of being silently dropped.
-- `apps.schema.json` is a derived artifact: generated from the Rust type model by `ppm init`, tracked for editor tooling, and guarded by a drift test - a schema/type mismatch fails the test battery.
-- The shipped default config is `manifests/apps.json` itself, embedded into the binary at build time; `ppm init` seeds roots with that exact file.
 
 ## 6. Package Trust and Install Atomicity
 
@@ -176,5 +178,5 @@ intercepted. An exploration of that boundary lives on the `explore/sync-isolatio
 branch. Resurrection policy: only if the live e2e probe demonstrates a contract gap
 (i.e., a real application exhibits fixed-name single-instance or IPC collisions that
 the four path/identity boundaries cannot already resolve). See
-[ADR-004](adr/004-reject-kernel-object-and-window-discovery-boundary.md) and
-[ADR-005](adr/005-e2e-probe-as-scope-arbiter.md).
+[ADR-004](docs/adr/004-reject-kernel-object-and-window-discovery-boundary.md) and
+[ADR-005](docs/adr/005-e2e-probe-as-scope-arbiter.md).
