@@ -14,11 +14,12 @@
 use std::fs;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+use windows_sys::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteKeyValueA, RegDeleteKeyValueW, RegDeleteValueA, RegGetValueW, RegOpenKeyExA, RegSetKeyValueA,
-    RegSetKeyValueW, RegSetValueA, RegSetValueExA, RegSetValueExW, RegSetValueW,
+    RegCreateKeyW, RegDeleteKeyValueA, RegDeleteKeyValueW, RegDeleteValueA, RegEnumKeyExA, RegEnumValueA,
+    RegGetValueA, RegGetValueW, RegOpenKeyExA, RegOpenKeyW, RegQueryInfoKeyA, RegQueryValueExA,
+    RegSetKeyValueA, RegSetKeyValueW, RegSetValueA, RegSetValueExA, RegSetValueExW, RegSetValueW,
 };
 
 use crate::support::{to_ansi, to_wide};
@@ -30,6 +31,9 @@ pub(super) fn run() -> Result<(), String> {
     unsafe {
         ansi_writes_reach_the_overlay(&journal)?;
         ansi_deletes_mask_the_overlay(&journal)?;
+        ansi_reads_see_the_overlay()?;
+        ansi_enumerations_list_the_overlay()?;
+        legacy_handles_and_info_see_the_overlay(&journal)?;
     }
     Ok(())
 }
@@ -316,6 +320,240 @@ unsafe fn ansi_deletes_mask_the_overlay(journal: &str) -> Result<(), String> {
         assert_overlay_delete("RegDeleteKeyValueW", status, journal, "del_keyvaluew", ANSI_ROOT)?;
 
         let _ = RegCloseKey(parent);
+    }
+    Ok(())
+}
+
+/// The ANSI read entry points must return what the overlay holds for values the write paths
+/// stored, or an application that writes and reads through the ANSI API sees host data.
+unsafe fn ansi_reads_see_the_overlay() -> Result<(), String> {
+    unsafe {
+        let root_a = to_ansi(ANSI_ROOT).ok_or("root is not ANSI-encodable")?;
+        let mut opened: HKEY = ptr::null_mut();
+        let status = RegOpenKeyExA(HKEY_CURRENT_USER, root_a.as_ptr(), 0, KEY_ALL_ACCESS, &mut opened);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegOpenKeyExA failed with code {status}"));
+        }
+
+        let name = to_ansi("ansi_setvalueexa_virtual").ok_or("name is not ANSI-encodable")?;
+        let mut buf = [0u8; 256];
+        let mut len = buf.len() as u32;
+        let mut value_type = 0u32;
+        let status = RegQueryValueExA(
+            opened,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut value_type,
+            buf.as_mut_ptr(),
+            &mut len,
+        );
+        let _ = RegCloseKey(opened);
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "RegQueryValueExA('ansi_setvalueexa_virtual') failed with code {status}"
+            ));
+        }
+        let read = ansi_text(&buf[..len as usize]);
+        if read != "ansi_setvalueexa_virtual" {
+            return Err(format!("RegQueryValueExA returned '{read}' for an overlay value"));
+        }
+
+        let key_name = to_ansi("ansi_setkeyvaluea").ok_or("name is not ANSI-encodable")?;
+        let mut get_buf = [0u8; 256];
+        let mut get_len = get_buf.len() as u32;
+        let status = RegGetValueA(
+            HKEY_CURRENT_USER,
+            root_a.as_ptr(),
+            key_name.as_ptr(),
+            RRF_RT_REG_SZ,
+            ptr::null_mut(),
+            get_buf.as_mut_ptr().cast(),
+            &mut get_len,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "RegGetValueA('ansi_setkeyvaluea') failed with code {status}"
+            ));
+        }
+        let read = ansi_text(&get_buf[..get_len as usize]);
+        if read != "ansi_setkeyvaluea" {
+            return Err(format!("RegGetValueA returned '{read}' for an overlay value"));
+        }
+    }
+    Ok(())
+}
+
+/// Legacy entry points that open keys by wide name must hand back a handle the engine tracks, so
+/// ANSI calls through it reach the overlay; `RegQueryInfoKeyA` must count what the overlay holds.
+unsafe fn legacy_handles_and_info_see_the_overlay(journal: &str) -> Result<(), String> {
+    unsafe {
+        let root_w = to_wide(ANSI_ROOT);
+        let mut opened: HKEY = ptr::null_mut();
+        let status = RegOpenKeyW(HKEY_CURRENT_USER, root_w.as_ptr(), &mut opened);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegOpenKeyW failed with code {status}"));
+        }
+
+        let name = to_ansi("ansi_setvalueexa_virtual").ok_or("name is not ANSI-encodable")?;
+        let mut buf = [0u8; 256];
+        let mut len = buf.len() as u32;
+        let status = RegQueryValueExA(
+            opened,
+            name.as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            buf.as_mut_ptr(),
+            &mut len,
+        );
+        if status != ERROR_SUCCESS {
+            let _ = RegCloseKey(opened);
+            return Err(format!(
+                "RegQueryValueExA through a RegOpenKeyW handle failed with code {status}"
+            ));
+        }
+        let read = ansi_text(&buf[..len as usize]);
+        if read != "ansi_setvalueexa_virtual" {
+            let _ = RegCloseKey(opened);
+            return Err(format!(
+                "RegQueryValueExA through a RegOpenKeyW handle returned '{read}'"
+            ));
+        }
+
+        // Live values under the root: the four written by the write tests. The deleted ones are
+        // masked and not listed. The longest name is 'ansi_setvalueexa_virtual'.
+        let mut values = 0u32;
+        let mut max_value_name = 0u32;
+        let status = RegQueryInfoKeyA(
+            opened,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut values,
+            &mut max_value_name,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+        let _ = RegCloseKey(opened);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegQueryInfoKeyA failed with code {status}"));
+        }
+        if values != 4 {
+            return Err(format!("RegQueryInfoKeyA reports {values} values; expected 4"));
+        }
+        if max_value_name != 24 {
+            return Err(format!(
+                "RegQueryInfoKeyA reports a longest value name of {max_value_name} bytes; expected 24"
+            ));
+        }
+
+        let created_path = format!("{ANSI_ROOT}\\legacy_created");
+        let created_w = to_wide(&created_path);
+        let mut created: HKEY = ptr::null_mut();
+        let status = RegCreateKeyW(HKEY_CURRENT_USER, created_w.as_ptr(), &mut created);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegCreateKeyW failed with code {status}"));
+        }
+        let name = to_ansi("ansi_legacy_create").ok_or("name is not ANSI-encodable")?;
+        let data = to_ansi("ansi_legacy_create").ok_or("data is not ANSI-encodable")?;
+        let status = RegSetValueExA(
+            created,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            data.as_ptr(),
+            data.len() as u32,
+        );
+        let _ = RegCloseKey(created);
+        assert_overlay_write(
+            "RegSetValueExA (RegCreateKeyW handle)",
+            status,
+            journal,
+            "ansi_legacy_create",
+            visible_wide(&created_path, "ansi_legacy_create"),
+        )
+    }
+}
+
+/// Decodes an ANSI `REG_SZ` payload the caller read back, dropping its terminator.
+fn ansi_text(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// The ANSI enumeration entry points must list the overlay's values and subkeys, or an
+/// application that enumerates through the ANSI API misses what it wrote.
+unsafe fn ansi_enumerations_list_the_overlay() -> Result<(), String> {
+    unsafe {
+        let root_a = to_ansi(ANSI_ROOT).ok_or("root is not ANSI-encodable")?;
+        let mut opened: HKEY = ptr::null_mut();
+        let status = RegOpenKeyExA(HKEY_CURRENT_USER, root_a.as_ptr(), 0, KEY_ALL_ACCESS, &mut opened);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegOpenKeyExA failed with code {status}"));
+        }
+
+        let mut values = Vec::new();
+        for index in 0.. {
+            let mut name = [0u8; 256];
+            let mut name_len = name.len() as u32;
+            let status = RegEnumValueA(
+                opened,
+                index,
+                name.as_mut_ptr(),
+                &mut name_len,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status != ERROR_SUCCESS {
+                let _ = RegCloseKey(opened);
+                return Err(format!("RegEnumValueA({index}) failed with code {status}"));
+            }
+            values.push(ansi_text(&name[..name_len as usize]));
+        }
+
+        let mut subkeys = Vec::new();
+        for index in 0.. {
+            let mut name = [0u8; 256];
+            let mut name_len = name.len() as u32;
+            let status = RegEnumKeyExA(
+                opened,
+                index,
+                name.as_mut_ptr(),
+                &mut name_len,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status != ERROR_SUCCESS {
+                let _ = RegCloseKey(opened);
+                return Err(format!("RegEnumKeyExA({index}) failed with code {status}"));
+            }
+            subkeys.push(ansi_text(&name[..name_len as usize]));
+        }
+        let _ = RegCloseKey(opened);
+
+        if !values.iter().any(|v| v == "ansi_setvalueexa_virtual") {
+            return Err(format!(
+                "RegEnumValueA omits the overlay value 'ansi_setvalueexa_virtual': listed {values:?}"
+            ));
+        }
+        if !subkeys.iter().any(|k| k == "defval_a") {
+            return Err(format!(
+                "RegEnumKeyExA omits the overlay subkey 'defval_a': listed {subkeys:?}"
+            ));
+        }
     }
     Ok(())
 }

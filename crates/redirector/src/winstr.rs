@@ -79,6 +79,57 @@ pub(crate) fn ansi_bytes_to_wide(bytes: &[u8]) -> Vec<u16> {
     }
 }
 
+/// Encodes stored UTF-16 payload bytes as ANSI, the inverse of `ansi_bytes_to_wide`. NULs are
+/// kept, so a `REG_MULTI_SZ` payload keeps its separators.
+pub(crate) fn wide_bytes_to_ansi(bytes: &[u8]) -> Vec<u8> {
+    use windows_sys::Win32::Globalization::{CP_ACP, WideCharToMultiByte};
+    let wide: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    if wide.is_empty() {
+        return Vec::new();
+    }
+    let length = i32::try_from(wide.len()).expect("invariant: registry value data is below 2 GiB");
+    // SAFETY: both calls read exactly `length` units of the live buffer and write into a buffer
+    // of the size the first call reported.
+    unsafe {
+        let needed = WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            length,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+        assert!(
+            needed > 0,
+            "invariant: the system ANSI code page encodes any UTF-16 sequence"
+        );
+        let mut ansi = vec![0u8; needed as usize];
+        let written = WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            length,
+            ansi.as_mut_ptr(),
+            needed,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+        assert!(
+            written > 0,
+            "invariant: the system ANSI code page encodes any UTF-16 sequence"
+        );
+        ansi.truncate(written as usize);
+        ansi
+    }
+}
+
 /// Encodes `s` as the NUL-terminated ANSI string an `...A` API returns. A character the code
 /// page lacks becomes its default character - the same conversion the system's own `...A`
 /// functions apply to their wide results.

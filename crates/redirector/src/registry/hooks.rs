@@ -2,7 +2,10 @@ use crate::detour::{guard_detour, hook_export, load_trampoline, try_load_trampol
 use crate::registry::enumeration::{HostListing, KeyView, ValueOrigin, cached_view, merge};
 use crate::registry::handle_table::{KeyScope, get_handle_table};
 use crate::registry::store::{KeyResolution, ValueResolution, get_registry_store};
-use crate::winstr::{ansi_bytes_to_wide, ansi_to_string, to_wide, wide_to_string};
+use crate::winstr::{
+    ansi_bytes_to_wide, ansi_to_string, to_ansi, to_wide, wide_bytes_to_ansi, wide_to_string,
+};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -320,6 +323,36 @@ type FnRegCreateKeyExA = unsafe extern "system" fn(
     *mut HKEY,
     *mut u32,
 ) -> i32;
+type FnRegQueryValueExA =
+    unsafe extern "system" fn(HKEY, *const u8, *mut u32, *mut u32, *mut u8, *mut u32) -> i32;
+type FnRegGetValueA =
+    unsafe extern "system" fn(HKEY, *const u8, *const u8, u32, *mut u32, *mut c_void, *mut u32) -> i32;
+type FnRegEnumKeyExA = unsafe extern "system" fn(
+    HKEY,
+    u32,
+    *mut u8,
+    *mut u32,
+    *const u32,
+    *mut u8,
+    *mut u32,
+    *mut FILETIME,
+) -> i32;
+type FnRegEnumValueA =
+    unsafe extern "system" fn(HKEY, u32, *mut u8, *mut u32, *const u32, *mut u32, *mut u8, *mut u32) -> i32;
+type FnRegQueryInfoKeyA = unsafe extern "system" fn(
+    HKEY,
+    *mut u8,
+    *mut u32,
+    *const u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut FILETIME,
+) -> i32;
 type FnRegSetValueExW = unsafe extern "system" fn(HKEY, *const u16, u32, u32, *const u8, u32) -> i32;
 type FnRegSetValueExA = unsafe extern "system" fn(HKEY, *const u8, u32, u32, *const u8, u32) -> i32;
 type FnRegSetKeyValueW =
@@ -369,6 +402,11 @@ static REAL_REG_CREATE_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::nu
 static REAL_REG_QUERY_VALUE_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_GET_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_SET_VALUE_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_QUERY_VALUE_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_GET_VALUE_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_ENUM_KEY_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_ENUM_VALUE_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_QUERY_INFO_KEY_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_OPEN_KEY_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_CREATE_KEY_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_SET_VALUE_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -584,36 +622,70 @@ unsafe extern "system" fn hook_reg_query_value_ex_w(
     guard_detour!(
         &IN_REG_HOOK,
         unsafe { real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data) },
-        {
-            let Target::Resolved { path, synthetic } = resolve_target(hkey, std::ptr::null()) else {
-                return unsafe { real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data) };
-            };
-            let val_name = wide_to_string(lp_value_name);
+        query_value_virtually(
+            "RegQueryValueExW",
+            resolve_subkey(hkey, ""),
+            &wide_to_string(lp_value_name),
+            ValueOut {
+                lp_type,
+                lp_data,
+                lpcb_data
+            },
+            stored_payload,
+            || unsafe { real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data) },
+        )
+    )
+}
 
-            match get_registry_store().resolve_value(&path, &val_name) {
-                ValueResolution::Virtual { val_type, data } => {
-                    tracing::debug!("RegQueryValueExW [Virtual Hit]: {path} / {val_name}");
-                    // SAFETY: every pointer below is a caller-owned RegQueryValueExW
-                    // out-parameter, null-checked inside `serve_value` and bounded by the
-                    // caller's own size cell.
-                    unsafe { serve_value(val_type, &data, lp_type, lp_data, lpcb_data) }
-                }
-                ValueResolution::Masked => {
-                    tracing::debug!("RegQueryValueExW [Tombstoned Value]: {path} / {val_name}");
-                    ERROR_FILE_NOT_FOUND as i32
-                }
-                ValueResolution::Corrupt => {
-                    // The store already logged the corruption. Reading as absent keeps the
-                    // boundary: falling through would answer with the real user's data.
-                    ERROR_FILE_NOT_FOUND as i32
-                }
-                ValueResolution::PassThrough if synthetic => ERROR_FILE_NOT_FOUND as i32,
-                ValueResolution::PassThrough => unsafe {
-                    real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data)
-                },
+/// The caller-owned out-parameters of a value read: the type, the data buffer and its size cell.
+#[derive(Clone, Copy)]
+struct ValueOut {
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+}
+
+/// Serves a value read from the overlay under the key `hkey` names, or falls through to
+/// `host_query` for a value the overlay does not shadow.
+fn query_value_virtually(
+    api: &str,
+    target: Target,
+    name: &str,
+    out: ValueOut,
+    payload: PayloadEncoding,
+    host_query: impl Fn() -> i32,
+) -> i32 {
+    let Target::Resolved { path, synthetic } = target else {
+        return host_query();
+    };
+
+    match get_registry_store().resolve_value(&path, name) {
+        ValueResolution::Virtual { val_type, data } => {
+            tracing::debug!("{api} [Virtual Hit]: {path} / {name}");
+            // SAFETY: every pointer is a caller-owned out-parameter of the intercepted API;
+            // `serve_value` null-checks them and bounds the copy by the caller's size cell.
+            unsafe {
+                serve_value(
+                    val_type,
+                    &payload(val_type, &data),
+                    out.lp_type,
+                    out.lp_data,
+                    out.lpcb_data,
+                )
             }
         }
-    )
+        ValueResolution::Masked => {
+            tracing::debug!("{api} [Tombstoned Value]: {path} / {name}");
+            ERROR_FILE_NOT_FOUND as i32
+        }
+        ValueResolution::Corrupt => {
+            // The store already logged the corruption. Reading as absent keeps the boundary:
+            // falling through would answer with the real user's data.
+            ERROR_FILE_NOT_FOUND as i32
+        }
+        ValueResolution::PassThrough if synthetic => ERROR_FILE_NOT_FOUND as i32,
+        ValueResolution::PassThrough => host_query(),
+    }
 }
 
 /// Serves `RegGetValueW` from the overlay.
@@ -637,60 +709,492 @@ unsafe extern "system" fn hook_reg_get_value_w(
     let real_fn: FnRegGetValueW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_GET_VALUE_W)) };
     guard_detour!(
         &IN_REG_HOOK,
-        unsafe { real_fn(hkey, lp_sub_key, lp_value, dw_flags, pdw_type, pv_data, pcb_data,) },
-        {
-            let forward =
-                || unsafe { real_fn(hkey, lp_sub_key, lp_value, dw_flags, pdw_type, pv_data, pcb_data) };
+        unsafe { real_fn(hkey, lp_sub_key, lp_value, dw_flags, pdw_type, pv_data, pcb_data) },
+        // Why the subkey-less form is resolved here too, rather than forwarded: the
+        // re-entrancy guard is one flag for the whole registry module, so a forwarded call
+        // would re-enter `hook_reg_query_value_ex_w` with the guard already held and take its
+        // unvirtualized fallback. Forwarding would therefore *break* the form that works today.
+        // Resolving both forms here keeps one path and no nesting.
+        get_value_virtually(
+            "RegGetValueW",
+            resolve_subkey(hkey, &wide_to_string(lp_sub_key)),
+            &wide_to_string(lp_value),
+            dw_flags,
+            ValueOut {
+                lp_type: pdw_type,
+                lp_data: pv_data.cast(),
+                lpcb_data: pcb_data
+            },
+            stored_payload,
+            || unsafe { real_fn(hkey, lp_sub_key, lp_value, dw_flags, pdw_type, pv_data, pcb_data) },
+        )
+    )
+}
 
-            // Why the subkey-less form is resolved here too, rather than forwarded: the
-            // re-entrancy guard is one flag for the whole registry module, so a forwarded
-            // call would re-enter `hook_reg_query_value_ex_w` with the guard already held and
-            // take its unvirtualized fallback. Forwarding would therefore *break* the form
-            // that works today. Resolving both forms here keeps one path and no nesting.
-            let Target::Resolved { path, synthetic } = resolve_target(hkey, lp_sub_key) else {
-                return forward();
-            };
-            let val_name = wide_to_string(lp_value);
+/// Serves a `RegGetValueW`-shaped read from the overlay, applying the `RRF_*` contract to the
+/// stored value. A value the overlay does not shadow falls through to `host_get`.
+fn get_value_virtually(
+    api: &str,
+    target: Target,
+    name: &str,
+    dw_flags: u32,
+    out: ValueOut,
+    payload: PayloadEncoding,
+    host_get: impl Fn() -> i32,
+) -> i32 {
+    let Target::Resolved { path, synthetic } = target else {
+        return host_get();
+    };
+    let ValueOut {
+        lp_type: pdw_type,
+        lp_data: pv_data,
+        lpcb_data: pcb_data,
+    } = out;
 
-            let zero_on_failure = dw_flags & RRF_ZEROONFAILURE != 0;
-            let fail = |status: i32| -> i32 {
-                if zero_on_failure && !pv_data.is_null() && !pcb_data.is_null() {
-                    // SAFETY: both pointers are non-null (checked) caller-owned
-                    // out-parameters; the fill is bounded by the caller's own size cell.
+    let zero_on_failure = dw_flags & RRF_ZEROONFAILURE != 0;
+    let fail = |status: i32| -> i32 {
+        if zero_on_failure && !pv_data.is_null() && !pcb_data.is_null() {
+            // SAFETY: both pointers are non-null (checked) caller-owned out-parameters; the fill
+            // is bounded by the caller's own size cell.
+            unsafe {
+                std::ptr::write_bytes(pv_data.cast::<u8>(), 0, *pcb_data as usize);
+            }
+        }
+        status
+    };
+
+    match get_registry_store().resolve_value(&path, name) {
+        ValueResolution::Virtual { val_type, data } => {
+            match apply_get_value_contract(val_type, data, dw_flags) {
+                Ok((served_type, served_data)) => {
+                    tracing::debug!("{api} [Virtual Hit]: {path} / {name}");
+                    // SAFETY: caller-owned out-parameters, null-checked and bounded inside `serve_value`.
                     unsafe {
-                        std::ptr::write_bytes(pv_data.cast::<u8>(), 0, *pcb_data as usize);
+                        serve_value(
+                            served_type,
+                            &payload(served_type, &served_data),
+                            pdw_type,
+                            pv_data.cast::<u8>(),
+                            pcb_data,
+                        )
                     }
                 }
-                status
+                Err(status) => fail(status),
+            }
+        }
+        ValueResolution::Masked | ValueResolution::Corrupt => {
+            tracing::debug!("{api} [Masked]: {path} / {name}");
+            fail(ERROR_FILE_NOT_FOUND as i32)
+        }
+        ValueResolution::PassThrough if synthetic => fail(ERROR_FILE_NOT_FOUND as i32),
+        ValueResolution::PassThrough => host_get(),
+    }
+}
+
+/// Encodes a served payload for the caller's entry point: the stored form for `...W`, the ANSI
+/// code page for `...A`.
+type PayloadEncoding = for<'a> fn(u32, &'a [u8]) -> Cow<'a, [u8]>;
+
+/// Serves a wide read's payload exactly as the overlay stores it.
+fn stored_payload(_val_type: u32, data: &[u8]) -> Cow<'_, [u8]> {
+    Cow::Borrowed(data)
+}
+
+/// Serves an `...A` read: text payloads are encoded to the ANSI code page, as the system does.
+fn ansi_payload(val_type: u32, data: &[u8]) -> Cow<'_, [u8]> {
+    if matches!(val_type, REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ) {
+        Cow::Owned(wide_bytes_to_ansi(data))
+    } else {
+        Cow::Borrowed(data)
+    }
+}
+
+unsafe extern "system" fn hook_reg_query_value_ex_a(
+    hkey: HKEY,
+    lp_value_name: *const u8,
+    lp_reserved: *mut u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> i32 {
+    let real_fn: FnRegQueryValueExA =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_QUERY_VALUE_EX_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data) },
+        query_value_virtually(
+            "RegQueryValueExA",
+            resolve_subkey(hkey, ""),
+            &ansi_to_string(lp_value_name),
+            ValueOut {
+                lp_type,
+                lp_data,
+                lpcb_data
+            },
+            ansi_payload,
+            || unsafe { real_fn(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data) },
+        )
+    )
+}
+
+unsafe extern "system" fn hook_reg_get_value_a(
+    hkey: HKEY,
+    lp_sub_key: *const u8,
+    lp_value: *const u8,
+    dw_flags: u32,
+    pdw_type: *mut u32,
+    pv_data: *mut c_void,
+    pcb_data: *mut u32,
+) -> i32 {
+    let real_fn: FnRegGetValueA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_GET_VALUE_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, lp_value, dw_flags, pdw_type, pv_data, pcb_data) },
+        get_value_virtually(
+            "RegGetValueA",
+            resolve_subkey(hkey, &ansi_to_string(lp_sub_key)),
+            &ansi_to_string(lp_value),
+            dw_flags,
+            ValueOut {
+                lp_type: pdw_type,
+                lp_data: pv_data.cast(),
+                lpcb_data: pcb_data
+            },
+            ansi_payload,
+            || unsafe { real_fn(hkey, lp_sub_key, lp_value, dw_flags, pdw_type, pv_data, pcb_data) },
+        )
+    )
+}
+
+/// A name spelling an enumerator writes: UTF-16 for the `...W` entry points, the ANSI code page
+/// for `...A`. Lengths are measured in the caller's units, so buffer sizing matches the call.
+trait NameUnit: Copy {
+    /// The zero unit that terminates a name.
+    const NUL: Self;
+    /// Encodes `name` without its terminator.
+    fn encode(name: &str) -> Vec<Self>;
+}
+
+impl NameUnit for u16 {
+    const NUL: Self = 0;
+
+    fn encode(name: &str) -> Vec<Self> {
+        name.encode_utf16().collect()
+    }
+}
+
+impl NameUnit for u8 {
+    const NUL: Self = 0;
+
+    fn encode(name: &str) -> Vec<Self> {
+        // `to_ansi` appends the terminator; the enumerator writes its own.
+        let mut ansi = to_ansi(name);
+        ansi.pop();
+        ansi
+    }
+}
+
+/// Serves `RegEnumKeyExA`: the listing's subkey names in the ANSI code page. The class and
+/// timestamp are reported empty, as the wide enumerator does.
+unsafe extern "system" fn hook_reg_enum_key_ex_a(
+    hkey: HKEY,
+    dw_index: u32,
+    lp_name: *mut u8,
+    lpcch_name: *mut u32,
+    lp_reserved: *const u32,
+    lp_class: *mut u8,
+    lpcch_class: *mut u32,
+    lpft_last_write_time: *mut FILETIME,
+) -> i32 {
+    let real_fn: FnRegEnumKeyExA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_KEY_EX_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                dw_index,
+                lp_name,
+                lpcch_name,
+                lp_reserved,
+                lp_class,
+                lpcch_class,
+                lpft_last_write_time,
+            )
+        },
+        {
+            let listing = match unsafe { listing_for(hkey) } {
+                Ok(listing) => listing,
+                Err(UNTRACKED_FORWARD) => {
+                    return unsafe {
+                        real_fn(
+                            hkey,
+                            dw_index,
+                            lp_name,
+                            lpcch_name,
+                            lp_reserved,
+                            lp_class,
+                            lpcch_class,
+                            lpft_last_write_time,
+                        )
+                    };
+                }
+                Err(status) => return status,
             };
 
-            match get_registry_store().resolve_value(&path, &val_name) {
-                ValueResolution::Virtual { val_type, data } => {
-                    match apply_get_value_contract(val_type, data, dw_flags) {
-                        Ok((served_type, served_data)) => {
-                            tracing::debug!("RegGetValueW [Virtual Hit]: {path} / {val_name}");
-                            // SAFETY: caller-owned out-parameters, null-checked and bounded
-                            // inside `serve_value`.
+            let Some(name) = listing.view.subkeys.get(dw_index as usize) else {
+                return ERROR_NO_MORE_ITEMS as i32;
+            };
+
+            // SAFETY: the class and timestamp cells are caller-owned out-parameters, each
+            // null-checked before use.
+            unsafe {
+                if !lpcch_class.is_null() {
+                    *lpcch_class = 0;
+                }
+                if !lp_class.is_null() {
+                    *lp_class = 0;
+                }
+                if !lpft_last_write_time.is_null() {
+                    *lpft_last_write_time = std::mem::zeroed::<FILETIME>();
+                }
+
+                serve_name(name, lp_name, lpcch_name)
+            }
+        }
+    )
+}
+
+/// Serves `RegEnumValueA`: the merged value names in the ANSI code page, with data from the
+/// side that holds it and text payloads encoded for the caller.
+unsafe extern "system" fn hook_reg_enum_value_a(
+    hkey: HKEY,
+    dw_index: u32,
+    lp_value_name: *mut u8,
+    lpcch_value_name: *mut u32,
+    lp_reserved: *const u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> i32 {
+    let real_fn: FnRegEnumValueA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_VALUE_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                dw_index,
+                lp_value_name,
+                lpcch_value_name,
+                lp_reserved,
+                lp_type,
+                lp_data,
+                lpcb_data,
+            )
+        },
+        {
+            let listing = match unsafe { listing_for(hkey) } {
+                Ok(listing) => listing,
+                Err(UNTRACKED_FORWARD) => {
+                    return unsafe {
+                        real_fn(
+                            hkey,
+                            dw_index,
+                            lp_value_name,
+                            lpcch_value_name,
+                            lp_reserved,
+                            lp_type,
+                            lp_data,
+                            lpcb_data,
+                        )
+                    };
+                }
+                Err(status) => return status,
+            };
+
+            let Some(entry) = listing.view.values.get(dw_index as usize) else {
+                return ERROR_NO_MORE_ITEMS as i32;
+            };
+
+            let name_status = unsafe { serve_name(&entry.name, lp_value_name, lpcch_value_name) };
+            if name_status != ERROR_SUCCESS as i32 {
+                return name_status;
+            }
+
+            match entry.origin {
+                ValueOrigin::Host => {
+                    let Some(trampoline) = try_load_trampoline(&REAL_REG_QUERY_VALUE_EX_A) else {
+                        tracing::error!(
+                            "RegEnumValueA: RegQueryValueExA is not hooked, so the host value '{}' cannot be read",
+                            entry.name
+                        );
+                        return ERROR_FILE_NOT_FOUND as i32;
+                    };
+                    let query: FnRegQueryValueExA = unsafe { std::mem::transmute(trampoline) };
+                    let name_ansi = to_ansi(&entry.name);
+                    // SAFETY: `hkey` is the caller's live host handle and `name_ansi` is a
+                    // NUL-terminated ANSI name; the remaining pointers are the caller's own.
+                    unsafe {
+                        query(
+                            hkey,
+                            name_ansi.as_ptr(),
+                            std::ptr::null_mut(),
+                            lp_type,
+                            lp_data,
+                            lpcb_data,
+                        )
+                    }
+                }
+                ValueOrigin::Overlay => {
+                    match get_registry_store().resolve_value(&listing.path, &entry.name) {
+                        ValueResolution::Virtual { val_type, data } => {
+                            // SAFETY: caller-owned out-parameters, bounded inside `serve_value`.
                             unsafe {
                                 serve_value(
-                                    served_type,
-                                    &served_data,
-                                    pdw_type,
-                                    pv_data.cast::<u8>(),
-                                    pcb_data,
+                                    val_type,
+                                    &ansi_payload(val_type, &data),
+                                    lp_type,
+                                    lp_data,
+                                    lpcb_data,
                                 )
                             }
                         }
-                        Err(status) => fail(status),
+                        // The listing named this value a moment ago, so its disappearance means the
+                        // overlay changed underneath; report it the way a deleted value reads.
+                        _ => ERROR_FILE_NOT_FOUND as i32,
                     }
                 }
-                ValueResolution::Masked | ValueResolution::Corrupt => {
-                    tracing::debug!("RegGetValueW [Masked]: {path} / {val_name}");
-                    fail(ERROR_FILE_NOT_FOUND as i32)
-                }
-                ValueResolution::PassThrough if synthetic => fail(ERROR_FILE_NOT_FOUND as i32),
-                ValueResolution::PassThrough => forward(),
             }
+        }
+    )
+}
+
+/// Serves `RegQueryInfoKeyA`. The counts come from the merged listing; the longest names are
+/// measured in ANSI bytes, the unit the caller sizes its buffers in. The host answers class,
+/// security and timestamp, and its own longest value, as it does for the wide entry point.
+unsafe extern "system" fn hook_reg_query_info_key_a(
+    hkey: HKEY,
+    lp_class: *mut u8,
+    lpcch_class: *mut u32,
+    lp_reserved: *const u32,
+    lpc_sub_keys: *mut u32,
+    lpcb_max_sub_key_len: *mut u32,
+    lpcb_max_class_len: *mut u32,
+    lpc_values: *mut u32,
+    lpcb_max_value_name_len: *mut u32,
+    lpcb_max_value_len: *mut u32,
+    lpcb_security_descriptor: *mut u32,
+    lpft_last_write_time: *mut FILETIME,
+) -> i32 {
+    let real_fn: FnRegQueryInfoKeyA =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_QUERY_INFO_KEY_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                lp_class,
+                lpcch_class,
+                lp_reserved,
+                lpc_sub_keys,
+                lpcb_max_sub_key_len,
+                lpcb_max_class_len,
+                lpc_values,
+                lpcb_max_value_name_len,
+                lpcb_max_value_len,
+                lpcb_security_descriptor,
+                lpft_last_write_time,
+            )
+        },
+        {
+            let listing = match unsafe { listing_for(hkey) } {
+                Ok(listing) => listing,
+                Err(UNTRACKED_FORWARD) => {
+                    return unsafe {
+                        real_fn(
+                            hkey,
+                            lp_class,
+                            lpcch_class,
+                            lp_reserved,
+                            lpc_sub_keys,
+                            lpcb_max_sub_key_len,
+                            lpcb_max_class_len,
+                            lpc_values,
+                            lpcb_max_value_name_len,
+                            lpcb_max_value_len,
+                            lpcb_security_descriptor,
+                            lpft_last_write_time,
+                        )
+                    };
+                }
+                Err(status) => return status,
+            };
+
+            let mut host_max_value_len = 0u32;
+            let host_answered = unsafe {
+                real_fn(
+                    hkey,
+                    lp_class,
+                    lpcch_class,
+                    lp_reserved,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    lpcb_max_class_len,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut host_max_value_len,
+                    lpcb_security_descriptor,
+                    lpft_last_write_time,
+                )
+            } == ERROR_SUCCESS as i32;
+            if !host_answered {
+                host_max_value_len = 0;
+            }
+
+            // Stored overlay values are UTF-16, so their byte length over-estimates the ANSI form.
+            // Over-estimating is safe: the caller allocates more than it needs.
+            let overlay_max_value_len = listing
+                .view
+                .values
+                .iter()
+                .filter_map(|entry| get_registry_store().overlay_value_len(&listing.path, &entry.name))
+                .max()
+                .unwrap_or(0) as u32;
+
+            let max_subkey_len = listing
+                .view
+                .subkeys
+                .iter()
+                .map(|name| <u8 as NameUnit>::encode(name).len() as u32)
+                .max()
+                .unwrap_or(0);
+            let max_value_name_len = listing
+                .view
+                .values
+                .iter()
+                .map(|entry| <u8 as NameUnit>::encode(&entry.name).len() as u32)
+                .max()
+                .unwrap_or(0);
+
+            // SAFETY: every cell below is a caller-owned out-parameter, null-checked first.
+            unsafe {
+                if !lpc_sub_keys.is_null() {
+                    *lpc_sub_keys = listing.view.subkeys.len() as u32;
+                }
+                if !lpcb_max_sub_key_len.is_null() {
+                    *lpcb_max_sub_key_len = max_subkey_len;
+                }
+                if !lpc_values.is_null() {
+                    *lpc_values = listing.view.values.len() as u32;
+                }
+                if !lpcb_max_value_name_len.is_null() {
+                    *lpcb_max_value_name_len = max_value_name_len;
+                }
+                if !lpcb_max_value_len.is_null() {
+                    *lpcb_max_value_len = host_max_value_len.max(overlay_max_value_len);
+                }
+            }
+
+            ERROR_SUCCESS as i32
         }
     )
 }
@@ -1101,13 +1605,13 @@ unsafe extern "system" fn hook_reg_open_current_user(sam_desired: u32, phk_resul
 ///
 /// # Safety
 /// `buffer` and `size` must be the caller-owned name out-parameters of the intercepted API.
-unsafe fn serve_name(name: &str, buffer: *mut u16, size: *mut u32) -> i32 {
+unsafe fn serve_name<C: NameUnit>(name: &str, buffer: *mut C, size: *mut u32) -> i32 {
     if size.is_null() {
         // The size cell is mandatory: without it the name buffer has no bound.
         return ERROR_INVALID_PARAMETER as i32;
     }
 
-    let encoded: Vec<u16> = name.encode_utf16().collect();
+    let encoded = C::encode(name);
     let required = encoded.len() as u32;
 
     unsafe {
@@ -1123,7 +1627,7 @@ unsafe fn serve_name(name: &str, buffer: *mut u16, size: *mut u32) -> i32 {
         }
 
         std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer, encoded.len());
-        *buffer.add(encoded.len()) = 0;
+        *buffer.add(encoded.len()) = C::NUL;
         *size = required;
     }
     ERROR_SUCCESS as i32
@@ -1592,7 +2096,7 @@ pub fn init_hooks() {
         //      as a missing row instead of hiding it among a dozen near-identical call blocks -
         //      which is how RegDeleteKeyExW and RegDeleteTreeW stayed unhooked while their
         //      sibling RegDeleteKeyW was fixed.
-        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 24] = [
+        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 29] = [
             (
                 "RegOpenKeyExW",
                 &REAL_REG_OPEN_KEY_EX_W,
@@ -1712,6 +2216,31 @@ pub fn init_hooks() {
                 "RegDeleteKeyValueA",
                 &REAL_REG_DELETE_KEY_VALUE_A,
                 hook_reg_delete_key_value_a as *mut c_void,
+            ),
+            (
+                "RegQueryValueExA",
+                &REAL_REG_QUERY_VALUE_EX_A,
+                hook_reg_query_value_ex_a as *mut c_void,
+            ),
+            (
+                "RegGetValueA",
+                &REAL_REG_GET_VALUE_A,
+                hook_reg_get_value_a as *mut c_void,
+            ),
+            (
+                "RegEnumKeyExA",
+                &REAL_REG_ENUM_KEY_EX_A,
+                hook_reg_enum_key_ex_a as *mut c_void,
+            ),
+            (
+                "RegEnumValueA",
+                &REAL_REG_ENUM_VALUE_A,
+                hook_reg_enum_value_a as *mut c_void,
+            ),
+            (
+                "RegQueryInfoKeyA",
+                &REAL_REG_QUERY_INFO_KEY_A,
+                hook_reg_query_info_key_a as *mut c_void,
             ),
         ];
 
