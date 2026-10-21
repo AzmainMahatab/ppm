@@ -207,6 +207,7 @@
     "VersionCheckConfig": {
       "oneOf": [
         {
+          "description": "An electron-builder `latest.yml` update manifest.",
           "type": "object",
           "properties": {
             "type": {
@@ -233,12 +234,14 @@
               ]
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "url"
           ]
         },
         {
+          "description": "The latest release of a GitHub repository.",
           "type": "object",
           "properties": {
             "asset_pattern": {
@@ -259,12 +262,14 @@
               "const": "github_release"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "repo"
           ]
         },
         {
+          "description": "A JSON document queried with ppm's path-and-predicate syntax.",
           "type": "object",
           "properties": {
             "type": {
@@ -298,6 +303,7 @@
               "$ref": "#/$defs/ArchString"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "url",
@@ -305,6 +311,7 @@
           ]
         },
         {
+          "description": "A page scraped with a regular expression whose first group is the version.",
           "type": "object",
           "properties": {
             "regex": {
@@ -321,6 +328,7 @@
               "$ref": "#/$defs/ArchString"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "url",

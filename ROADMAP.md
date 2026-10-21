@@ -51,7 +51,7 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 - [ ] R24 Decide whether `update` stays — it runs the same cycle as `install` without `--force`; keep one command or give `update` distinct behaviour (only touch installed apps).
 - [x] R25 Launchers that behave like the app — `.bat` launchers use `start`, so the exit code is lost and console apps detach; launchers for uninstalled apps are never removed. Done when exit codes propagate and stale launchers are cleaned. Verified 2026-10-21: launcher unit tests on built console/GUI fixtures, and a live launcher returned exit 0 and 1 from `ppm run`; app ids are now restricted so they cannot inject batch syntax.
 - [ ] R26 Typed manifest paths — one `RelativePath` type parsed at deserialization replaces the load-time check plus use-site confinement, with the schema regenerated.
-- [ ] R27 Strict `version_check` variants — restructure like `package` so unknown fields inside a variant are rejected at load, closing the documented serde gap.
+- [x] R27 Strict `version_check` variants — restructure like `package` so unknown fields inside a variant are rejected at load, closing the documented serde gap. Verified 2026-10-21: an `asset_patern` typo inside `version_check` is now rejected at load (config test); the regenerated schema denies extra properties per variant; live `ppm check` still resolves all three strategies.
 
 ## Observability
 

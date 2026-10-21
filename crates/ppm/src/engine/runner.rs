@@ -460,7 +460,9 @@ fn quote_win32_arg(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{AppDefinition, PackageConfig, PackageKind, VersionCheckConfig};
+    use crate::core::config::{
+        AppDefinition, GitHubReleaseCheck, PackageConfig, PackageKind, VersionCheckConfig,
+    };
 
     #[test]
     fn collect_global_env_gathers_all_entries_and_expands_templates() {
@@ -483,10 +485,10 @@ mod tests {
                             "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".to_string(),
                             "{root}/Apps/{arch}/WebView2".to_string(),
                         )])),
-                        version_check: VersionCheckConfig::GitHubRelease {
+                        version_check: VersionCheckConfig::GitHubRelease(GitHubReleaseCheck {
                             repo: "a/b".to_string(),
                             asset_pattern: None,
-                        },
+                        }),
                         package: PackageConfig {
                             kind: PackageKind::Zip,
                             extract_subpath: None,
@@ -507,10 +509,10 @@ mod tests {
                         dependencies: None,
                         env: None,
                         global_env: None,
-                        version_check: VersionCheckConfig::GitHubRelease {
+                        version_check: VersionCheckConfig::GitHubRelease(GitHubReleaseCheck {
                             repo: "a/b".to_string(),
                             asset_pattern: None,
-                        },
+                        }),
                         package: PackageConfig {
                             kind: PackageKind::Zip,
                             extract_subpath: None,

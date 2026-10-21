@@ -29,7 +29,7 @@ defines applications:
 
 ### 2.1 Manifest Strictness and Freshness
 
-- Unknown fields are rejected on every struct level of `apps.json` (`deny_unknown_fields`): typos fail loudly at load time instead of being silently dropped. The exception is the internally tagged `version_check` variants, where serde ignores the attribute; the schema catches those at authoring time.
+- Unknown fields are rejected at every level of `apps.json`, `version_check` variants included (`deny_unknown_fields`; each variant is its own struct because serde ignores the attribute on an internally tagged enum): typos fail loudly at load time instead of being silently dropped.
 - Every path a manifest field contributes (`target_dir`, `executable`, `extract_subpath`, `post_install` rules) must be relative and free of `..`, so it cannot leave the directory it is joined onto. Archive entry names are held to the same rule during extraction.
 - Every dependency must name a defined application; `ppm validate` also rejects cycles.
 - `apps.schema.json` is a derived artifact: generated from the Rust type model by `ppm init`, tracked for editor tooling, and guarded by a drift test - a schema/type mismatch fails the test battery.

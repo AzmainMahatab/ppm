@@ -112,38 +112,58 @@ impl AppDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-// No deny_unknown_fields: serde silently ignores it for internally tagged enums (verified
-// empirically), so it would advertise strictness the runtime does not enforce. Unknown
-// fields inside a variant are a documented gap here; the schema and editors cover
-// authoring-time detection.
+// Why each variant wraps its own struct: serde ignores `deny_unknown_fields` on an internally
+//      tagged enum, so with inline variant fields a typo such as `"asset_patern"` was dropped
+//      without a word. serde removes the `type` tag before deserializing a newtype variant's
+//      content, so a struct that denies unknown fields rejects the typo instead.
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VersionCheckConfig {
-    ElectronManifest {
-        url: ArchString,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        version_key: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        url_template: Option<ArchString>,
-    },
+    ElectronManifest(ElectronManifestCheck),
     #[serde(rename = "github_release", alias = "git_hub_release")]
-    GitHubRelease {
-        repo: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        asset_pattern: Option<ArchString>,
-    },
-    JsonApi {
-        url: ArchString,
-        version_key: ArchString,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        url_key: Option<ArchString>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        url_template: Option<ArchString>,
-    },
-    RegexUrl {
-        url: ArchString,
-        regex: ArchString,
-        url_template: ArchString,
-    },
+    GitHubRelease(GitHubReleaseCheck),
+    JsonApi(JsonApiCheck),
+    RegexUrl(RegexUrlCheck),
+}
+
+/// An electron-builder `latest.yml` update manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ElectronManifestCheck {
+    pub url: ArchString,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_template: Option<ArchString>,
+}
+
+/// The latest release of a GitHub repository.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReleaseCheck {
+    pub repo: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_pattern: Option<ArchString>,
+}
+
+/// A JSON document queried with ppm's path-and-predicate syntax.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonApiCheck {
+    pub url: ArchString,
+    pub version_key: ArchString,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_key: Option<ArchString>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_template: Option<ArchString>,
+}
+
+/// A page scraped with a regular expression whose first group is the version.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegexUrlCheck {
+    pub url: ArchString,
+    pub regex: ArchString,
+    pub url_template: ArchString,
 }
 
 /// The archive format a package is distributed in.
@@ -267,12 +287,21 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected_at_every_level() {
-        // Struct-level strictness is enforced by serde...
         let rejected = [
             ("top level", r#"{"apps": {},"stray": 1}"#),
             (
                 "app entry",
                 r#"{"apps": {"a": {"name": "A","target_dir": "t","executable": "a.exe","version_check": {"type": "github_release","repo": "o/r"},"package": {"type": "binary"},"bogus": 1}}}"#,
+            ),
+            (
+                "package",
+                r#"{"apps": {"a": {"name": "A","target_dir": "t","executable": "a.exe","version_check": {"type": "github_release","repo": "o/r"},"package": {"type": "binary","bogus": 1}}}}"#,
+            ),
+            // Regression: serde ignores deny_unknown_fields on an internally tagged enum, so a
+            // typo inside version_check was silently dropped until each variant became a struct.
+            (
+                "version_check variant",
+                r#"{"apps": {"a": {"name": "A","target_dir": "t","executable": "a.exe","version_check": {"type": "github_release","repo": "o/r","asset_patern": "x"},"package": {"type": "binary"}}}}"#,
             ),
         ];
         for (level, json) in rejected {
@@ -283,16 +312,6 @@ mod tests {
                 "strictness must reject unknown field at {level}: {err}"
             );
         }
-
-        // ...but serde silently ignores deny_unknown_fields for internally tagged
-        // enums, so unknown fields inside version_check/package variants are a
-        // documented gap. Recorded in executable form: if serde ever enforces it,
-        // this parse fails and the strictness contract must be tightened here.
-        let variant_gap = r#"{"apps": {"a": {"name": "A","target_dir": "t","executable": "a.exe","version_check": {"type": "github_release","repo": "o/r","typo": 1},"package": {"type": "binary"}}}}"#;
-        serde_json::from_str::<AppManifests>(variant_gap)
-            .expect("invariant: documents the serde internally-tagged-enum strictness gap")
-            .apps
-            .contains_key("a");
     }
 
     #[test]

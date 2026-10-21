@@ -1,5 +1,7 @@
 use crate::core::arch::CpuArch;
-use crate::core::config::{AppDefinition, VersionCheckConfig};
+use crate::core::config::{
+    AppDefinition, ElectronManifestCheck, GitHubReleaseCheck, JsonApiCheck, RegexUrlCheck, VersionCheckConfig,
+};
 use crate::package::http;
 use crate::package::pe_info::{get_electron_package_version, get_pe_product_version};
 use anyhow::{Context, Result, anyhow, bail};
@@ -90,11 +92,11 @@ fn check_version_text(version: &str) -> Result<()> {
 
 fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
-        VersionCheckConfig::ElectronManifest {
+        VersionCheckConfig::ElectronManifest(ElectronManifestCheck {
             url,
             version_key,
             url_template,
-        } => {
+        }) => {
             let manifest_url = url
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No manifest URL configured for arch '{}'", arch.as_str()))?;
@@ -136,7 +138,7 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
             })
         }
 
-        VersionCheckConfig::GitHubRelease { repo, asset_pattern } => {
+        VersionCheckConfig::GitHubRelease(GitHubReleaseCheck { repo, asset_pattern }) => {
             let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
             let resp = http::metadata_client()?.get(&api_url).send()?;
             let json: Value = resp.json()?;
@@ -188,12 +190,12 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
             })
         }
 
-        VersionCheckConfig::JsonApi {
+        VersionCheckConfig::JsonApi(JsonApiCheck {
             url,
             version_key,
             url_key,
             url_template,
-        } => {
+        }) => {
             let api_url = url
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No JSON API URL configured for arch '{}'", arch.as_str()))?;
@@ -233,11 +235,11 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
             })
         }
 
-        VersionCheckConfig::RegexUrl {
+        VersionCheckConfig::RegexUrl(RegexUrlCheck {
             url,
             regex,
             url_template,
-        } => {
+        }) => {
             let scrape_url = url
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No scrape URL configured for arch '{}'", arch.as_str()))?;
