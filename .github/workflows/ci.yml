@@ -16,10 +16,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Rust Toolchain (pinned via rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      # rust-toolchain.toml pins the dated nightly `bindeps` needs, with clippy and rustfmt.
+      - name: Install Pinned Rust Toolchain
+        run: rustup toolchain install
 
       - name: Verify Formatting
         run: cargo fmt --all --check
@@ -36,10 +35,8 @@ jobs:
       - name: Setup MSVC Environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Setup Rust Toolchain (pinned via rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Install Pinned Rust Toolchain
+        run: rustup toolchain install
 
       - name: Restore Build Cache
         uses: Swatinem/rust-cache@v2

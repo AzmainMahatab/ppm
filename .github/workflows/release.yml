@@ -105,10 +105,13 @@ jobs:
         with:
           arch: ${{ matrix.msvc_arch }}
 
-      - name: Setup Rust Stable Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      # The target must be added to the toolchain rust-toolchain.toml pins, which is the one
+      # cargo runs; adding it to a separately installed stable toolchain leaves the pinned
+      # nightly without the cross-compilation standard library.
+      - name: Install Pinned Rust Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
 
       - name: Compile Release Binary
         run: cargo build --release --target ${{ matrix.target }}
