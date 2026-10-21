@@ -45,6 +45,24 @@ fn expand_release_template(template: &str, version: &str, arch: CpuArch) -> Stri
         .replace("{arch}", arch.as_str())
 }
 
+/// Resolves a file reference from an Electron update manifest against the manifest's own URL.
+///
+/// # Why `Url::join` rather than splitting on the last `/`
+/// A reference may be absolute, relative, or root-relative, and the manifest URL may carry a
+/// query string; standard URL resolution handles each, where string splitting kept the query
+/// and mis-joined root-relative paths.
+///
+/// # Ex
+/// `https://h/m/latest.yml?x=1` + `App 1.0.exe` -> `https://h/m/App%201.0.exe`
+fn resolve_manifest_reference(manifest_url: &str, reference: &str) -> Result<String> {
+    let base = reqwest::Url::parse(manifest_url)
+        .map_err(|error| anyhow!("Malformed Electron manifest URL '{manifest_url}': {error}"))?;
+    let resolved = base
+        .join(reference)
+        .map_err(|error| anyhow!("Cannot resolve '{reference}' against '{manifest_url}': {error}"))?;
+    Ok(resolved.into())
+}
+
 /// Fetches the latest upstream version and resolved download URL for a specific CPU architecture.
 pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
@@ -80,22 +98,9 @@ pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Resul
                     .and_then(|f| f.get("url"))
                     .and_then(|u| u.as_str())
                     .ok_or_else(|| anyhow!("No file URL found in Electron manifest files array"))?;
-
-                if first_file.starts_with("http://") || first_file.starts_with("https://") {
-                    first_file.to_string()
-                } else {
-                    let base_url = manifest_url
-                        .rsplit_once('/')
-                        .map(|(b, _)| b)
-                        .unwrap_or(&manifest_url);
-                    format!("{}/{}", base_url, first_file)
-                }
+                resolve_manifest_reference(&manifest_url, first_file)?
             } else if let Some(path) = yaml.get("path").and_then(|p| p.as_str()) {
-                let base_url = manifest_url
-                    .rsplit_once('/')
-                    .map(|(b, _)| b)
-                    .unwrap_or(&manifest_url);
-                format!("{}/{}", base_url, path)
+                resolve_manifest_reference(&manifest_url, path)?
             } else {
                 bail!("Could not resolve download URL from Electron manifest");
             };
@@ -318,6 +323,23 @@ fn resolve_json_query<'a>(mut current: &'a Value, query: &str) -> Result<&'a Val
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn electron_file_references_resolve_against_the_manifest_url() {
+        let manifest = "https://updates.example.com/win/latest.yml?channel=stable";
+        assert_eq!(
+            resolve_manifest_reference(manifest, "App Setup 1.0.exe").unwrap(),
+            "https://updates.example.com/win/App%20Setup%201.0.exe"
+        );
+        assert_eq!(
+            resolve_manifest_reference(manifest, "/dl/App.exe").unwrap(),
+            "https://updates.example.com/dl/App.exe"
+        );
+        assert_eq!(
+            resolve_manifest_reference(manifest, "https://cdn.example.com/App.exe").unwrap(),
+            "https://cdn.example.com/App.exe"
+        );
+    }
 
     #[test]
     fn resolves_nested_keys_and_array_indices() {

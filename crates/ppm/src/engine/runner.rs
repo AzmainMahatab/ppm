@@ -235,7 +235,7 @@ struct ResolvedApp {
     manifests: Option<Box<AppManifests>>,
     exe_path: std::path::PathBuf,
     app_dir: std::path::PathBuf,
-    env: Option<std::collections::HashMap<String, String>>,
+    env: Option<std::collections::BTreeMap<String, String>>,
     default_args: Option<Vec<String>>,
     arch: CpuArch,
 }
@@ -344,9 +344,10 @@ fn verify_dependencies(
     };
 
     for dep in deps {
-        let Some(dep_def) = manifests.apps.get(dep) else {
-            continue;
-        };
+        let dep_def = manifests
+            .apps
+            .get(dep)
+            .expect("invariant: AppManifests::load_from_file rejects undefined dependencies");
         if !dep_def.is_installed_for_arch(root, arch) {
             bail!(
                 "Required dependency '{}' is not installed for [{}]. Run 'ppm install {}' first.",
@@ -513,7 +514,7 @@ mod tests {
                         default_args: None,
                         dependencies: None,
                         env: None,
-                        global_env: Some(HashMap::from([(
+                        global_env: Some(std::collections::BTreeMap::from([(
                             "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER".to_string(),
                             "{root}/Apps/{arch}/WebView2".to_string(),
                         )])),

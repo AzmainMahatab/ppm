@@ -1,8 +1,9 @@
 use crate::core::arch::CpuArch;
+use crate::core::relpath::confined;
 use anyhow::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 #[serde(untagged)]
 pub enum ArchString {
     Single(String),
-    PerArch(HashMap<String, String>),
+    PerArch(BTreeMap<String, String>),
 }
 
 impl ArchString {
@@ -42,7 +43,10 @@ impl From<&str> for ArchString {
 pub struct AppManifests {
     #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
-    pub apps: HashMap<String, AppDefinition>,
+    // Why: `install all`, `list`, `check`, launcher generation and `global_env` collection all
+    //      iterate this map; an ordered map makes their output and install order reproducible
+    //      across runs instead of following a randomized hash seed.
+    pub apps: BTreeMap<String, AppDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -62,12 +66,12 @@ pub struct AppDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<BTreeMap<String, String>>,
     /// Environment injected when *any* app launches, not just this one. Entries carrying
     /// shared runtimes (engines/SDKs) own their variables here, so one block can provision
     /// the whole portable environment without per-app opt-in lists.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub global_env: Option<HashMap<String, String>>,
+    pub global_env: Option<BTreeMap<String, String>>,
     pub version_check: VersionCheckConfig,
     pub package: PackageConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,7 +202,43 @@ impl AppManifests {
             .with_context(|| format!("Failed to read manifest '{}'", path.display()))?;
         let manifests: Self = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse manifest '{}'", path.display()))?;
+        manifests
+            .check_references()
+            .with_context(|| format!("Invalid manifest '{}'", path.display()))?;
         Ok(manifests)
+    }
+
+    /// Checks what the type model alone cannot: that every path a field contributes stays inside
+    /// the directory it is joined onto, and that every dependency names a defined application.
+    pub fn check_references(&self) -> anyhow::Result<()> {
+        for (app_id, app) in &self.apps {
+            let paths = [&app.target_dir, &app.executable]
+                .into_iter()
+                .chain(app.package.extract_subpath.as_ref())
+                .chain(app.post_install.iter().flat_map(PostInstallConfig::paths));
+            for raw in paths {
+                confined(raw).with_context(|| format!("App '{app_id}'"))?;
+            }
+
+            for dependency in app.dependencies.iter().flatten() {
+                if !self.apps.contains_key(dependency) {
+                    anyhow::bail!(
+                        "App '{app_id}' depends on '{dependency}', which apps.json does not define"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PostInstallConfig {
+    /// Every installation-relative path these rules name.
+    fn paths(&self) -> impl Iterator<Item = &String> {
+        [&self.remove_files, &self.remove_dirs, &self.create_dirs]
+            .into_iter()
+            .flatten()
+            .flatten()
     }
 }
 
@@ -235,6 +275,38 @@ mod tests {
             .expect("invariant: documents the serde internally-tagged-enum strictness gap")
             .apps
             .contains_key("a");
+    }
+
+    #[test]
+    fn escaping_paths_and_undefined_dependencies_are_rejected() {
+        let manifest = |app: serde_json::Value| -> AppManifests {
+            let mut def = serde_json::json!({
+                "name": "A",
+                "target_dir": "A",
+                "executable": "a.exe",
+                "version_check": {"type": "github_release", "repo": "o/r"},
+                "package": {"type": "zip"}
+            });
+            def.as_object_mut()
+                .expect("invariant: literal object")
+                .extend(app.as_object().expect("invariant: literal object").clone());
+            serde_json::from_value(serde_json::json!({ "apps": { "a": def } }))
+                .expect("invariant: shape is schema-valid")
+        };
+
+        assert!(manifest(serde_json::json!({})).check_references().is_ok());
+        for broken in [
+            serde_json::json!({"target_dir": "../Outside"}),
+            serde_json::json!({"executable": r"C:\Windows\notepad.exe"}),
+            serde_json::json!({"package": {"type": "zip", "extract_subpath": "../x"}}),
+            serde_json::json!({"post_install": {"remove_dirs": [r"..\.."]}}),
+            serde_json::json!({"dependencies": ["ghost"]}),
+        ] {
+            assert!(
+                manifest(broken.clone()).check_references().is_err(),
+                "{broken} must be rejected"
+            );
+        }
     }
 
     #[test]

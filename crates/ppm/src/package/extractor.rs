@@ -1,4 +1,5 @@
 use crate::core::config::{PackageConfig, PackageKind};
+use crate::core::relpath::confined;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -242,7 +243,10 @@ pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             let Some(mut reader) = cabinet.read_file(&name).ok() else {
                 bail!("CAB entry '{name}' could not be opened for reading");
             };
-            let out_path = dest_dir.join(&name);
+            let out_path = dest_dir.join(
+                confined(&name)
+                    .with_context(|| format!("Unsafe CAB entry name in '{}'", archive_path.display()))?,
+            );
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
@@ -308,7 +312,10 @@ pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
                             .cloned()
                             .unwrap_or_else(|| cab_file_key.clone());
 
-                        let out_file_path = dest_dir.join(&target_name);
+                        let out_file_path =
+                            dest_dir.join(confined(&target_name).with_context(|| {
+                                format!("Unsafe MSI file name in '{}'", msi_path.display())
+                            })?);
                         if let Some(parent) = out_file_path.parent() {
                             fs::create_dir_all(parent).with_context(|| {
                                 format!("Failed to create directory '{}'", parent.display())
@@ -442,7 +449,7 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
 
     let source_root = match extract_subpath {
         Some(sub) => {
-            let declared = stage_dir.join(sub);
+            let declared = stage_dir.join(confined(sub)?);
             if !declared.is_dir() {
                 bail!(
                     "extract_subpath '{sub}' does not exist in the extracted payload of '{}'; refusing to install the archive root instead of the declared subdirectory",

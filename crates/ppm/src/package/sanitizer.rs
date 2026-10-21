@@ -1,5 +1,6 @@
 use crate::core::config::PostInstallConfig;
-use anyhow::Result;
+use crate::core::relpath::confined;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
@@ -12,26 +13,31 @@ pub fn sanitize_package(target_dir: &Path, post_install: Option<&PostInstallConf
     }
 
     // 2. Custom post-install rules
-    if let Some(cfg) = post_install {
-        if let Some(files) = &cfg.remove_files {
-            for file_rel in files {
-                let target = target_dir.join(file_rel);
-                if target.exists() {
-                    fs::remove_file(&target)?;
-                    println!("  ✓ Removed file: {}", file_rel);
-                }
-            }
-        }
+    let Some(cfg) = post_install else {
+        return Ok(());
+    };
 
-        if let Some(dirs) = &cfg.remove_dirs {
-            for dir_rel in dirs {
-                let target = target_dir.join(dir_rel);
-                if target.exists() {
-                    fs::remove_dir_all(&target)?;
-                    println!("  ✓ Removed directory: {}", dir_rel);
-                }
-            }
+    for file_rel in cfg.remove_files.iter().flatten() {
+        let target = target_dir.join(confined(file_rel)?);
+        if target.exists() {
+            fs::remove_file(&target).with_context(|| format!("Failed to remove '{}'", target.display()))?;
+            println!("  ✓ Removed file: {}", file_rel);
         }
+    }
+
+    for dir_rel in cfg.remove_dirs.iter().flatten() {
+        let target = target_dir.join(confined(dir_rel)?);
+        if target.exists() {
+            fs::remove_dir_all(&target)
+                .with_context(|| format!("Failed to remove '{}'", target.display()))?;
+            println!("  ✓ Removed directory: {}", dir_rel);
+        }
+    }
+
+    for dir_rel in cfg.create_dirs.iter().flatten() {
+        let target = target_dir.join(confined(dir_rel)?);
+        fs::create_dir_all(&target).with_context(|| format!("Failed to create '{}'", target.display()))?;
+        println!("  ✓ Created directory: {}", dir_rel);
     }
 
     Ok(())
@@ -58,13 +64,36 @@ mod tests {
 
         let cfg = post_install(json!({
             "remove_files": ["telemetry.dll"],
-            "remove_dirs": ["cache/stale.tmp"]
+            "remove_dirs": ["cache/stale.tmp"],
+            "create_dirs": ["data/portable"]
         }));
         sanitize_package(dir.path(), Some(&cfg)).unwrap();
 
         assert!(!updater.exists(), "auto-updater manifest must be removed");
         assert!(!dir.path().join("telemetry.dll").exists());
         assert!(!stale_dir.exists());
+        // Regression: `create_dirs` was accepted by the schema but never applied.
+        assert!(dir.path().join("data").join("portable").is_dir());
+    }
+
+    /// Regression: rules were joined unchecked, so `..` or an absolute path removed files
+    /// outside the installation.
+    #[test]
+    fn a_rule_that_escapes_the_installation_is_refused_and_touches_nothing() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let install = outer.path().join("App");
+        std::fs::create_dir_all(&install).unwrap();
+        let bystander = outer.path().join("bystander.txt");
+        std::fs::write(&bystander, b"x").unwrap();
+
+        let cfg = post_install(json!({ "remove_files": ["../bystander.txt"] }));
+        assert!(sanitize_package(&install, Some(&cfg)).is_err());
+
+        let absolute = bystander.to_string_lossy().into_owned();
+        let cfg = post_install(json!({ "remove_files": [absolute] }));
+        assert!(sanitize_package(&install, Some(&cfg)).is_err());
+
+        assert!(bystander.exists());
     }
 
     #[test]
