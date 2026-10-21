@@ -87,6 +87,7 @@ pub(crate) fn run(root: &Path, arch: ArchTarget) -> anyhow::Result<()> {
         }
     }
 
+    // Why stdout: the table is the command's data output, meant to be piped or redirected.
     println!("{}", table);
     Ok(())
 }

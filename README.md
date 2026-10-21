@@ -47,7 +47,8 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 │   │   └── ...
 │   │
 │   └── logs/                           # Runtime logs
-│       └── redirector.log              # Engine log (filter: PPM_LOG)
+│       ├── ppm.<date>.log              # CLI log, daily, 7 kept (filter: PPM_LOG)
+│       └── redirector.<date>.log       # Engine log, daily, 7 kept (filter: PPM_LOG)
 │
 ├── Apps/                               # Multi-architecture binaries
 │   ├── x64/                            # x64 Application Binaries
@@ -105,6 +106,7 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 | `ppm.exe list [--arch <x64\|arm64\|all>]` | Lists all configured apps and dynamic presence status across architectures. |
 | `ppm.exe link [app\|all]` | Generates prefix-free 1-click `.bat` root launchers for installed apps. |
 | `ppm.exe schema` | Regenerates JSON Schema (`apps.schema.json`) via `schemars`. |
+| `ppm.exe -v <command>` / `ppm.exe -q <command>` | Show debug messages / only warnings and errors on the console (given before the command). |
 | `ppm.exe validate` | Validates `apps.json`: strict field parsing, install-relative paths, defined and acyclic dependencies. |
 
 ---

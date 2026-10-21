@@ -55,7 +55,7 @@ impl Drop for StagingGuard {
         // itself when the payload sits at the archive root - so only a real failure is worth
         // reporting.
         if let Err(error) = remove_tree_if_present(&self.0) {
-            eprintln!("Warning: {error:#}");
+            tracing::warn!("{error:#}");
         }
     }
 }
@@ -529,7 +529,7 @@ fn extract_msi_with_msiexec(msi_path: &Path, dest_dir: &Path) -> Result<()> {
                     .unwrap_or(false)
                 && let Err(error) = fs::remove_file(&p)
             {
-                eprintln!("Warning: failed to remove stray msi '{}': {error}", p.display());
+                tracing::warn!("Failed to remove stray msi '{}': {error}", p.display());
             }
         }
     }

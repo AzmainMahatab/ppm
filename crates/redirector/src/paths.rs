@@ -1,4 +1,4 @@
-use crate::winstr::path_to_wide;
+use crate::winstr::{path_to_wide, to_wide};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -12,7 +12,6 @@ pub struct PathConfig {
     pub registry_json: PathBuf,
     pub credentials_json: PathBuf,
     pub logs_dir: PathBuf,
-    pub log_file: PathBuf,
 
     // Canonical Portable Profile Paths
     pub user_profile: PathBuf,
@@ -27,7 +26,7 @@ pub struct PathConfig {
     pub documents_w: Vec<u16>,
 }
 
-/// Environment variable holding a `tracing` filter directive for `redirector.log`.
+/// Environment variable holding a `tracing` filter directive for `redirector.<date>.log`.
 pub const LOG_FILTER_VAR: &str = "PPM_LOG";
 
 static PATHS: LazyLock<PathConfig> = LazyLock::new(build_paths);
@@ -48,7 +47,6 @@ fn build_paths() -> PathConfig {
 
     let registry_json = system_dir.join("registry.json");
     let credentials_json = system_dir.join("credentials.json");
-    let log_file = logs_dir.join("redirector.log");
 
     let user_profile = root.join("Home");
     let local_appdata = user_profile.join("AppData").join("Local");
@@ -72,7 +70,6 @@ fn build_paths() -> PathConfig {
         registry_json,
         credentials_json,
         logs_dir,
-        log_file,
         user_profile,
         local_appdata,
         roaming_appdata,
@@ -82,23 +79,48 @@ fn build_paths() -> PathConfig {
 
 /// Initializes the high-performance non-blocking concurrent logger.
 /// Emitted logs are dispatched to an in-memory lock-free queue with sub-microsecond latency,
-/// while a dedicated background worker thread flushes batches to `.ppm/logs/redirector.log`.
+/// while a dedicated background worker thread flushes batches to `.ppm/logs/redirector.<date>.log`.
 pub fn init_logger() {
     // Touching the LazyLock initializes the subscriber and pins the worker guard.
     std::hint::black_box(&*LOGGER_GUARD);
 }
 
+// Why: one file per day and a week of history, so a portable volume's log directory stays
+//      bounded however many injected processes write to it. Matches the CLI's ppm.log
+//      retention; raise both if diagnosing issues routinely needs older runs.
+const RETAINED_LOG_FILES: usize = 7;
+
+// Why `info`: debug lines are emitted per intercepted call, which a busy application turns into
+//      megabytes an hour. `PPM_LOG=debug` brings them back for a diagnosis.
+const DEFAULT_LOG_FILTER: &str = "info";
+
 /// Builds the non-blocking worker guard; runs once via `LazyLock`.
 fn init_worker_guard() -> WorkerGuard {
     let cfg = init_paths();
-    let file_appender = tracing_appender::rolling::never(&cfg.logs_dir, "redirector.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("redirector")
+        .filename_suffix("log")
+        .max_log_files(RETAINED_LOG_FILES)
+        .build(&cfg.logs_dir);
+    let (non_blocking, guard) = match appender {
+        Ok(appender) => tracing_appender::non_blocking(appender),
+        Err(error) => {
+            // Why: DllMain cannot fail the host process over a log file, and with no file there
+            //      is no log to report to; the debugger channel is the one sink left.
+            report_to_debugger(&format!(
+                "redirector: logging disabled, cannot open '{}': {error}",
+                cfg.logs_dir.display()
+            ));
+            tracing_appender::non_blocking(std::io::sink())
+        }
+    };
 
     // Why: The engine runs inside third-party processes, many of which set RUST_LOG for their
     //      own purposes; reading that would let an application silently reconfigure engine
     //      logging. PPM_LOG is ours alone, and the launcher's environment block passes it through.
     let filter =
-        EnvFilter::try_from_env(LOG_FILTER_VAR).unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
+        EnvFilter::try_from_env(LOG_FILTER_VAR).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
 
     let _ = tracing_subscriber::fmt()
         .with_writer(non_blocking)
@@ -115,10 +137,23 @@ fn init_worker_guard() -> WorkerGuard {
 /// directory error to the host process, so the boundary keeps running - but a path the
 /// engine could not materialize is exactly the kind of silent environmental failure
 /// that must not pass unnoticed.
+///
+/// Paths are built before the logger exists (the logger needs the log directory), so the failure
+/// also goes to the debugger channel, which is always available.
 fn ensure_dir(path: &Path) {
     if let Err(e) = std::fs::create_dir_all(path) {
-        tracing::warn!("Failed to create directory '{}': {e}", path.display());
+        let message = format!("redirector: failed to create directory '{}': {e}", path.display());
+        report_to_debugger(&message);
+        tracing::warn!("{message}");
     }
+}
+
+/// Writes a line to the attached debugger (DebugView, WinDbg), the one sink that exists before
+/// and without the log file.
+fn report_to_debugger(message: &str) {
+    let wide = to_wide(message);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that outlives the call.
+    unsafe { windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringW(wide.as_ptr()) };
 }
 
 fn resolve_root() -> PathBuf {

@@ -54,7 +54,8 @@ graph TD
 │   │   └── ...
 │   │
 │   └── logs/                           # Runtime logs
-│       └── redirector.log              # Engine log (filter: PPM_LOG)
+│       ├── ppm.<date>.log              # CLI log, daily, 7 kept (filter: PPM_LOG)
+│       └── redirector.<date>.log       # Engine log, daily, 7 kept (filter: PPM_LOG)
 │
 ├── Apps/                               # Multi-architecture binaries
 │   ├── x64/                            # x64 Application Binaries
@@ -183,11 +184,12 @@ crates/redirector/src/
 ### B. `crates/ppm/src/`
 ```
 crates/ppm/src/
-├── main.rs                         # CLI Entrypoint (parse -> resolve root -> execute)
+├── main.rs                         # CLI Entrypoint (parse -> resolve root -> log sinks -> execute -> exit code)
 │
 ├── cli/                            # Command-Line Interface Layer
 │   ├── mod.rs                      # Cli/Commands Definitions & Dispatch
 │   ├── context.rs                  # Root Resolution & Manifest Loading
+│   ├── logging.rs                  # Console (stderr) & rotating file log sinks
 │   ├── pipeline.rs                 # Dependency Ordering & Install Pipeline
 │   └── commands/                   # One Module Per Command
 │       ├── init.rs  run.rs  check.rs  install.rs  update.rs

@@ -51,7 +51,7 @@ fn extract_redirector_dll(root: &Path) -> anyhow::Result<()> {
     fs::write(&dll_path, EMBEDDED_REDIRECTOR_DLL)
         .with_context(|| format!("Failed to deploy '{}'", dll_path.display()))?;
 
-    println!("  ✓ Deployed .ppm/lib/redirector.dll");
+    tracing::info!("✓ Deployed .ppm/lib/redirector.dll");
 
     Ok(())
 }
@@ -64,7 +64,7 @@ fn ensure_default_config(root: &Path) -> anyhow::Result<()> {
     if config_is_absent {
         fs::write(&apps_json_path, DEFAULT_APPS_JSON)
             .with_context(|| format!("Failed to initialize '{}'", apps_json_path.display()))?;
-        println!("  ✓ Initialized .ppm/apps.json (default configuration)");
+        tracing::info!("✓ Initialized .ppm/apps.json (default configuration)");
     }
 
     Ok(())
@@ -73,7 +73,7 @@ fn ensure_default_config(root: &Path) -> anyhow::Result<()> {
 // Intention: Always regenerate schema artifacts so they can never drift from the code-defined model.
 fn regenerate_schema(root: &Path) -> anyhow::Result<()> {
     write_schema_artifacts(root)?;
-    println!("  ✓ Regenerated apps.schema.json");
+    tracing::info!("✓ Regenerated apps.schema.json");
 
     Ok(())
 }

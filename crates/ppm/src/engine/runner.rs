@@ -304,7 +304,7 @@ fn resolve_managed_app(root: &Path, app_id: &str, host_arch: CpuArch) -> Result<
     let effective_arch = if app_def.is_installed_for_arch(root, host_arch) {
         host_arch
     } else if host_arch == CpuArch::Arm64 && app_def.is_installed_for_arch(root, CpuArch::X64) {
-        println!(
+        tracing::info!(
             "[INFO] Native ARM64 binary not found for '{}'. Launching x64 version via Windows ARM64 emulation...",
             app_def.name
         );

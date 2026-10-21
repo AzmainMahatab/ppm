@@ -8,12 +8,12 @@ pub(crate) fn run(root: &Path) -> anyhow::Result<()> {
     // Loading already checks paths and dependency references; ordering every app is what
     // surfaces a dependency cycle, which would otherwise only fail at install time.
     resolve_install_order(&manifests, "all")?;
-    println!(
+    tracing::info!(
         "✓ Manifest is valid! Configured applications ({}):",
         manifests.apps.len()
     );
     for (id, app) in manifests.apps {
-        println!("  • {} ({}) -> {}", app.name, id, app.executable);
+        tracing::info!("• {} ({}) -> {}", app.name, id, app.executable);
     }
     Ok(())
 }

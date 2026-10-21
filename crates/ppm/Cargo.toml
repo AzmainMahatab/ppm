@@ -41,6 +41,9 @@ serde-saphyr.workspace = true
 sevenz-rust2 = { workspace = true, features = ["util", "bzip2", "ppmd"] }
 tar.workspace = true
 tempfile.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",

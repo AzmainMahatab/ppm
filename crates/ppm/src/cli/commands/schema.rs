@@ -12,9 +12,9 @@ pub(crate) fn run(root: &Path) -> anyhow::Result<()> {
         );
     }
 
-    println!("✓ JSON Schema generated at:");
+    tracing::info!("✓ JSON Schema generated at:");
     for target in written {
-        println!("  • {}", target.display());
+        tracing::info!("• {}", target.display());
     }
     Ok(())
 }

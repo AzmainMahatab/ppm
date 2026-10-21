@@ -55,8 +55,8 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 
 ## Observability
 
-- [ ] R28 Leveled logging in the CLI — progress and diagnostics go through `tracing` with a console sink and a rotating `.ppm/logs/ppm.log`; tables and other data output stay on stdout.
-- [ ] R29 Bounded engine log — `redirector.log` is never rotated, defaults to `redirector=debug`, and is shared by every injected process; done with rotation or retention and an `info` default.
+- [x] R28 Leveled logging in the CLI — progress and diagnostics go through `tracing` with a console sink and a rotating `.ppm/logs/ppm.log`; tables and other data output stay on stdout. Verified 2026-10-21 live: tables alone on stdout, `-q`, dated ppm log, `ppm run` exit code 7 passed through after the log flush.
+- [x] R29 Bounded engine log — `redirector.log` is never rotated, defaults to `redirector=debug`, and is shared by every injected process; done with rotation or retention and an `info` default. Verified 2026-10-21 live: dated `redirector.<date>.log` at info from an injected `cmd.exe`; full suite including the e2e probe.
 
 ## Verification and supply chain
 

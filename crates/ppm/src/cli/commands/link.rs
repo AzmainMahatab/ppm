@@ -9,13 +9,13 @@ pub(crate) fn run(root: &Path, app: &str) -> anyhow::Result<()> {
 
     if app == "all" {
         let generated = engine::launcher::generate_launchers(root, &manifests)?;
-        println!("⚡ Generated root launchers:");
+        tracing::info!("⚡ Generated root launchers:");
         for g in generated {
-            println!("  ✓ {}", g);
+            tracing::info!("✓ {}", g);
         }
     } else if manifests.apps.contains_key(app) {
         engine::launcher::generate_single_launcher(root, app)?;
-        println!("✓ Generated root launcher: {}.bat", app);
+        tracing::info!("✓ Generated root launcher: {}.bat", app);
     } else {
         anyhow::bail!("App '{}' not found in apps.json", app);
     }

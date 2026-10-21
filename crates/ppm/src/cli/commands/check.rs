@@ -9,8 +9,8 @@ use crate::cli::context::load_manifest;
 
 pub(crate) fn run(root: &Path, arch: ArchTarget) -> anyhow::Result<()> {
     let target_archs = arch.resolve();
-    println!(
-        "🔍 Checking configured applications for architectures {:?}...\n",
+    tracing::info!(
+        "🔍 Checking configured applications for architectures {:?}...",
         target_archs.iter().map(|a| a.as_str()).collect::<Vec<_>>()
     );
     let manifests = load_manifest(root)?;
@@ -85,6 +85,7 @@ pub(crate) fn run(root: &Path, arch: ArchTarget) -> anyhow::Result<()> {
         }
     }
 
+    // Why stdout: the table is the command's data output, meant to be piped or redirected.
     println!("{}", table);
     Ok(())
 }

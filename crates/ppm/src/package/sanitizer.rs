@@ -9,7 +9,7 @@ pub fn sanitize_package(target_dir: &Path, post_install: Option<&PostInstallConf
     let auto_updater_yml = target_dir.join("resources").join("app-update.yml");
     if auto_updater_yml.exists() {
         fs::remove_file(&auto_updater_yml)?;
-        println!("  ✓ Sanitized: Removed auto-updater manifest 'resources/app-update.yml'");
+        tracing::info!("✓ Sanitized: Removed auto-updater manifest 'resources/app-update.yml'");
     }
 
     // 2. Custom post-install rules
@@ -21,7 +21,7 @@ pub fn sanitize_package(target_dir: &Path, post_install: Option<&PostInstallConf
         let target = target_dir.join(confined(file_rel)?);
         if target.exists() {
             fs::remove_file(&target).with_context(|| format!("Failed to remove '{}'", target.display()))?;
-            println!("  ✓ Removed file: {}", file_rel);
+            tracing::info!("✓ Removed file: {}", file_rel);
         }
     }
 
@@ -30,14 +30,14 @@ pub fn sanitize_package(target_dir: &Path, post_install: Option<&PostInstallConf
         if target.exists() {
             fs::remove_dir_all(&target)
                 .with_context(|| format!("Failed to remove '{}'", target.display()))?;
-            println!("  ✓ Removed directory: {}", dir_rel);
+            tracing::info!("✓ Removed directory: {}", dir_rel);
         }
     }
 
     for dir_rel in cfg.create_dirs.iter().flatten() {
         let target = target_dir.join(confined(dir_rel)?);
         fs::create_dir_all(&target).with_context(|| format!("Failed to create '{}'", target.display()))?;
-        println!("  ✓ Created directory: {}", dir_rel);
+        tracing::info!("✓ Created directory: {}", dir_rel);
     }
 
     Ok(())

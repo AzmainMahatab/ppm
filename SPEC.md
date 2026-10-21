@@ -111,7 +111,7 @@ Highest wins; conflicts resolve case-insensitively, and duplicate keys never rea
 .ppm/system/            registry.jsonl (op journal), credentials.json (virtual hives)
 .ppm/lib/redirector.dll engine library (deployed by init from embedded asset)
 .ppm/cache/             download staging
-.ppm/logs/              redirector.log (filter directive: PPM_LOG)
+.ppm/logs/              ppm.<date>.log, redirector.<date>.log (daily, 7 kept; filter: PPM_LOG, default info)
 Apps/<arch>/<target>/    installed binaries
 Home/                    virtualized user profile
 ```

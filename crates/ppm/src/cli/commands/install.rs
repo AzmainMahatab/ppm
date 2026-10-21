@@ -20,6 +20,6 @@ pub(crate) fn run(root: &Path, app: &str, arch: Option<ArchTarget>, force: bool)
     let manifests = load_manifest(root)?;
     run_install_cycle(root, &manifests, app, &target_archs, policy)?;
 
-    println!("\n✓ All requested installations completed successfully!");
+    tracing::info!("✓ All requested installations completed successfully!");
     Ok(())
 }

@@ -58,6 +58,9 @@ pub(crate) fn resolve_install_order(
             }
         }
     } else {
+        if !manifests.apps.contains_key(target_app_id) {
+            anyhow::bail!("Application '{target_app_id}' is not defined in apps.json");
+        }
         dfs(target_app_id, manifests, &mut order, &mut visited, &mut visiting)?;
     }
 
@@ -148,8 +151,8 @@ pub(crate) fn install_app(
         return Ok(InstallOutcome::Unsupported);
     }
 
-    println!(
-        "\n▶ Processing '{}' ({}) for architecture [{}]",
+    tracing::info!(
+        "▶ Processing '{}' ({}) for architecture [{}]",
         app_def.name,
         app_id,
         arch.as_str()
@@ -160,12 +163,9 @@ pub(crate) fn install_app(
     // Why once: the update path used to check the remote version here and then call an
     // installer that checked it again, paying two round trips per application to learn the
     // same answer.
-    println!("  • Checking online release for {}...", arch.as_str());
+    tracing::info!("• Checking online release for {}...", arch.as_str());
     let release = package::version::check_remote_version(&app_def.version_check, arch)?;
-    println!(
-        "  • Found version {} at: {}",
-        release.version, release.download_url
-    );
+    tracing::info!("• Found version {} at: {}", release.version, release.download_url);
 
     let installed = package::version::detect_local_version(root, app_def, arch);
     if is_already_current(policy, installed.as_deref(), &release.version) {
@@ -186,7 +186,7 @@ pub(crate) fn install_app(
         cache_extension(&release.download_url, app_def.package.kind)
     ));
 
-    println!("  • Downloading package...");
+    tracing::info!("• Downloading package...");
     package::downloader::download_file(
         &release.download_url,
         &temp_archive,
@@ -195,17 +195,17 @@ pub(crate) fn install_app(
 
     // 3. Extract to target directory: Apps/<arch>/<target_dir>
     let target_dir = app_def.app_dir_for_arch(root, arch);
-    println!("  • Unpacking to '{}'...", target_dir.display());
+    tracing::info!("• Unpacking to '{}'...", target_dir.display());
     package::extractor::extract_package(&temp_archive, &app_def.package, &target_dir)?;
 
     // 4. Sanitize payload
-    println!("  • Sanitizing installation...");
+    tracing::info!("• Sanitizing installation...");
     package::sanitizer::sanitize_package(&target_dir, app_def.post_install.as_ref())?;
 
     // 5. Clean temporary download
     if let Err(error) = std::fs::remove_file(&temp_archive) {
-        eprintln!(
-            "Warning: failed to remove cached archive '{}': {error}",
+        tracing::warn!(
+            "Failed to remove cached archive '{}': {error}",
             temp_archive.display()
         );
     }
@@ -233,9 +233,7 @@ pub(crate) fn run_install_cycle(
     let mut failures: Vec<String> = Vec::new();
 
     for &arch in target_archs {
-        println!("\n=======================================================");
-        println!("  Targeting Architecture: [{}]", arch.as_str());
-        println!("=======================================================");
+        tracing::info!("Targeting architecture [{}]", arch.as_str());
 
         for app_id in &order {
             let app_def = manifests
@@ -244,25 +242,25 @@ pub(crate) fn run_install_cycle(
                 .expect("invariant: resolve_install_order only yields ids the manifest defines");
 
             match install_app(root, app_id, app_def, arch, policy) {
-                Ok(InstallOutcome::Installed { version }) => println!(
-                    "  ✓ Successfully installed {} [{}] (v{version})",
+                Ok(InstallOutcome::Installed { version }) => tracing::info!(
+                    "✓ Successfully installed {} [{}] (v{version})",
                     app_def.name,
                     arch.as_str()
                 ),
-                Ok(InstallOutcome::AlreadyCurrent { version }) => println!(
-                    "  ✓ {} [{}] is already up to date (v{version})",
+                Ok(InstallOutcome::AlreadyCurrent { version }) => tracing::info!(
+                    "✓ {} [{}] is already up to date (v{version})",
                     app_def.name,
                     arch.as_str()
                 ),
-                Ok(InstallOutcome::Unsupported) => println!(
-                    "  • Skipping '{}' (Not supported on {})",
+                Ok(InstallOutcome::Unsupported) => tracing::info!(
+                    "• Skipping '{}' (Not supported on {})",
                     app_def.name,
                     arch.as_str()
                 ),
                 Err(error) => {
                     // Keep going so one unreachable endpoint does not strand every other
                     // application, but remember it: the cycle must not report success.
-                    eprintln!("  ✗ {} [{}]: {error:#}", app_def.name, arch.as_str());
+                    tracing::error!("✗ {} [{}]: {error:#}", app_def.name, arch.as_str());
                     failures.push(format!("{} [{}]: {error:#}", app_def.name, arch.as_str()));
                 }
             }
@@ -410,7 +408,11 @@ mod tests {
     fn undefined_dependency_is_rejected() {
         let manifests = manifest(json!({ "apps": { "app": app(Some(vec!["ghost"])) } }));
         let err = resolve_install_order(&manifests, "app").unwrap_err().to_string();
-        assert!(err.contains("not defined"), "{err}");
+        assert!(err.contains("Dependency 'ghost'"), "{err}");
+
+        // Regression: an unknown requested app was reported as an undefined *dependency*.
+        let err = resolve_install_order(&manifests, "nope").unwrap_err().to_string();
+        assert!(err.contains("Application 'nope'"), "{err}");
     }
 
     #[test]

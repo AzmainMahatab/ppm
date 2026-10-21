@@ -19,6 +19,6 @@ pub(crate) fn run(root: &Path, app: &str, arch: Option<ArchTarget>) -> anyhow::R
         ReinstallPolicy::SkipWhenCurrent,
     )?;
 
-    println!("\n✓ Update check and upgrade cycle complete!");
+    tracing::info!("✓ Update check and upgrade cycle complete!");
     Ok(())
 }

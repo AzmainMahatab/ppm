@@ -1,5 +1,6 @@
 pub(crate) mod commands;
 pub(crate) mod context;
+pub(crate) mod logging;
 pub(crate) mod pipeline;
 
 use clap::{Parser, Subcommand};
@@ -16,8 +17,29 @@ use ppm::core::arch::ArchTarget;
     version
 )]
 pub(crate) struct Cli {
+    // Why not `global = true`: `ppm run <app> <args...>` hands every argument after the app to
+    // the application, and a global `-v` would be taken from that list. Verbosity is therefore
+    // given before the subcommand: `ppm -v install all`.
+    /// Show debug messages on the console
+    #[arg(short, long, conflicts_with = "quiet")]
+    verbose: bool,
+
+    /// Show only warnings and errors on the console
+    #[arg(short, long)]
+    quiet: bool,
+
     #[command(subcommand)]
     pub(crate) command: Commands,
+}
+
+impl Cli {
+    pub(crate) fn verbosity(&self) -> logging::ConsoleVerbosity {
+        match (self.verbose, self.quiet) {
+            (true, _) => logging::ConsoleVerbosity::Verbose,
+            (_, true) => logging::ConsoleVerbosity::Quiet,
+            _ => logging::ConsoleVerbosity::Normal,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -92,11 +114,12 @@ pub(crate) enum Commands {
     Validate,
 }
 
-/// Executes the parsed command against the resolved portable root.
-pub(crate) fn execute(command: &Commands, root: &Path) -> anyhow::Result<()> {
+/// Executes the parsed command against the resolved portable root and returns the process exit
+/// code: the launched application's own code for `run`, zero for every other command.
+pub(crate) fn execute(command: &Commands, root: &Path) -> anyhow::Result<i32> {
     match command {
+        Commands::Run { app, args } => return commands::run::run(root, app, args),
         Commands::Init => commands::init::run(root),
-        Commands::Run { app, args } => commands::run::run(root, app, args),
         Commands::Check { arch } => commands::check::run(root, *arch),
         Commands::Install { app, arch, force } => commands::install::run(root, app, *arch, *force),
         Commands::Update { app, arch } => commands::update::run(root, app, *arch),
@@ -104,5 +127,6 @@ pub(crate) fn execute(command: &Commands, root: &Path) -> anyhow::Result<()> {
         Commands::List { arch } => commands::list::run(root, *arch),
         Commands::Schema => commands::schema::run(root),
         Commands::Validate => commands::validate::run(root),
-    }
+    }?;
+    Ok(0)
 }
