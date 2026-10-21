@@ -612,6 +612,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-x64"
+version = "0.1.0"
+dependencies = [
+ "redirector",
+]
+
+[[package]]
+name = "engine-x86"
+version = "0.1.0"
+dependencies = [
+ "redirector",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1104,6 +1118,16 @@ dependencies = [
  "unicode-width",
  "unit-prefix",
  "web-time",
+]
+
+[[package]]
+name = "injection"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tempfile",
+ "thiserror",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1600,13 +1624,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cab",
- "cc",
  "clap",
  "comfy-table",
+ "engine-x64",
+ "engine-x86",
  "flate2",
  "indicatif",
+ "injection",
  "jsonschema",
  "msi",
+ "probe-x86",
  "redirector",
  "regex",
  "reqwest",
@@ -1630,6 +1657,13 @@ name = "ppmd-rust"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "494b4379484fc92217cc7d9e3a532375b1d01a61889ec8333025dc3b0377af56"
+
+[[package]]
+name = "probe-x86"
+version = "0.1.0"
+dependencies = [
+ "test-probe",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -1748,8 +1782,8 @@ dependencies = [
 name = "redirector"
 version = "0.1.0"
 dependencies = [
- "cc",
  "hex",
+ "injection",
  "parking_lot",
  "serde",
  "serde_json",

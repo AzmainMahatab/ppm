@@ -32,9 +32,9 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-// Intention: Compile the vendored Microsoft Detours C++ translation units into the static
-// library that redirector.dll links against. The redirector.dll artifact itself is acquired by
-// Cargo through ppm's cdylib artifact dependency - no build-script involvement.
+// Intention: Compile the vendored Microsoft Detours C++ translation units into one static
+// library. Cargo links it into every artifact that depends on this crate - ppm.exe (root
+// launches) and redirector.dll (hooks and child injection) - so Detours is built once per target.
 fn compile_detours() {
     let detours_src = workspace_root().join("vendor").join("detours").join("src");
     let mut build = cc::Build::new();

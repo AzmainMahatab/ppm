@@ -165,37 +165,9 @@ fn resolve_root() -> PathBuf {
         }
     }
 
-    // 2. Resolve from DLL module directory
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
-
-        unsafe {
-            let mut buf = [0u16; 1024];
-            let hmodule = crate::HMODULE_SELF.load(std::sync::atomic::Ordering::SeqCst)
-                as windows_sys::Win32::Foundation::HMODULE;
-            let len = GetModuleFileNameW(hmodule, buf.as_mut_ptr(), 1024);
-            if len > 0 {
-                let dll_path = String::from_utf16_lossy(&buf[..len as usize]);
-                let p = PathBuf::from(dll_path);
-                if let Some(parent) = p.parent() {
-                    // If DLL is in .ppm/lib/, walk up 2 levels
-                    let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if (parent_name == "lib" || parent_name == ".ppm")
-                        && let Some(ppm_parent) = parent.parent()
-                    {
-                        let ppm_name = ppm_parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        if ppm_name == ".ppm"
-                            && let Some(root) = ppm_parent.parent()
-                        {
-                            return root.to_path_buf();
-                        }
-                        return ppm_parent.to_path_buf();
-                    }
-                    return parent.to_path_buf();
-                }
-            }
-        }
+    // 2. Resolve from where this engine DLL was loaded
+    if let Some(root) = engine_module_path().as_deref().and_then(root_from_engine_path) {
+        return root;
     }
 
     // Fallback: current working directory. DllMain cannot propagate a failure to the
@@ -205,4 +177,65 @@ fn resolve_root() -> PathBuf {
         tracing::error!("current_dir() failed ({e}); redirector falling back to a relative root - isolation boundaries will key off an invalid location");
         PathBuf::from(".")
     })
+}
+
+/// The portable root an engine DLL belongs to: the parent of its nearest `.ppm` ancestor.
+///
+/// # Ex
+/// `R:\root\.ppm\lib\x64\redirector64.dll` -> `R:\root`; `R:\elsewhere\redirector64.dll` -> none
+fn root_from_engine_path(dll: &Path) -> Option<PathBuf> {
+    dll.ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".ppm"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+/// The full path this DLL was loaded from.
+fn engine_module_path() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+
+    // Why: the longest path Windows can hand back (UNICODE_STRING's limit, in UTF-16 units).
+    const MAX_NT_PATH: usize = 32_767;
+    let module = crate::HMODULE_SELF.load(std::sync::atomic::Ordering::SeqCst)
+        as windows_sys::Win32::Foundation::HMODULE;
+    let mut capacity = 260;
+    loop {
+        let mut buffer = vec![0u16; capacity];
+        // SAFETY: `buffer` holds `capacity` units; the module handle is this DLL's own.
+        let length = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), capacity as u32) } as usize;
+        if length == 0 {
+            return None;
+        }
+        // A full buffer means the name was truncated: grow and ask again.
+        if length < capacity {
+            buffer.truncate(length);
+            return Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
+        }
+        if capacity >= MAX_NT_PATH {
+            return None;
+        }
+        capacity = (capacity * 2).min(MAX_NT_PATH);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_root_is_the_parent_of_the_engines_ppm_ancestor() {
+        assert_eq!(
+            root_from_engine_path(Path::new(r"R:\root\.ppm\lib\x64\redirector64.dll")),
+            Some(PathBuf::from(r"R:\root"))
+        );
+        assert_eq!(
+            root_from_engine_path(Path::new(r"R:\a b\é\.ppm\lib\arm64\redirector32.dll")),
+            Some(PathBuf::from(r"R:\a b\é"))
+        );
+        assert_eq!(
+            root_from_engine_path(Path::new(r"R:\elsewhere\redirector64.dll")),
+            None
+        );
+    }
 }

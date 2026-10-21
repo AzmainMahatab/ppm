@@ -1,17 +1,16 @@
-use crate::detour::{guard_detour, hook_export, load_trampoline};
+use crate::detour::{guard_detour, hook_export, load_trampoline, try_load_trampoline};
 use crate::{BOOL, FALSE, TRUE};
 use std::cell::Cell;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{c_char, c_void};
 use std::sync::atomic::AtomicPtr;
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, HANDLE, SetLastError,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, SetLastError};
 use windows_sys::Win32::System::SystemServices::{
     PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY, PROCESS_MITIGATION_DYNAMIC_CODE_POLICY,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, GetProcessMitigationPolicy, PROCESS_INFORMATION, ProcessDynamicCodePolicy,
-    ProcessSignaturePolicy, ResumeThread, STARTUPINFOA, STARTUPINFOW, TerminateProcess,
+    CREATE_SUSPENDED, CreateProcessW, GetProcessMitigationPolicy, PROCESS_INFORMATION,
+    ProcessDynamicCodePolicy, ProcessSignaturePolicy, ResumeThread, STARTUPINFOA, STARTUPINFOW,
+    TerminateProcess,
 };
 
 #[allow(clippy::upper_case_acronyms)]
@@ -23,40 +22,6 @@ type LpprocessInformation = *mut PROCESS_INFORMATION;
 
 thread_local! {
     static IN_PROC_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-unsafe extern "C" {
-    fn DetourCreateProcessWithDllExW(
-        lpApplicationName: *const u16,
-        lpCommandLine: *mut u16,
-        lpProcessAttributes: *mut c_void,
-        lpThreadAttributes: *mut c_void,
-        bInheritHandles: BOOL,
-        dwCreationFlags: u32,
-        lpEnvironment: *mut c_void,
-        lpCurrentDirectory: *const u16,
-        lpStartupInfo: *mut c_void,
-        lpProcessInformation: *mut c_void,
-        lpDllName: *const c_char,
-        pfCreateProcessW: *mut c_void,
-    ) -> BOOL;
-
-    fn DetourCreateProcessWithDllExA(
-        lpApplicationName: *const c_char,
-        lpCommandLine: *mut c_char,
-        lpProcessAttributes: *mut c_void,
-        lpThreadAttributes: *mut c_void,
-        bInheritHandles: BOOL,
-        dwCreationFlags: u32,
-        lpEnvironment: *mut c_void,
-        lpCurrentDirectory: *const c_char,
-        lpStartupInfo: *mut c_void,
-        lpProcessInformation: *mut c_void,
-        lpDllName: *const c_char,
-        pfCreateProcessA: *mut c_void,
-    ) -> BOOL;
-
-    fn DetourUpdateProcessWithDll(hProcess: HANDLE, rlpDlls: *const *const c_char, nDlls: u32) -> BOOL;
 }
 
 type FnCreateProcessW = unsafe extern "system" fn(
@@ -105,7 +70,7 @@ static REAL_CREATE_PROCESS_AS_USER_W: AtomicPtr<c_void> = AtomicPtr::new(std::pt
 
 /// The three outcomes of the pre-boot injection check, each with a distinct action.
 enum InjectionDecision {
-    /// Policy verified clean: the child accepts an injected redirector.dll.
+    /// Policy verified clean: the child accepts an injected engine.
     Permitted,
     /// Code Integrity Guard or Arbitrary Code Guard active: the kernel forbids our DLL
     /// or thunks. The child runs unvirtualized by documented design - its own sandbox
@@ -116,19 +81,8 @@ enum InjectionDecision {
     Unknown(i32),
 }
 
-/// What the caller must do with a child that Detours already created frozen and injected.
-enum ChildDisposition {
-    /// The child is injected and ready to start.
-    Injected,
-    /// The kernel forbids injection. The frozen pre-boot child has been discarded; the caller
-    /// recreates it plainly through its own trampoline.
-    RecreatePlain,
-    /// The spawn is refused. The frozen child has been discarded and the OS error is set.
-    Refused,
-}
-
 /// Queries the frozen child's actual mitigation policies to decide whether an injected
-/// redirector.dll can load there at all.
+/// engine can load there at all.
 ///
 /// # Why kernel truth instead of command-line heuristics
 /// The previous string-match bypass (`--type=`, `msedgewebview2.exe`, `crashpad_handler.exe`)
@@ -190,34 +144,6 @@ unsafe fn child_injection_decision(h_child: HANDLE) -> InjectionDecision {
     InjectionDecision::Permitted
 }
 
-/// Resolves the engine DLL every child must be injected with, or the Win32 error that must
-/// fail the spawn.
-///
-/// # Why a missing engine refuses the spawn
-/// ADR-006: the engine must be deployed and every child verifiably injectable. Degrading to a
-/// plain spawn would let the application write to the real host silently.
-fn engine_dll_for_injection(api: &str) -> Result<CString, u32> {
-    let cfg = crate::paths::init_paths();
-    let dll_path = cfg.ppm_dir.join("lib").join("redirector.dll");
-
-    if !dll_path.is_file() {
-        tracing::error!(
-            "{api} [Engine Missing]: redirector.dll not found at '{}'; refusing unvirtualized spawn",
-            dll_path.display()
-        );
-        return Err(ERROR_FILE_NOT_FOUND);
-    }
-
-    // Defense-in-depth: an interior NUL cannot occur in an NT path, but if one ever did,
-    // failing loudly beats an unterminated CString read.
-    CString::new(dll_path.to_string_lossy().as_bytes()).map_err(|_| {
-        tracing::error!(
-            "{api} [Bad Path]: redirector.dll path contains an interior NUL; refusing unvirtualized spawn"
-        );
-        ERROR_INVALID_PARAMETER
-    })
-}
-
 /// Terminates and closes a child that has not executed a single instruction.
 ///
 /// # Safety
@@ -268,40 +194,69 @@ unsafe fn start_frozen_child(api: &str, proc_info: LpprocessInformation, caller_
     TRUE
 }
 
-/// Applies the injection contract to a child Detours created frozen and already injected.
+/// The `CreateProcessW` a Detours helper is started through: the un-hooked trampoline, so the
+/// helper is not itself intercepted, or the export itself when it was never hooked.
+fn helper_create_process() -> *const c_void {
+    try_load_trampoline(&REAL_CREATE_PROCESS_W).map_or(CreateProcessW as *const c_void, |trampoline| {
+        trampoline.cast_const()
+    })
+}
+
+/// Applies the injection contract to a child the hook just created suspended, then starts it.
+///
+/// # Why every entry point creates the child itself and injects afterwards
+/// The engine needed for a child depends on the machine the child runs as - an x86 helper of a
+/// 64-bit application, an emulated x64 tool on an ARM64 host - and only the created process can
+/// say which that is. Creating it frozen, gating on its mitigation policy, and only then
+/// injecting also means a hardened child is simply started uninjected, where the previous
+/// Detours create-and-inject wrapper had to terminate it and create it a second time.
 ///
 /// # Safety
-/// `proc_info` must be a filled `PROCESS_INFORMATION` from a successful suspended create.
-unsafe fn gate_detoured_child(api: &str, proc_info: LpprocessInformation) -> ChildDisposition {
-    // SAFETY: `proc_info` was filled by the successful create and the child is frozen, so its
-    // handles are live for this call.
-    match unsafe { child_injection_decision((*proc_info).hProcess) } {
+/// `proc_info` must be a filled `PROCESS_INFORMATION` from a successful create that added
+/// `CREATE_SUSPENDED`, whose handles the caller has not yet closed.
+unsafe fn admit_frozen_child(api: &str, proc_info: LpprocessInformation, caller_flags: u32) -> BOOL {
+    // SAFETY: per the contract, the child is frozen and its handles are live.
+    let (process, pid) = unsafe { ((*proc_info).hProcess, (*proc_info).dwProcessId) };
+    match unsafe { child_injection_decision(process) } {
         InjectionDecision::Permitted => {
-            tracing::info!("{api} [Child Injected]: Injected redirector.dll into new child process");
-            ChildDisposition::Injected
+            let lib_dir = crate::paths::init_paths().ppm_dir.join("lib");
+            // SAFETY: the suspended create returned a full-access handle to process `pid`;
+            // `helper_create_process` has CreateProcessW's signature and ABI.
+            match unsafe { injection::inject_suspended(process, pid, &lib_dir, helper_create_process()) } {
+                Ok(machine) => {
+                    tracing::info!("{api} [Child Injected]: {machine} engine injected into child {pid}");
+                }
+                Err(error) => {
+                    // Fail-fast (ADR-006): a child the engine cannot inject is refused with the
+                    // cause, never started outside the sandbox.
+                    tracing::error!("{api} [Injection Failed]: {error}; spawn refused");
+                    unsafe {
+                        discard_frozen_child(proc_info);
+                        SetLastError(error.win32_code());
+                    }
+                    return FALSE;
+                }
+            }
         }
         InjectionDecision::ForbiddenByPolicy => {
-            // Documented contract: a child the kernel forbids us to inject runs
-            // unvirtualized in its own sandbox (which is its isolation). Terminate the frozen
-            // pre-boot child and let the caller recreate it plainly.
+            // Documented contract: a child the kernel forbids us to inject runs unvirtualized
+            // in its own sandbox, which is its isolation.
             tracing::info!(
-                "{api} [Hardened Child]: mitigation policy forbids injection; recreating without redirector.dll"
+                "{api} [Hardened Child]: mitigation policy forbids injection; the child runs in its own sandbox"
             );
-            unsafe { discard_frozen_child(proc_info) };
-            ChildDisposition::RecreatePlain
         }
         InjectionDecision::Unknown(err) => {
-            // Fail-fast: an unverifiable policy state is a boundary hole in the making - the
-            // spawn is refused with the real OS error rather than silently running a child
-            // outside the sandbox.
-            unsafe { discard_frozen_child(proc_info) };
             tracing::error!(
                 "{api} [Policy Query Failed]: GetProcessMitigationPolicy failed ({err}); spawn refused rather than running a child outside the sandbox"
             );
-            unsafe { SetLastError(err as u32) };
-            ChildDisposition::Refused
+            unsafe {
+                discard_frozen_child(proc_info);
+                SetLastError(err as u32);
+            }
+            return FALSE;
         }
     }
+    unsafe { start_frozen_child(api, proc_info, caller_flags) }
 }
 
 unsafe extern "system" fn hook_create_process_w(
@@ -317,89 +272,29 @@ unsafe extern "system" fn hook_create_process_w(
     proc_info: LpprocessInformation,
 ) -> BOOL {
     let real_fn: FnCreateProcessW = unsafe { std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_W)) };
-    guard_detour!(
-        &IN_PROC_HOOK,
-        unsafe {
-            real_fn(
-                app_name,
-                cmd_line,
-                proc_attr,
-                thread_attr,
-                inherit,
-                flags,
-                env,
-                curr_dir,
-                startup_info,
-                proc_info,
-            )
-        },
-        {
-            const API: &str = "CreateProcessW";
-            let dll_cstr = match engine_dll_for_injection(API) {
-                Ok(cstr) => cstr,
-                Err(code) => {
-                    unsafe { SetLastError(code) };
-                    return FALSE;
-                }
-            };
-
-            // SAFETY: every pointer argument is forwarded verbatim from the hooked
-            // CreateProcessW frame; `dll_cstr` outlives the call; `proc_attr`,
-            // `thread_attr`, `env`, `startup_info`, and `proc_info` only need their
-            // const-to-mut qualifiers relaxed to match the Detours ABI.
-            //
-            // CREATE_SUSPENDED is added deliberately: Detours (creatwth.cpp) resumes
-            // the child itself only when the caller did not ask for suspended, so the
-            // child stays frozen here at pre-boot - its mitigation policies are already
-            // applied (the kernel sets them at create time from the parent's attribute
-            // list) but no code of ours has run in it yet.
-            let res = unsafe {
-                DetourCreateProcessWithDllExW(
-                    app_name,
-                    cmd_line,
-                    proc_attr.cast_mut(),
-                    thread_attr.cast_mut(),
-                    inherit,
-                    flags | CREATE_SUSPENDED,
-                    env.cast_mut(),
-                    curr_dir,
-                    startup_info.cast(),
-                    proc_info.cast(),
-                    dll_cstr.as_ptr(),
-                    std::ptr::null_mut(),
-                )
-            };
-            if res == 0 {
-                // Fail-fast: the injected create failed; a silent unvirtualized retry would
-                // breach the boundary. The real OS error propagates to the caller.
-                let code = std::io::Error::last_os_error();
-                tracing::error!(
-                    "{API} [Injection Failed]: DetourCreateProcessWithDllExW failed for a child of this root ({code}); spawn refused"
-                );
-                unsafe { SetLastError(code.raw_os_error().unwrap_or(0) as u32) };
-                return FALSE;
-            }
-
-            match unsafe { gate_detoured_child(API, proc_info) } {
-                ChildDisposition::Injected => unsafe { start_frozen_child(API, proc_info, flags) },
-                ChildDisposition::RecreatePlain => unsafe {
-                    real_fn(
-                        app_name,
-                        cmd_line,
-                        proc_attr,
-                        thread_attr,
-                        inherit,
-                        flags,
-                        env,
-                        curr_dir,
-                        startup_info,
-                        proc_info,
-                    )
-                },
-                ChildDisposition::Refused => FALSE,
-            }
+    // SAFETY (both arms): every argument is forwarded verbatim from the intercepted frame; the
+    // hooked arm only adds CREATE_SUSPENDED so the child can be admitted at pre-boot.
+    let create = |flags| unsafe {
+        real_fn(
+            app_name,
+            cmd_line,
+            proc_attr,
+            thread_attr,
+            inherit,
+            flags,
+            env,
+            curr_dir,
+            startup_info,
+            proc_info,
+        )
+    };
+    guard_detour!(&IN_PROC_HOOK, create(flags), {
+        if create(flags | CREATE_SUSPENDED) == 0 {
+            // The OS already set the real error for its own refusal.
+            return FALSE;
         }
-    )
+        unsafe { admit_frozen_child("CreateProcessW", proc_info, flags) }
+    })
 }
 
 /// `CreateProcessA` is a separate implementation that reaches `CreateProcessInternalA` without
@@ -418,91 +313,31 @@ unsafe extern "system" fn hook_create_process_a(
     proc_info: LpprocessInformation,
 ) -> BOOL {
     let real_fn: FnCreateProcessA = unsafe { std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_A)) };
-    guard_detour!(
-        &IN_PROC_HOOK,
-        unsafe {
-            real_fn(
-                app_name,
-                cmd_line,
-                proc_attr,
-                thread_attr,
-                inherit,
-                flags,
-                env,
-                curr_dir,
-                startup_info,
-                proc_info,
-            )
-        },
-        {
-            const API: &str = "CreateProcessA";
-            let dll_cstr = match engine_dll_for_injection(API) {
-                Ok(cstr) => cstr,
-                Err(code) => {
-                    unsafe { SetLastError(code) };
-                    return FALSE;
-                }
-            };
-
-            // SAFETY: as in the wide hook - every pointer is forwarded verbatim from the
-            // intercepted frame and `dll_cstr` outlives the call. The ANSI Detours entry point
-            // keeps the caller's own string encoding, so nothing is transcoded here.
-            let res = unsafe {
-                DetourCreateProcessWithDllExA(
-                    app_name,
-                    cmd_line,
-                    proc_attr.cast_mut(),
-                    thread_attr.cast_mut(),
-                    inherit,
-                    flags | CREATE_SUSPENDED,
-                    env.cast_mut(),
-                    curr_dir,
-                    startup_info.cast(),
-                    proc_info.cast(),
-                    dll_cstr.as_ptr(),
-                    std::ptr::null_mut(),
-                )
-            };
-            if res == 0 {
-                let code = std::io::Error::last_os_error();
-                tracing::error!(
-                    "{API} [Injection Failed]: DetourCreateProcessWithDllExA failed for a child of this root ({code}); spawn refused"
-                );
-                unsafe { SetLastError(code.raw_os_error().unwrap_or(0) as u32) };
-                return FALSE;
-            }
-
-            match unsafe { gate_detoured_child(API, proc_info) } {
-                ChildDisposition::Injected => unsafe { start_frozen_child(API, proc_info, flags) },
-                ChildDisposition::RecreatePlain => unsafe {
-                    real_fn(
-                        app_name,
-                        cmd_line,
-                        proc_attr,
-                        thread_attr,
-                        inherit,
-                        flags,
-                        env,
-                        curr_dir,
-                        startup_info,
-                        proc_info,
-                    )
-                },
-                ChildDisposition::Refused => FALSE,
-            }
+    // SAFETY: as in the wide hook. The caller's own ANSI strings are forwarded untranscoded.
+    let create = |flags| unsafe {
+        real_fn(
+            app_name,
+            cmd_line,
+            proc_attr,
+            thread_attr,
+            inherit,
+            flags,
+            env,
+            curr_dir,
+            startup_info,
+            proc_info,
+        )
+    };
+    guard_detour!(&IN_PROC_HOOK, create(flags), {
+        if create(flags | CREATE_SUSPENDED) == 0 {
+            return FALSE;
         }
-    )
+        unsafe { admit_frozen_child("CreateProcessA", proc_info, flags) }
+    })
 }
 
 /// `CreateProcessAsUserW` reaches `CreateProcessInternalW` directly, so it too spawned
 /// unvirtualized children while unhooked.
-///
-/// # Why this path injects after the create instead of through a Detours wrapper
-/// Detours ships no `AsUser` create wrapper, so the hook does what the wrapper does: create the
-/// child frozen through the real API, then inject with `DetourUpdateProcessWithDll`. Querying
-/// the mitigation policy *before* injecting is strictly better than the wrapper's order - a
-/// hardened child is simply started uninjected, with no terminate-and-recreate round trip and
-/// no second PID consumed.
 unsafe extern "system" fn hook_create_process_as_user_w(
     token: HANDLE,
     app_name: *const u16,
@@ -518,97 +353,28 @@ unsafe extern "system" fn hook_create_process_as_user_w(
 ) -> BOOL {
     let real_fn: FnCreateProcessAsUserW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_CREATE_PROCESS_AS_USER_W)) };
-    guard_detour!(
-        &IN_PROC_HOOK,
-        unsafe {
-            real_fn(
-                token,
-                app_name,
-                cmd_line,
-                proc_attr,
-                thread_attr,
-                inherit,
-                flags,
-                env,
-                curr_dir,
-                startup_info,
-                proc_info,
-            )
-        },
-        {
-            const API: &str = "CreateProcessAsUserW";
-            let dll_cstr = match engine_dll_for_injection(API) {
-                Ok(cstr) => cstr,
-                Err(code) => {
-                    unsafe { SetLastError(code) };
-                    return FALSE;
-                }
-            };
-
-            // SAFETY: arguments are forwarded verbatim from the intercepted frame; only the
-            // creation flags gain CREATE_SUSPENDED so the policy gate runs at pre-boot.
-            let created = unsafe {
-                real_fn(
-                    token,
-                    app_name,
-                    cmd_line,
-                    proc_attr,
-                    thread_attr,
-                    inherit,
-                    flags | CREATE_SUSPENDED,
-                    env,
-                    curr_dir,
-                    startup_info,
-                    proc_info,
-                )
-            };
-            if created == 0 {
-                // The OS already set the real error for its own refusal.
-                return FALSE;
-            }
-
-            // SAFETY: `proc_info` was filled by the successful suspended create.
-            match unsafe { child_injection_decision((*proc_info).hProcess) } {
-                InjectionDecision::Permitted => {
-                    let dlls = [dll_cstr.as_ptr()];
-                    // SAFETY: the child is frozen and its handle carries the access
-                    // DetourUpdateProcessWithDll needs to rewrite the import table; `dlls`
-                    // outlives the call.
-                    let injected =
-                        unsafe { DetourUpdateProcessWithDll((*proc_info).hProcess, dlls.as_ptr(), 1) };
-                    if injected == 0 {
-                        let code = std::io::Error::last_os_error();
-                        tracing::error!(
-                            "{API} [Injection Failed]: DetourUpdateProcessWithDll failed for a child of this root ({code}); spawn refused"
-                        );
-                        unsafe {
-                            discard_frozen_child(proc_info);
-                            SetLastError(code.raw_os_error().unwrap_or(0) as u32);
-                        }
-                        return FALSE;
-                    }
-                    tracing::info!("{API} [Child Injected]: Injected redirector.dll into new child process");
-                }
-                InjectionDecision::ForbiddenByPolicy => {
-                    tracing::info!(
-                        "{API} [Hardened Child]: mitigation policy forbids injection; the child runs in its own sandbox"
-                    );
-                }
-                InjectionDecision::Unknown(err) => {
-                    unsafe {
-                        discard_frozen_child(proc_info);
-                        SetLastError(err as u32);
-                    }
-                    tracing::error!(
-                        "{API} [Policy Query Failed]: GetProcessMitigationPolicy failed ({err}); spawn refused rather than running a child outside the sandbox"
-                    );
-                    return FALSE;
-                }
-            }
-
-            unsafe { start_frozen_child(API, proc_info, flags) }
+    // SAFETY: as in the wide hook.
+    let create = |flags| unsafe {
+        real_fn(
+            token,
+            app_name,
+            cmd_line,
+            proc_attr,
+            thread_attr,
+            inherit,
+            flags,
+            env,
+            curr_dir,
+            startup_info,
+            proc_info,
+        )
+    };
+    guard_detour!(&IN_PROC_HOOK, create(flags), {
+        if create(flags | CREATE_SUSPENDED) == 0 {
+            return FALSE;
         }
-    )
+        unsafe { admit_frozen_child("CreateProcessAsUserW", proc_info, flags) }
+    })
 }
 
 pub fn init_hooks() {

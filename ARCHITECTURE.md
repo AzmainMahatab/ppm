@@ -25,7 +25,7 @@ graph TD
     PPM -->|ppm init| PPMDir & X64Dir & ARM64Dir & HomeDir & BatLaunchers
     PPM -->|ppm install <app>| DepResolver["Dependency Resolution -> Installs to Apps/<arch>/<target_dir>"]
     PPM -->|ppm run <app>| HostDetect["Architecture Resolution via GetNativeSystemInfo"]
-    HostDetect -->|Routes to Apps/<arch>/<target_dir>| Virtualize["Injects .ppm/lib/redirector.dll & Spawns Application"]
+    HostDetect -->|Routes to Apps/<arch>/<target_dir>| Virtualize["Creates suspended, injects the engine for its machine, resumes"]
     PPM -->|ppm link| BatLaunchers
 ```
 
@@ -47,8 +47,9 @@ graph TD
 │   │   ├── registry.jsonl              # Virtual registry hive (append-only journal)
 │   │   └── credentials.json            # Portable credential store (plaintext at rest)
 │   │
-│   ├── lib/                            # Runtime libraries
-│   │   └── redirector.dll              # Injected virtualization library
+│   ├── lib/                            # Engine builds, one folder per 64-bit machine
+│   │   ├── x64/                        # redirector64.dll (x64) + redirector32.dll (x86)
+│   │   └── arm64/                      # redirector64.dll (ARM64) + redirector32.dll (x86); ARM64 builds only
 │   │
 │   ├── cache/                          # Download cache
 │   │   └── ...
@@ -95,7 +96,7 @@ graph TD
 
 | Target API | Interception Layer | Virtualization Function |
 | :--- | :--- | :--- |
-| **`CreateProcessW`, `CreateProcessA`, `CreateProcessAsUserW`** | `kernelbase.dll` / `kernel32.dll` | Injects `redirector.dll` into every spawned child via Microsoft Detours. Each entry point reaches `CreateProcessInternal*` on its own, so all three are hooked. The child is created frozen (`CREATE_SUSPENDED`), its mitigation policies queried from the kernel (CIG/ACG), and it is either started injected (clean) or run uninjected in its own sandbox (hardened); an unverifiable policy, a failed injection or a failed resume all fail the spawn with the real OS error - see ADR-006. |
+| **`CreateProcessW`, `CreateProcessA`, `CreateProcessAsUserW`** | `kernelbase.dll` / `kernel32.dll` | Injects the engine into every spawned child via Microsoft Detours. Each entry point reaches `CreateProcessInternal*` on its own, so all three are hooked. The child is created frozen (`CREATE_SUSPENDED`), its mitigation policies queried from the kernel (CIG/ACG), and it is either injected with the engine build for the machine it runs as - through a Detours helper when its bitness differs (ADR-007) - or run uninjected in its own sandbox (hardened); an unverifiable policy, a failed injection or a failed resume all fail the spawn with the real OS error - see ADR-006. |
 | **`RegOpenKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Normalizes registry paths (`HKCU\...`, `HKLM\...`); tracks handle in `VirtualHandleTable`. |
 | **`RegCreateKeyExW`** | `kernelbase.dll` / `advapi32.dll` | Creates key in virtual overlay; registers handle in `VirtualHandleTable`. |
 | **`RegQueryValueExW`** | `kernelbase.dll` / `advapi32.dll` | Queries virtual overlay and tombstones; falls back to host OS for unshadowed reads. Unreadable stored bytes read as absent rather than unmasking host data. |
@@ -151,9 +152,9 @@ graph TD
 ### A. `crates/redirector/src/`
 ```
 crates/redirector/src/
-├── lib.rs                          # DLL Entrypoint & Hook Orchestration
+├── lib.rs                          # DLL Entrypoint (helper check, import restore) & Hook Orchestration
 ├── paths.rs                        # Path Resolution (Home/, .ppm/logs/, .ppm/system/)
-├── detour.rs                       # Detours FFI, Re-Entrancy Guard & Export-Resolution Seam
+├── detour.rs                       # Hook Attach, Re-Entrancy Guard & Export-Resolution Seam
 ├── winstr.rs                       # Win16 String, UTF-16 Encoding & COM-Task Allocators
 ├── persist.rs                      # Loud-Failure JSON State Persistence (load/persist)
 │
@@ -202,7 +203,7 @@ crates/ppm/src/
 │   ├── layout.rs                   # PortableLayout: the single owner of on-disk locations
 │   ├── relpath.rs                  # Relative paths confined to their base directory
 │   ├── schema.rs                   # JSON Schema artifact writer
-│   └── assets.rs                   # Embedded redirector.dll & default apps.json
+│   └── assets.rs                   # Embedded per-machine engine builds & default apps.json
 │
 ├── engine/                         # Engine Domain
 │   ├── mod.rs
@@ -221,7 +222,22 @@ crates/ppm/src/
     └── sanitizer.rs                # Post-Install Cleanup
 ```
 
-### C. Verification Probe & Integration Tests
+### C. `crates/injection/` and the engine-build crates
+```
+crates/injection/                   # Shared by ppm (root launch) and redirector (children) - ADR-007
+├── build.rs                        # Compiles vendored Microsoft Detours once per target
+└── src/
+    ├── lib.rs                      # inject_suspended: machine -> engine choice -> Detours
+    ├── detours.rs                  # Detours API (extern "system")
+    ├── machine.rs                  # Machine of a process / of the host
+    └── engine.rs                   # choose_engine (pure), ANSI path encoding
+
+crates/engine-x86/                  # redirector.dll built for i686, embedded by every ppm
+crates/engine-x64/                  # redirector.dll built for x86_64, embedded by ARM64 ppm
+crates/probe-x86/                   # test-probe built for i686 (cross-bitness e2e)
+```
+
+### D. Verification Probe & Integration Tests
 ```
 crates/test-probe/                  # Isolated probe package (bin-artifact dev-dependency of ppm)
 ├── src/main.rs                     # Suite Dispatcher (--child / --echo-args / --help modes)

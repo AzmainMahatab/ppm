@@ -1,4 +1,4 @@
-use crate::core::assets::{DEFAULT_APPS_JSON, EMBEDDED_REDIRECTOR_DLL};
+use crate::core::assets::{DEFAULT_APPS_JSON, ENGINE_FILES};
 use crate::core::layout::PortableLayout;
 use crate::core::schema::write_schema_artifacts;
 use anyhow::{Context, bail};
@@ -7,7 +7,7 @@ use std::path::Path;
 
 pub fn init_environment(root: &Path) -> anyhow::Result<()> {
     scaffold_directories(root)?;
-    extract_redirector_dll(root)?;
+    deploy_engines(root)?;
     ensure_default_config(root)?;
     regenerate_schema(root)?;
 
@@ -39,21 +39,41 @@ fn scaffold_directories(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Intention: Unconditionally deploy a fresh copy of the virtualization engine DLL.
+// Intention: Unconditionally deploy a fresh copy of every engine build into its machine folder.
 // Why: A previously extracted 0-byte or stale DLL must never survive an `init`; the embedded
-//      artifact is rebuilt by Cargo on every redirector change and always reflects ground truth.
-fn extract_redirector_dll(root: &Path) -> anyhow::Result<()> {
-    if EMBEDDED_REDIRECTOR_DLL.is_empty() {
-        bail!("Embedded redirector.dll is empty; the build did not capture a valid redirector artifact");
+//      artifacts are rebuilt by Cargo on every redirector change and always reflect ground truth.
+fn deploy_engines(root: &Path) -> anyhow::Result<()> {
+    let lib_dir = PortableLayout::new(root).engine_lib_dir();
+    for engine in ENGINE_FILES {
+        if engine.bytes.is_empty() {
+            bail!(
+                "Embedded {}/{} is empty; the build did not capture a valid redirector artifact",
+                engine.folder,
+                engine.file_name
+            );
+        }
+        let folder = lib_dir.join(engine.folder.as_str());
+        fs::create_dir_all(&folder).with_context(|| format!("Failed to create '{}'", folder.display()))?;
+        let dll_path = folder.join(engine.file_name);
+        fs::write(&dll_path, engine.bytes)
+            .with_context(|| format!("Failed to deploy '{}'", dll_path.display()))?;
+        tracing::info!("✓ Deployed .ppm/lib/{}/{}", engine.folder, engine.file_name);
     }
+    remove_single_build_engine(&lib_dir)
+}
 
-    let dll_path = root.join(".ppm").join("lib").join("redirector.dll");
-    fs::write(&dll_path, EMBEDDED_REDIRECTOR_DLL)
-        .with_context(|| format!("Failed to deploy '{}'", dll_path.display()))?;
-
-    tracing::info!("✓ Deployed .ppm/lib/redirector.dll");
-
-    Ok(())
+/// Removes the engine an earlier `ppm` deployed as `.ppm/lib/redirector.dll`, before engines
+/// were split per machine. Nothing loads it any more, and leaving it would suggest otherwise.
+fn remove_single_build_engine(lib_dir: &Path) -> anyhow::Result<()> {
+    let superseded = lib_dir.join("redirector.dll");
+    match fs::remove_file(&superseded) {
+        Ok(()) => {
+            tracing::info!("✓ Removed the superseded .ppm/lib/redirector.dll");
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Failed to remove '{}'", superseded.display())),
+    }
 }
 
 // Intention: Seed configuration exactly once; user-authored manifests are authoritative.
@@ -106,13 +126,31 @@ mod tests {
             );
         }
 
-        let deployed = std::fs::read(root.path().join(".ppm/lib/redirector.dll")).unwrap();
-        assert_eq!(deployed, EMBEDDED_REDIRECTOR_DLL);
+        for engine in ENGINE_FILES {
+            let path = root
+                .path()
+                .join(".ppm/lib")
+                .join(engine.folder.as_str())
+                .join(engine.file_name);
+            assert_eq!(std::fs::read(&path).unwrap(), engine.bytes, "{}", path.display());
+        }
         assert_eq!(
             std::fs::read_to_string(root.path().join(".ppm/apps.json")).unwrap(),
             DEFAULT_APPS_JSON
         );
         assert!(root.path().join(".ppm/apps.schema.json").is_file());
+    }
+
+    #[test]
+    fn init_removes_the_superseded_single_build_engine() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let superseded = root.path().join(".ppm/lib/redirector.dll");
+        std::fs::create_dir_all(superseded.parent().unwrap()).unwrap();
+        std::fs::write(&superseded, b"MZ old engine").unwrap();
+
+        init_environment(root.path()).unwrap();
+
+        assert!(!superseded.exists());
     }
 
     #[test]

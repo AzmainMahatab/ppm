@@ -1,6 +1,10 @@
 [workspace]
 members = [
     "crates/ppm",
+    "crates/probe-x86",
+    "crates/engine-x64",
+    "crates/engine-x86",
+    "crates/injection",
     "crates/redirector",
     "crates/test-probe"
 ]
@@ -52,6 +56,7 @@ serde-saphyr = "2.0"
 sevenz-rust2 = { version = "0.24", default-features = false }
 tar = "0.4"
 tempfile = "3.18"
+thiserror = "2"
 tracing = "0.1"
 tracing-appender = "0.2"
 # Intention: Authoritative default-features opt-out lives at the root.

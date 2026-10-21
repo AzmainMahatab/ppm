@@ -30,6 +30,11 @@ impl<'a> PortableLayout<'a> {
         self.root.join(".ppm")
     }
 
+    /// `<root>/.ppm/lib` - holds one folder of engine builds per 64-bit machine.
+    pub fn engine_lib_dir(&self) -> PathBuf {
+        self.ppm_dir().join("lib")
+    }
+
     /// The deployed manifest a `ppm init` writes and every command prefers.
     pub fn deployed_manifest(&self) -> PathBuf {
         self.ppm_dir().join("apps.json")

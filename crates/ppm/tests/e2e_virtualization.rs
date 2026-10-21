@@ -18,6 +18,24 @@ const SINGLE_PROBE_MANIFEST: &str = r#"{
                 },
                 "global_env": {
                     "PPM_TEST_GLOBAL_ENV": "{root}/injected-by-global-env"
+                },
+                "env": {
+                    "PPM_TEST_PEER_PROBE": "{root}/Apps/{arch}/TestProbe/test-probe-x86.exe"
+                }
+            },
+            "test-probe-x86": {
+                "name": "Virtualization Test Probe (x86)",
+                "target_dir": "TestProbe",
+                "executable": "test-probe-x86.exe",
+                "version_check": {
+                    "type": "github_release",
+                    "repo": "owner/repo"
+                },
+                "package": {
+                    "type": "zip"
+                },
+                "env": {
+                    "PPM_TEST_PEER_PROBE": "{root}/Apps/{arch}/TestProbe/test-probe.exe"
                 }
             }
         }
@@ -25,17 +43,27 @@ const SINGLE_PROBE_MANIFEST: &str = r#"{
 
 #[cfg(windows)]
 struct TestEnvironment {
-    temp_dir: tempfile::TempDir,
+    // Held for its Drop: the temporary directory the root lives in is removed with it.
+    _temp_dir: tempfile::TempDir,
+    root: PathBuf,
     ppm_exe: PathBuf,
     test_probe_exe: PathBuf,
+    x86_probe_exe: PathBuf,
     arch: &'static str,
 }
 
 #[cfg(windows)]
 impl TestEnvironment {
     fn new() -> Self {
+        Self::with_root_name("root")
+    }
+
+    /// An initialized portable root in a fresh temporary directory, in a folder named `root_name`.
+    fn with_root_name(root_name: &str) -> Self {
         let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let root = temp_dir.path();
+        let root_path = temp_dir.path().join(root_name);
+        fs::create_dir(&root_path).expect("Failed to create the root folder");
+        let root = root_path.as_path();
 
         // Intention: Resolve product binary and probe artifact purely through Cargo's build graph.
         // Why: The probe ships as a bin-artifact dev-dependency (`artifact = "bin"`, gated by the
@@ -58,14 +86,6 @@ impl TestEnvironment {
             .expect("Failed to run ppm init");
         assert!(status.success(), "ppm init should succeed");
 
-        // Regression guard: init must deploy a real (non-empty) embedded engine DLL.
-        let extracted_dll = fs::read(root.join(".ppm").join("lib").join("redirector.dll"))
-            .expect("init must deploy .ppm/lib/redirector.dll");
-        assert!(
-            !extracted_dll.is_empty(),
-            "embedded redirector.dll must not be empty"
-        );
-
         let arch = if cfg!(target_arch = "aarch64") {
             "arm64"
         } else {
@@ -73,15 +93,17 @@ impl TestEnvironment {
         };
 
         Self {
-            temp_dir,
+            root: root_path.clone(),
+            _temp_dir: temp_dir,
             ppm_exe,
             test_probe_exe,
+            x86_probe_exe: PathBuf::from(probe_x86::PROBE_EXE),
             arch,
         }
     }
 
     fn root(&self) -> &Path {
-        self.temp_dir.path()
+        &self.root
     }
 
     fn deploy_binary(&self, target_dir_name: &str, exe_name: &str) -> PathBuf {
@@ -90,6 +112,13 @@ impl TestEnvironment {
         let dest_exe = dest_dir.join(exe_name);
         fs::copy(&self.test_probe_exe, &dest_exe).expect("Failed to copy probe binary");
         dest_exe
+    }
+
+    /// Deploys the probe and its x86 build side by side, as the manifest's peer paths expect.
+    fn deploy_probe_pair(&self) {
+        let native = self.deploy_binary("TestProbe", "test-probe.exe");
+        fs::copy(&self.x86_probe_exe, native.with_file_name("test-probe-x86.exe"))
+            .expect("Failed to copy the x86 probe binary");
     }
 
     fn write_manifest(&self, apps_json: &str) {
@@ -101,7 +130,7 @@ impl TestEnvironment {
 #[cfg(windows)]
 fn test_e2e_virtualization_with_probe() {
     let env = TestEnvironment::new();
-    env.deploy_binary("TestProbe", "test-probe.exe");
+    env.deploy_probe_pair();
     let apps_json = SINGLE_PROBE_MANIFEST;
     env.write_manifest(apps_json);
 
@@ -337,7 +366,12 @@ fn test_e2e_run_refuses_to_launch_without_the_engine() {
     env.deploy_binary("TestProbe", "test-probe.exe");
     env.write_manifest(SINGLE_PROBE_MANIFEST);
 
-    let engine = env.root().join(".ppm").join("lib").join("redirector.dll");
+    let engine = env
+        .root()
+        .join(".ppm")
+        .join("lib")
+        .join(env.arch)
+        .join(injection::ENGINE_DLL_64);
     assert!(engine.is_file(), "init must have deployed the engine");
     fs::remove_file(&engine).expect("the engine must be removable for this test");
 
@@ -355,11 +389,75 @@ fn test_e2e_run_refuses_to_launch_without_the_engine() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Virtualization engine missing"),
+        stderr.contains("engine is missing"),
         "the refusal must name the missing engine. Stderr: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("PPM Virtualization Test Probe"),
+        "the probe must not have started at all"
     );
     assert!(
         stderr.contains("ppm init"),
         "the refusal must tell the user how to fix it. Stderr: {stderr}"
+    );
+}
+
+/// Regression: the engine came in one build, for ppm's own machine, so a 32-bit application
+/// could not be launched virtualized at all. The x86 probe runs every boundary suite inside a
+/// 32-bit process; its injection suite also spawns the 64-bit probe, which exercises the
+/// 32-to-64-bit helper route.
+#[test]
+#[cfg(windows)]
+fn test_e2e_x86_application_runs_virtualized() {
+    let env = TestEnvironment::new();
+    env.deploy_probe_pair();
+    env.write_manifest(SINGLE_PROBE_MANIFEST);
+
+    let output = Command::new(env.root().join("ppm.exe"))
+        .args(["run", "test-probe-x86"])
+        .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
+        .output()
+        .expect("Failed to run ppm run test-probe-x86");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the x86 probe must pass every boundary suite. Stdout: {stdout}\nStderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("ALL 5 BOUNDARY SUITES PASSED"),
+        "every suite must have run. Stdout: {stdout}"
+    );
+}
+
+/// Regression: the engine path was handed to Detours as UTF-8, which the loader decodes with the
+/// system ANSI code page, so a portable root with any non-ASCII character in its path failed every
+/// launch. `é` exists in every Western ANSI code page and in UTF-8; on a code page without it the
+/// engine falls back to the 8.3 short path.
+#[test]
+#[cfg(windows)]
+fn test_e2e_root_with_a_non_ascii_path_runs_virtualized() {
+    let env = TestEnvironment::with_root_name("Portable Café");
+    env.deploy_probe_pair();
+    env.write_manifest(SINGLE_PROBE_MANIFEST);
+
+    let output = Command::new(env.root().join("ppm.exe"))
+        .args(["run", "test-probe"])
+        .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
+        .output()
+        .expect("Failed to run ppm run test-probe");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a root under 'Portable Café' must launch virtualized. Stdout: {stdout}\nStderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("ALL 5 BOUNDARY SUITES PASSED"),
+        "every suite must have run. Stdout: {stdout}"
     );
 }

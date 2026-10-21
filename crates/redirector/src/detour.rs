@@ -6,13 +6,9 @@ use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
 use windows_sys::Win32::System::Threading::GetCurrentThread;
 
-unsafe extern "system" {
-    pub fn DetourTransactionBegin() -> i32;
-    pub fn DetourUpdateThread(hThread: windows_sys::Win32::Foundation::HANDLE) -> i32;
-    pub fn DetourAttach(ppPointer: *mut *mut c_void, pDetour: *mut c_void) -> i32;
-    pub fn DetourDetach(ppPointer: *mut *mut c_void, pDetour: *mut c_void) -> i32;
-    pub fn DetourTransactionCommit() -> i32;
-}
+pub use injection::detours::{
+    DetourAttach, DetourDetach, DetourTransactionBegin, DetourTransactionCommit, DetourUpdateThread,
+};
 
 /// Atomically attaches a detour to a target function using Microsoft Detours.
 /// `target_ptr` must point to the variable holding the original function address.

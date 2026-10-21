@@ -1,0 +1,16 @@
+[package]
+name = "probe-x86"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The 32-bit x86 build of test-probe, for verifying injection across bitness"
+
+# Why a crate of its own: Cargo allows one dependency edge per package, and ppm's dev edge to
+#      test-probe already builds it for ppm's own target. This crate is the second edge.
+[dependencies]
+test-probe = { path = "../test-probe", artifact = "bin", target = "i686-pc-windows-msvc" }
+
+[lints]
+workspace = true

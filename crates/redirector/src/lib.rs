@@ -29,6 +29,20 @@ pub unsafe extern "system" fn DllMain(
 ) -> BOOL {
     match fdw_reason {
         DLL_PROCESS_ATTACH => {
+            // Why first: in a Detours helper (the `rundll32` that injects a process of the other
+            // bitness) this DLL is loaded only to run its ordinal-1 export. The helper is not an
+            // application, so no boundary may be installed in it. The call also locates the
+            // helper's payload, which that export reads.
+            // SAFETY: plain Detours query of the current process's own image.
+            if unsafe { injection::detours::DetourIsHelperProcess() } != 0 {
+                return TRUE;
+            }
+            // Detours patched this process's import table to load the engine; restore it so the
+            // application sees its own image as built. Detours requires this in every DLL it
+            // injects.
+            // SAFETY: called once, at attach, as Detours documents.
+            unsafe { injection::detours::DetourRestoreAfterWith() };
+
             HMODULE_SELF.store(h_inst_dll as isize, Ordering::SeqCst);
             paths::init_paths();
             paths::init_logger();

@@ -23,10 +23,8 @@ categories = [
 [lib]
 crate-type = ["cdylib"]
 
-[build-dependencies]
-cc.workspace = true
-
 [dependencies]
+injection = { path = "../injection" }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_SystemServices",

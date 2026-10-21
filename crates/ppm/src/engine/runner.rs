@@ -1,34 +1,12 @@
 use crate::core::arch::CpuArch;
 use crate::core::config::AppManifests;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-// Only the non-Windows plain launch path uses std::process; the Windows path always goes
-// through Detours so the engine is injected.
-#[cfg(not(windows))]
-use std::process::Command;
-
-#[cfg(windows)]
-unsafe extern "C" {
-    fn DetourCreateProcessWithDllExW(
-        lpApplicationName: *const u16,
-        lpCommandLine: *mut u16,
-        lpProcessAttributes: *mut std::ffi::c_void,
-        lpThreadAttributes: *mut std::ffi::c_void,
-        bInheritHandles: i32,
-        dwCreationFlags: u32,
-        lpEnvironment: *mut std::ffi::c_void,
-        lpCurrentDirectory: *const u16,
-        lpStartupInfo: *mut std::ffi::c_void,
-        lpProcessInformation: *mut std::ffi::c_void,
-        lpDllName: *const std::ffi::c_char,
-        pfCreateProcessW: *mut std::ffi::c_void,
-    ) -> i32;
-}
 
 type EnvironmentOverrides = [(String, String)];
 
@@ -177,52 +155,16 @@ pub fn run_app(root: &Path, app_name_or_path: &str, user_args: &[String]) -> Res
     }
     final_args.extend(user_args.to_vec());
 
-    // 4. Check for redirector DLL at .ppm/lib/redirector.dll
-    let redirector_dll = root.join(".ppm").join("lib").join("redirector.dll");
-
-    #[cfg(windows)]
-    {
-        // Intention: Refuse to launch an application the engine cannot virtualize.
-        // Why: ADR-006 already makes a *child* whose injectability cannot be verified fail the
-        //      spawn rather than run outside the sandbox. The root launch is the same contract:
-        //      without redirector.dll the application would write to the real registry and the
-        //      real user profile while `ppm run` reported success. The environment block alone
-        //      redirects paths that ask for them - it is not the isolation boundary.
-        // Ex: [.ppm/lib/redirector.dll absent] -> [error naming `ppm init`], never a silent
-        //     unvirtualized launch.
-        if !redirector_dll.is_file() {
-            bail!(
-                "Virtualization engine missing at '{}'. Run 'ppm init' to deploy it; refusing to launch '{}' unvirtualized.",
-                redirector_dll.display(),
-                app_name_or_path
-            );
-        }
-
-        launch_with_detours(
-            &exe_path,
-            &app_dir,
-            &final_args,
-            &redirector_dll,
-            &child_environment,
-        )
-    }
-
-    // Off Windows there is no engine to deploy and no virtualization is claimed, so a plain
-    // launch is the contract rather than a degradation of it.
-    #[cfg(not(windows))]
-    {
-        let mut cmd = Command::new(&exe_path);
-        cmd.current_dir(&app_dir);
-        cmd.args(&final_args);
-        cmd.envs(
-            child_environment
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str())),
-        );
-
-        let status = cmd.status()?;
-        Ok(status.code().unwrap_or(0))
-    }
+    // 4. Launch with the engine for the application's machine injected
+    let engine_lib_dir = crate::core::layout::PortableLayout::new(root).engine_lib_dir();
+    launch_injected(
+        &exe_path,
+        &app_dir,
+        &final_args,
+        &engine_lib_dir,
+        &child_environment,
+    )
+    .with_context(|| format!("Refusing to launch '{app_name_or_path}' unvirtualized"))
 }
 
 fn path_to_env_value(path: &Path) -> String {
@@ -361,19 +303,27 @@ fn verify_dependencies(
     Ok(())
 }
 
-#[cfg(windows)]
-fn launch_with_detours(
+/// Starts `exe_path` with the engine for its machine injected, waits for it, and returns its
+/// exit code.
+///
+/// # Why the process is created suspended and injected afterwards
+/// Which engine build an application needs depends on the machine it runs as - an x86 tool, or
+/// an x64 application emulated on an ARM64 host - and only the created process can say which.
+/// Nothing of the application runs before the engine is in place, and a process that cannot be
+/// injected is terminated before its first instruction: an unvirtualized launch would write to
+/// the real registry and profile while `ppm run` reported success (ADR-006).
+fn launch_injected(
     exe_path: &Path,
     work_dir: &Path,
     args: &[String],
-    dll_path: &Path,
+    engine_lib_dir: &Path,
     environment: &[(String, String)],
 ) -> Result<i32> {
-    use std::ffi::CString;
-    use std::mem::zeroed;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
     use windows_sys::Win32::System::Threading::{
-        CREATE_UNICODE_ENVIRONMENT, GetExitCodeProcess, GetStartupInfoW, INFINITE, PROCESS_INFORMATION,
-        STARTUPINFOW, WaitForSingleObject,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetExitCodeProcess, GetStartupInfoW,
+        INFINITE, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
     };
 
     let mut cmd_line_str = format!("\"{}\"", exe_path.display());
@@ -381,81 +331,96 @@ fn launch_with_detours(
         cmd_line_str.push(' ');
         cmd_line_str.push_str(&quote_win32_arg(arg));
     }
-
     let mut cmd_line_wide: Vec<u16> = OsStr::new(&cmd_line_str)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-
-    let work_dir_wide: Vec<u16> = OsStr::new(work_dir)
+    let work_dir_wide: Vec<u16> = work_dir
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-
     let mut environment_block = to_utf16_environment_block(environment);
 
-    let dll_path_cstr = CString::new(dll_path.to_string_lossy().as_bytes())?;
-
-    unsafe {
-        let mut si: STARTUPINFOW = zeroed();
-        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        GetStartupInfoW(&mut si);
-        let mut pi: PROCESS_INFORMATION = zeroed();
-
-        let success = DetourCreateProcessWithDllExW(
+    // SAFETY: zeroed STARTUPINFOW/PROCESS_INFORMATION are valid initial states; every buffer
+    // passed below is NUL-terminated and outlives the call.
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = size_of::<STARTUPINFOW>() as u32;
+    unsafe { GetStartupInfoW(&mut startup) };
+    let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let created = unsafe {
+        CreateProcessW(
             std::ptr::null(),
             cmd_line_wide.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
             1,
-            CREATE_UNICODE_ENVIRONMENT,
-            environment_block.as_mut_ptr().cast::<std::ffi::c_void>(),
+            CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+            environment_block.as_mut_ptr().cast(),
             work_dir_wide.as_ptr(),
-            std::ptr::from_mut(&mut si).cast::<std::ffi::c_void>(),
-            std::ptr::from_mut(&mut pi).cast::<std::ffi::c_void>(),
-            dll_path_cstr.as_ptr(),
-            std::ptr::null_mut(),
-        );
-
-        if success == 0 {
-            bail!(
-                "DetourCreateProcessWithDllExW failed to launch '{}' with DLL '{}': {}",
-                exe_path.display(),
-                dll_path.display(),
-                std::io::Error::last_os_error()
-            );
-        }
-
-        let wait_result = WaitForSingleObject(pi.hProcess, INFINITE);
-        let mut exit_code = 0u32;
-        let exit_result = GetExitCodeProcess(pi.hProcess, &mut exit_code);
-
-        windows_sys::Win32::Foundation::CloseHandle(pi.hProcess);
-        windows_sys::Win32::Foundation::CloseHandle(pi.hThread);
-
-        // A failed wait or exit-code query must not surface as a fabricated success
-        // exit code; both are environmental failures and report with full context.
-        if wait_result != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
-            bail!(
-                "WaitForSingleObject failed for '{}' (wait result 0x{:08X}): {}",
-                exe_path.display(),
-                wait_result,
-                std::io::Error::last_os_error()
-            );
-        }
-        if exit_result == 0 {
-            bail!(
-                "GetExitCodeProcess failed for '{}': {}",
-                exe_path.display(),
-                std::io::Error::last_os_error()
-            );
-        }
-
-        Ok(exit_code as i32)
+            &startup,
+            &mut info,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("Failed to create '{}'", exe_path.display()));
     }
+    // SAFETY: a successful create hands over ownership of both handles.
+    let (process, thread) = unsafe {
+        (
+            OwnedHandle::from_raw_handle(info.hProcess),
+            OwnedHandle::from_raw_handle(info.hThread),
+        )
+    };
+
+    // SAFETY: the process is suspended and `process` is a full-access handle to `info.dwProcessId`;
+    // CreateProcessW is the helper launcher Detours expects.
+    let injected = unsafe {
+        injection::inject_suspended(
+            process.as_raw_handle(),
+            info.dwProcessId,
+            engine_lib_dir,
+            CreateProcessW as *const std::ffi::c_void,
+        )
+    };
+    let machine = match injected {
+        Ok(machine) => machine,
+        Err(error) => {
+            // SAFETY: terminating the suspended process this function created; it never ran.
+            unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+            return Err(error)
+                .with_context(|| format!("Cannot inject the engine into '{}'", exe_path.display()));
+        }
+    };
+    tracing::debug!("Injected the {machine} engine into '{}'", exe_path.display());
+
+    // ResumeThread reports failure as (DWORD)-1; zero is the valid previous suspend count.
+    // SAFETY: resuming the thread this function created suspended.
+    if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+        let cause = std::io::Error::last_os_error();
+        unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+        return Err(cause).with_context(|| format!("Failed to start '{}'", exe_path.display()));
+    }
+    drop(thread);
+
+    // A failed wait or exit-code query must not surface as a fabricated success exit code; both
+    // are environmental failures and report with full context.
+    // SAFETY: waiting on and querying the live process handle this function owns.
+    if unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("Failed to wait for '{}'", exe_path.display()));
+    }
+    let mut exit_code = 0u32;
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit_code) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("Failed to read the exit code of '{}'", exe_path.display()));
+    }
+    // Why the reinterpreting cast: Windows exit codes are 32-bit values that `std::process::exit`
+    // takes as i32; NTSTATUS-style codes keep their bit pattern.
+    Ok(exit_code as i32)
 }
 
-#[cfg(windows)]
 fn quote_win32_arg(arg: &str) -> String {
     if arg.is_empty() {
         return "\"\"".to_string();

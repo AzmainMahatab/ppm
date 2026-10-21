@@ -6,8 +6,12 @@ fn fresh_root() -> TempDir {
     tempfile::tempdir().expect("failed to create temp root")
 }
 
+/// The engine built for this test binary's own machine.
 fn dll_path(root: &Path) -> PathBuf {
-    root.join(".ppm").join("lib").join("redirector.dll")
+    root.join(".ppm")
+        .join("lib")
+        .join(injection::Machine::current().as_str())
+        .join(injection::ENGINE_DLL_64)
 }
 
 fn config_path(root: &Path) -> PathBuf {

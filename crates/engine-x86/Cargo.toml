@@ -1,0 +1,16 @@
+[package]
+name = "engine-x86"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The 32-bit x86 build of redirector.dll, embedded by ppm for 32-bit children"
+
+# Why a crate of its own: Cargo allows one dependency edge per package, and ppm's edge to
+#      redirector already builds it for ppm's own target. This crate is the second edge.
+[dependencies]
+redirector = { path = "../redirector", artifact = "cdylib", target = "i686-pc-windows-msvc" }
+
+[lints]
+workspace = true

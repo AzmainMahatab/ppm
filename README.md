@@ -40,8 +40,9 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 │   │   ├── registry.jsonl              # Virtual registry hive (append-only journal)
 │   │   └── credentials.json            # Portable credential store (plaintext at rest)
 │   │
-│   ├── lib/                            # Runtime libraries
-│   │   └── redirector.dll              # Injected virtualization library
+│   ├── lib/                            # Engine builds, one folder per 64-bit machine
+│   │   ├── x64/                        # redirector64.dll (x64) + redirector32.dll (x86)
+│   │   └── arm64/                      # redirector64.dll (ARM64) + redirector32.dll (x86); ARM64 builds only
 │   │
 │   ├── cache/                          # Download cache
 │   │   └── ...

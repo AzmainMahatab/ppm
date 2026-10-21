@@ -10,6 +10,7 @@ description = "Lightweight Win32 virtualization validation probe for ppm and red
 [dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_System_Registry",
     "Win32_System_Com",
     "Win32_Security_Credentials",

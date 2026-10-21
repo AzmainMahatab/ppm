@@ -9,7 +9,6 @@
 //! exits non-zero if it is not virtualized, so a missed hook fails this suite.
 
 use std::env;
-use std::ffi::CString;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -18,7 +17,7 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOA, STARTUPINFOW, WaitForSingleObject,
 };
 
-use crate::support::to_wide;
+use crate::support::{to_ansi, to_wide};
 
 pub(crate) fn run() -> Result<(), String> {
     // The e2e manifest declares this variable via `global_env` with a {root} template;
@@ -39,6 +38,15 @@ pub(crate) fn run() -> Result<(), String> {
     spawn_via_create_process_w(&child_command)?;
     spawn_via_create_process_a(&child_command)?;
     spawn_via_create_process_as_user_w(&child_command)?;
+
+    // Regression: the engine injected its own build into every child, so a child of the other
+    // bitness - a 32-bit helper of a 64-bit application, or the reverse - could not load it and
+    // the spawn was refused. The harness deploys this probe built for the other bitness and
+    // names it here; it must come up virtualized like any other child.
+    let peer = env::var("PPM_TEST_PEER_PROBE")
+        .map_err(|e| format!("PPM_TEST_PEER_PROBE missing from launch environment: {e}"))?;
+    spawn_via_create_process_w(&format!("\"{peer}\" --child"))
+        .map_err(|error| format!("other-bitness peer probe '{peer}': {error}"))?;
 
     println!("  -> Process Injection Boundary PASSED!");
     Ok(())
@@ -111,9 +119,10 @@ fn spawn_via_create_process_w(command: &str) -> Result<(), String> {
 /// Regression: `CreateProcessA` reaches `CreateProcessInternalA` directly, so it used to spawn
 /// children with no redirector injected.
 fn spawn_via_create_process_a(command: &str) -> Result<(), String> {
-    let cmd_a =
-        CString::new(command).map_err(|e| format!("child command line is not ANSI-representable: {e}"))?;
-    let mut cmd_bytes = cmd_a.into_bytes_with_nul();
+    // CreateProcessA decodes its strings in the ANSI code page, so the command line is encoded
+    // there - passing UTF-8 would name a different file for any non-ASCII path.
+    let mut cmd_bytes = to_ansi(command)
+        .ok_or_else(|| format!("child command line {command:?} has no form in the ANSI code page"))?;
 
     unsafe {
         let mut si: STARTUPINFOA = std::mem::zeroed();

@@ -21,9 +21,6 @@ categories = [
     "development-tools"
 ]
 
-[build-dependencies]
-cc.workspace = true
-
 [dependencies]
 anyhow.workspace = true
 cab.workspace = true
@@ -31,6 +28,7 @@ clap = { workspace = true, features = ["derive"] }
 comfy-table.workspace = true
 flate2.workspace = true
 indicatif.workspace = true
+injection = { path = "../injection" }
 msi.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
@@ -58,6 +56,12 @@ zip.workspace = true
 #      This replaces the former plain path dependency + build-script layout-guessing with a
 #      first-class artifact edge - no candidate fallbacks, no reverse-engineered promotion rules.
 redirector = { path = "../redirector", artifact = "cdylib" }
+engine-x86 = { path = "../engine-x86" }
+
+# Why only on ARM64: an ARM64 host runs x64 applications under emulation, and those need the x64
+#      engine; an x64 build has no foreign 64-bit machine to serve.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+engine-x64 = { path = "../engine-x64" }
 
 [dev-dependencies]
 jsonschema = "0.52.1"
@@ -67,6 +71,8 @@ jsonschema = "0.52.1"
 #      release graphs, so shipping purity is structural - no feature flags, no runtime bootstrapping.
 #      Enabled by the `[unstable] bindeps` opt-in on the toolchain pinned in rust-toolchain.toml.
 test-probe = { path = "../test-probe", artifact = "bin" }
+# The same probe built for x86, so the suite can verify injection across bitness.
+probe-x86 = { path = "../probe-x86" }
 
 [lints]
 workspace = true
