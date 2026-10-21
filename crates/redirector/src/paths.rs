@@ -27,6 +27,9 @@ pub struct PathConfig {
     pub documents_w: Vec<u16>,
 }
 
+/// Environment variable holding a `tracing` filter directive for `redirector.log`.
+pub const LOG_FILTER_VAR: &str = "PPM_LOG";
+
 static PATHS: LazyLock<PathConfig> = LazyLock::new(build_paths);
 static LOGGER_GUARD: LazyLock<WorkerGuard> = LazyLock::new(init_worker_guard);
 
@@ -91,8 +94,11 @@ fn init_worker_guard() -> WorkerGuard {
     let file_appender = tracing_appender::rolling::never(&cfg.logs_dir, "redirector.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
+    // Why: The engine runs inside third-party processes, many of which set RUST_LOG for their
+    //      own purposes; reading that would let an application silently reconfigure engine
+    //      logging. PPM_LOG is ours alone, and the launcher's environment block passes it through.
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
+        EnvFilter::try_from_env(LOG_FILTER_VAR).unwrap_or_else(|_| EnvFilter::new("info,redirector=debug"));
 
     let _ = tracing_subscriber::fmt()
         .with_writer(non_blocking)

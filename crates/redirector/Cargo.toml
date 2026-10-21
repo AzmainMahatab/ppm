@@ -17,11 +17,10 @@ categories = [
     "development-tools"
 ]
 
-# Intention: Emit an rlib alongside the shipped cdylib.
-# Why: The rlib lets `ppm` declare a normal dependency, giving Cargo a hard ordering edge so the
-#      cdylib always exists before ppm's build script embeds it; nothing from the rlib is linked.
+# Why: Only the cdylib ships. `ppm` consumes it through an `artifact = "cdylib"` edge, which
+#      orders the build without linking anything from this crate.
 [lib]
-crate-type = ["rlib", "cdylib"]
+crate-type = ["cdylib"]
 
 [build-dependencies]
 cc.workspace = true
