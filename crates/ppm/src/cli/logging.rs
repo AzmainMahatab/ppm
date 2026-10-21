@@ -63,12 +63,17 @@ pub(crate) fn init(root: &Path, verbosity: ConsoleVerbosity) -> Result<Option<Wo
 
     let ppm_dir = PortableLayout::new(root).ppm_dir();
     let (file, guard) = if ppm_dir.is_dir() {
+        // Why create it first: the appender prunes old files by listing the directory as it
+        // opens, and reports a missing one on stderr itself rather than through an error.
+        let logs_dir = ppm_dir.join("logs");
+        std::fs::create_dir_all(&logs_dir)
+            .with_context(|| format!("Failed to create '{}'", logs_dir.display()))?;
         let appender = RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
             .filename_prefix("ppm")
             .filename_suffix("log")
             .max_log_files(RETAINED_LOG_FILES)
-            .build(ppm_dir.join("logs"))
+            .build(&logs_dir)
             .context("Failed to open the log file under .ppm/logs")?;
         let (writer, guard) = tracing_appender::non_blocking(appender);
         let layer = tracing_subscriber::fmt::layer()
