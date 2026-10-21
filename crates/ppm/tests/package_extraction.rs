@@ -5,16 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn find_fixture_path(name: &str) -> PathBuf {
-    let candidates = [
-        PathBuf::from("crates/ppm/tests/fixtures").join(name),
-        PathBuf::from("tests/fixtures").join(name),
-        PathBuf::from("../fixtures").join(name),
-        PathBuf::from("../../crates/ppm/tests/fixtures").join(name),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("Fixture '{}' not found on disk", name))
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name);
+    assert!(path.is_file(), "Fixture '{}' not found on disk", path.display());
+    path
 }
 
 #[test]
@@ -88,9 +84,47 @@ fn test_msi_embedded_pure_rust_extraction_with_real_fixture() {
         res
     );
 
-    assert!(dest_dir.is_dir());
-    let mut entries = fs::read_dir(&dest_dir).unwrap();
-    assert!(entries.next().is_some(), "Extracted MSI dir should contain files");
+    // The payload root is INSTALLDIR (`PFiles\NUnit 2.5.2` in the administrative image), and the
+    // Directory table's tree is preserved beneath it.
+    assert!(dest_dir.join("Logo.ico").is_file());
+    let core_1_1 = dest_dir.join(r"bin\net-1.1\lib\nunit.core.dll");
+    let core_2_0 = dest_dir.join(r"bin\net-2.0\lib\nunit.core.dll");
+    // Regression: entries were written flat, so these two same-named files overwrote each other.
+    assert_ne!(
+        fs::read(&core_1_1).expect("the .NET 1.1 build is extracted"),
+        fs::read(&core_2_0).expect("the .NET 2.0 build is extracted"),
+        "each build must keep its own copy"
+    );
+}
+
+/// Regression: external cabinets were found by scanning the package's directory for any `.cab`,
+/// so a stray cabinet in the download cache was extracted into the application.
+#[test]
+fn msi_extraction_reads_only_the_cabinets_its_media_table_names() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let package_dir = temp_dir.path().join("cache");
+    fs::create_dir_all(&package_dir).unwrap();
+    for fixture in ["msi_with_external_cab.msi", "msi_with_external_cab.cab"] {
+        fs::copy(find_fixture_path(fixture), package_dir.join(fixture)).unwrap();
+    }
+    fs::copy(
+        find_fixture_path("sample_vcredis.cab"),
+        package_dir.join("unrelated.cab"),
+    )
+    .unwrap();
+
+    let dest_dir = temp_dir.path().join("installed");
+    let config = PackageConfig {
+        kind: PackageKind::Msi,
+        extract_subpath: None,
+    };
+    extract_package(&package_dir.join("msi_with_external_cab.msi"), &config, &dest_dir).expect("extraction");
+
+    let installed: Vec<String> = fs::read_dir(&dest_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(installed, vec!["create_msi_with_external_cab.wxs".to_string()]);
 }
 
 #[test]

@@ -41,9 +41,9 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 
 ## Package manager
 
-- [ ] R18 MSI fidelity — extraction honours the `Directory` table (today every file lands in the payload root, and same-named files overwrite each other) and reads only the external CABs the `Media` table names (today it extracts every `.cab` in `.ppm/cache`).
+- [x] R18 MSI fidelity — extraction honours the `Directory` table (today every file lands in the payload root, and same-named files overwrite each other) and reads only the external CABs the `Media` table names (today it extracts every `.cab` in `.ppm/cache`). Verified 2026-10-21: two fixture regressions fail on the old extractor and pass now; real `ppm install antigravity-manager` (WebView2 CAB + MSI) installs and lists as current.
 - [x] R19 Download robustness — write to `.part` and rename on completion, verify `Content-Length`, bound mid-transfer stalls, and validate the remote version string before it becomes part of a cache file name. Verified 2026-10-21: downloader and version unit tests, live `ppm check` across all three release strategies.
-- [ ] R20 CAB failure context — when `expand.exe` fails and the pure-Rust fallback also fails, the error carries both causes instead of dropping the first.
+- [x] R20 CAB failure context — when `expand.exe` fails and the pure-Rust fallback also fails, the error carries both causes instead of dropping the first. Verified 2026-10-21 by diff review and the CAB fixture and live WebView2 install; `expand.exe` output is now captured instead of flooding the console.
 - [ ] R21 Decide `tar` — implement a tar(.gz) extractor or remove `PackageKind::Tar` from the model and schema.
 - [ ] R22 Replace `serde_yml` — upstream is archived and flagged by RustSec; move to a maintained YAML parser after checking it with `cargo deny`.
 - [ ] R23 `ppm uninstall <app>` and `ppm clean` — remove an installation and its launcher, and prune `.ppm/cache`.

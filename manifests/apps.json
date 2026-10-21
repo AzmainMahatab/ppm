@@ -25,7 +25,7 @@
       "description": "Central management console for Antigravity tools and local runtime dependencies",
       "homepage": "https://github.com/lbjlaq/Antigravity-Manager",
       "target_dir": "AntigravityManager",
-      "executable": "antigravity_tools.exe",
+      "executable": "antigravity-tools.exe",
       "supported_arch": [
         "x64"
       ],

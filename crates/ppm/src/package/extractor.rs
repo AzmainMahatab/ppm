@@ -1,7 +1,7 @@
 use crate::core::config::{PackageConfig, PackageKind};
 use crate::core::relpath::confined;
+use crate::package::msi_layout;
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -215,150 +215,222 @@ pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 pub fn extract_cab(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     fs::create_dir_all(dest_dir)?;
 
-    #[cfg(windows)]
-    {
-        let abs_archive = to_cmd_path(archive_path);
-        let abs_dest = to_cmd_path(dest_dir);
+    // Why `expand.exe` first: it is the platform's own decoder and covers every CAB compression
+    // method, including Quantum, which the pure-Rust reader does not.
+    let expand_failure = match expand_with_platform_tool(archive_path, dest_dir) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
 
-        if let Ok(status) = Command::new("expand.exe")
-            .arg(&abs_archive)
-            .arg("-F:*")
-            .arg(&abs_dest)
-            .status()
-            && status.success()
-        {
-            return Ok(());
-        }
-    }
-
-    if let Ok(file) = File::open(archive_path)
-        && let Ok(mut cabinet) = cab::Cabinet::new(file)
-    {
-        let file_names: Vec<String> = cabinet
-            .folder_entries()
-            .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
-            .collect();
-
-        for name in file_names {
-            let Some(mut reader) = cabinet.read_file(&name).ok() else {
-                bail!("CAB entry '{name}' could not be opened for reading");
-            };
-            let out_path = dest_dir.join(
-                confined(&name)
-                    .with_context(|| format!("Unsafe CAB entry name in '{}'", archive_path.display()))?,
-            );
-            if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
-            }
-            let mut out_file = File::create(&out_path)
-                .with_context(|| format!("Failed to create '{}'", out_path.display()))?;
-            std::io::copy(&mut reader, &mut out_file)
-                .with_context(|| format!("Failed to extract CAB entry '{name}'"))?;
-        }
-        return Ok(());
-    }
-
-    bail!("Failed to extract CAB package '{}'", archive_path.display())
+    let file =
+        File::open(archive_path).with_context(|| format!("Failed to open '{}'", archive_path.display()))?;
+    let cabinet = cab::Cabinet::new(file).with_context(|| {
+        format!(
+            "Failed to extract CAB package '{}': expand.exe failed ({expand_failure:#}), and the archive is not readable as a cabinet",
+            archive_path.display()
+        )
+    })?;
+    write_cabinet_entries(cabinet, dest_dir, confined).with_context(|| {
+        format!(
+            "Failed to extract CAB package '{}' (expand.exe had already failed: {expand_failure:#})",
+            archive_path.display()
+        )
+    })
 }
 
-pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
-    // 1. Pure-Rust extraction for standard WiX/MSI relational packages
-    if let Ok(file) = File::open(msi_path)
-        && let Ok(mut package) = msi::Package::open(file)
-    {
-        let mut file_map: HashMap<String, String> = HashMap::new();
-        if let Ok(file_rows) = package.select_rows(msi::Select::table("File")) {
-            for row in file_rows {
-                let file_key = row[0].as_str().unwrap_or("").to_string();
-                let raw_name = row[2].as_str().unwrap_or("");
-                let clean_name = if let Some((_, long_name)) = raw_name.split_once('|') {
-                    long_name
-                } else {
-                    raw_name
-                };
-                if !file_key.is_empty() && !clean_name.is_empty() {
-                    file_map.insert(file_key, clean_name.to_string());
-                }
-            }
+// Why: expand.exe prints one line per file - hundreds for a browser runtime - so its output is
+//      captured rather than streamed, and only its last lines are kept as the failure's detail.
+//      Ten lines hold its summary and error message; raise it if a diagnosis ever needs more.
+const EXPAND_FAILURE_TAIL_LINES: usize = 10;
+
+fn expand_with_platform_tool(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let output = Command::new("expand.exe")
+        .arg(to_cmd_path(archive_path))
+        .arg("-F:*")
+        .arg(to_cmd_path(dest_dir))
+        .output()
+        .context("expand.exe could not be started")?;
+    if !output.status.success() {
+        let transcript = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<&str> = transcript
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let tail = lines[lines.len().saturating_sub(EXPAND_FAILURE_TAIL_LINES)..].join(" / ");
+        bail!("expand.exe exited with status {:?}: {tail}", output.status.code());
+    }
+    Ok(())
+}
+
+/// Writes every entry of `cabinet` beneath `dest_dir`, at the relative path `path_of` assigns
+/// to the entry's name.
+fn write_cabinet_entries<R: Read + Seek>(
+    mut cabinet: cab::Cabinet<R>,
+    dest_dir: &Path,
+    path_of: impl Fn(&str) -> Result<PathBuf>,
+) -> Result<()> {
+    let names: Vec<String> = cabinet
+        .folder_entries()
+        .flat_map(|folder| folder.file_entries().map(|entry| entry.name().to_string()))
+        .collect();
+
+    for name in names {
+        let out_path = dest_dir.join(path_of(&name)?);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
         }
+        let mut reader = cabinet
+            .read_file(&name)
+            .with_context(|| format!("CAB entry '{name}' could not be opened for reading"))?;
+        let mut out_file =
+            File::create(&out_path).with_context(|| format!("Failed to create '{}'", out_path.display()))?;
+        std::io::copy(&mut reader, &mut out_file)
+            .with_context(|| format!("Failed to extract CAB entry '{name}'"))?;
+    }
+    Ok(())
+}
 
-        let stream_names: Vec<String> = package.streams().map(|s| s.to_string()).collect();
-        let mut extracted_any = false;
+/// The tables of an MSI package that decide where its files land.
+struct MsiTables {
+    directories: Vec<msi_layout::DirectoryRow>,
+    components: Vec<msi_layout::ComponentRow>,
+    files: Vec<msi_layout::FileRow>,
+    media: Vec<msi_layout::MediaRow>,
+}
 
-        for stream_name in &stream_names {
-            let mut stream_reader = match package.read_stream(stream_name) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+fn string_column(row: &msi::Row, index: usize) -> Option<String> {
+    row[index]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
 
-            let mut stream_bytes = Vec::new();
-            if stream_reader.read_to_end(&mut stream_bytes).is_err() {
-                continue;
-            }
+fn required_column(row: &msi::Row, index: usize, table: &str) -> Result<String> {
+    string_column(row, index).with_context(|| format!("MSI {table} row has an empty required column {index}"))
+}
 
-            if stream_bytes.starts_with(b"MSCF")
-                && let Ok(mut cabinet) = cab::Cabinet::new(Cursor::new(stream_bytes))
-            {
-                let cab_entries: Vec<String> = cabinet
-                    .folder_entries()
-                    .flat_map(|f| f.file_entries().map(|e| e.name().to_string()))
-                    .collect();
+fn select<'a>(package: &'a mut msi::Package<File>, table: &str, columns: &[&str]) -> Result<msi::Rows<'a>> {
+    package
+        .select_rows(msi::Select::table(table).columns(columns))
+        .with_context(|| format!("Failed to read the MSI {table} table"))
+}
 
-                for cab_file_key in cab_entries {
-                    if let Ok(mut reader) = cabinet.read_file(&cab_file_key) {
-                        let target_name = file_map
-                            .get(&cab_file_key)
-                            .cloned()
-                            .unwrap_or_else(|| cab_file_key.clone());
-
-                        let out_file_path =
-                            dest_dir.join(confined(&target_name).with_context(|| {
-                                format!("Unsafe MSI file name in '{}'", msi_path.display())
-                            })?);
-                        if let Some(parent) = out_file_path.parent() {
-                            fs::create_dir_all(parent).with_context(|| {
-                                format!("Failed to create directory '{}'", parent.display())
-                            })?;
-                        }
-
-                        let mut out_file = File::create(&out_file_path)
-                            .with_context(|| format!("Failed to create '{}'", out_file_path.display()))?;
-                        std::io::copy(&mut reader, &mut out_file).with_context(|| {
-                            format!("Failed to extract MSI stream entry '{cab_file_key}'")
-                        })?;
-                        extracted_any = true;
-                    }
-                }
-            }
-        }
-
-        // Check external CAB files if referenced
-        if !extracted_any
-            && let Some(parent_dir) = msi_path.parent()
-            && let Ok(entries) = fs::read_dir(parent_dir)
-        {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file()
-                    && path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.eq_ignore_ascii_case("cab"))
-                        .unwrap_or(false)
-                    && extract_cab(&path, dest_dir).is_ok()
-                {
-                    extracted_any = true;
-                }
-            }
-        }
-
-        if extracted_any {
-            return Ok(());
-        }
+fn read_msi_tables(package: &mut msi::Package<File>) -> Result<MsiTables> {
+    if !package.has_table("File") {
+        return Ok(MsiTables {
+            directories: Vec::new(),
+            components: Vec::new(),
+            files: Vec::new(),
+            media: Vec::new(),
+        });
     }
 
-    // 2. Fallback for custom-action wrapped MSIs (e.g. Microsoft Edge Enterprise)
+    let directories = select(
+        package,
+        "Directory",
+        &["Directory", "Directory_Parent", "DefaultDir"],
+    )?
+    .map(|row| {
+        Ok(msi_layout::DirectoryRow {
+            id: required_column(&row, 0, "Directory")?,
+            parent: string_column(&row, 1),
+            default_dir: required_column(&row, 2, "Directory")?,
+        })
+    })
+    .collect::<Result<_>>()?;
+    let components = select(package, "Component", &["Component", "Directory_"])?
+        .map(|row| {
+            Ok(msi_layout::ComponentRow {
+                id: required_column(&row, 0, "Component")?,
+                directory: required_column(&row, 1, "Component")?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let files = select(package, "File", &["File", "Component_", "FileName"])?
+        .map(|row| {
+            Ok(msi_layout::FileRow {
+                key: required_column(&row, 0, "File")?,
+                component: required_column(&row, 1, "File")?,
+                file_name: required_column(&row, 2, "File")?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let media = select(package, "Media", &["DiskId", "Cabinet"])?
+        .map(|row| {
+            Ok(msi_layout::MediaRow {
+                disk_id: row[0].as_int().context("MSI Media row has no DiskId")?,
+                cabinet: string_column(&row, 1),
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    Ok(MsiTables {
+        directories,
+        components,
+        files,
+        media,
+    })
+}
+
+/// Extracts the files an MSI package installs, laid out as an administrative install would.
+///
+/// # Why the table-driven path comes first, and when `msiexec /a` takes over
+/// Reading the package directly needs no elevation, touches no Windows Installer state, and is
+/// deterministic. A package that installs no files of its own - an installer wrapping another
+/// installer in a custom action, like Microsoft Edge Enterprise - has nothing for that path to
+/// extract, and only then does the administrative install run.
+pub fn extract_msi(msi_path: &Path, dest_dir: &Path) -> Result<()> {
+    let file = File::open(msi_path).with_context(|| format!("Failed to open '{}'", msi_path.display()))?;
+    let mut package = msi::Package::open(file)
+        .with_context(|| format!("'{}' is not a readable MSI package", msi_path.display()))?;
+    let tables = read_msi_tables(&mut package)?;
+
+    if tables.files.is_empty() {
+        return extract_msi_with_msiexec(msi_path, dest_dir);
+    }
+
+    let paths = msi_layout::file_paths(&tables.directories, &tables.components, &tables.files)?;
+    let path_of = |key: &str| {
+        paths
+            .get(key)
+            .cloned()
+            .with_context(|| format!("Cabinet entry '{key}' has no row in the MSI File table"))
+    };
+
+    for source in msi_layout::cabinets(&tables.media)? {
+        match source {
+            msi_layout::CabinetSource::Embedded(stream) => {
+                let mut bytes = Vec::new();
+                package
+                    .read_stream(&stream)
+                    .and_then(|mut reader| reader.read_to_end(&mut bytes))
+                    .with_context(|| format!("Failed to read embedded cabinet '{stream}'"))?;
+                let cabinet = cab::Cabinet::new(Cursor::new(bytes))
+                    .with_context(|| format!("Embedded cabinet '{stream}' is not a valid CAB"))?;
+                write_cabinet_entries(cabinet, dest_dir, path_of)?;
+            }
+            msi_layout::CabinetSource::External(name) => {
+                let cab_path = msi_path
+                    .parent()
+                    .with_context(|| format!("'{}' has no parent directory", msi_path.display()))?
+                    .join(&name);
+                let cab_file = File::open(&cab_path)
+                    .with_context(|| format!("External cabinet '{}' is missing", cab_path.display()))?;
+                let cabinet = cab::Cabinet::new(cab_file)
+                    .with_context(|| format!("'{}' is not a valid CAB", cab_path.display()))?;
+                write_cabinet_entries(cabinet, dest_dir, path_of)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extract_msi_with_msiexec(msi_path: &Path, dest_dir: &Path) -> Result<()> {
     let abs_msi = to_cmd_path(msi_path);
     let abs_dest = to_cmd_path(dest_dir);
     fs::create_dir_all(dest_dir)?;
