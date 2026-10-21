@@ -955,95 +955,53 @@ unsafe extern "system" fn hook_reg_enum_value_a(
     lpcb_data: *mut u32,
 ) -> i32 {
     let real_fn: FnRegEnumValueA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_VALUE_A)) };
-    guard_detour!(
-        &IN_REG_HOOK,
+    let host_enum = || unsafe {
+        real_fn(
+            hkey,
+            dw_index,
+            lp_value_name,
+            lpcch_value_name,
+            lp_reserved,
+            lp_type,
+            lp_data,
+            lpcb_data,
+        )
+    };
+    let host_read = |name: &str| {
+        let Some(trampoline) = try_load_trampoline(&REAL_REG_QUERY_VALUE_EX_A) else {
+            tracing::error!(
+                "RegEnumValueA: RegQueryValueExA is not hooked, so the host value '{name}' cannot be read"
+            );
+            return ERROR_FILE_NOT_FOUND as i32;
+        };
+        let query: FnRegQueryValueExA = unsafe { std::mem::transmute(trampoline) };
+        let name_ansi = to_ansi(name);
+        // SAFETY: `hkey` is the caller's live host handle and `name_ansi` is a NUL-terminated
+        // ANSI name; the remaining pointers are the caller's own.
         unsafe {
-            real_fn(
+            query(
                 hkey,
-                dw_index,
-                lp_value_name,
-                lpcch_value_name,
-                lp_reserved,
+                name_ansi.as_ptr(),
+                std::ptr::null_mut(),
                 lp_type,
                 lp_data,
                 lpcb_data,
             )
-        },
-        {
-            let listing = match unsafe { listing_for(hkey) } {
-                Ok(listing) => listing,
-                Err(UNTRACKED_FORWARD) => {
-                    return unsafe {
-                        real_fn(
-                            hkey,
-                            dw_index,
-                            lp_value_name,
-                            lpcch_value_name,
-                            lp_reserved,
-                            lp_type,
-                            lp_data,
-                            lpcb_data,
-                        )
-                    };
-                }
-                Err(status) => return status,
-            };
-
-            let Some(entry) = listing.view.values.get(dw_index as usize) else {
-                return ERROR_NO_MORE_ITEMS as i32;
-            };
-
-            let name_status = unsafe { serve_name(&entry.name, lp_value_name, lpcch_value_name) };
-            if name_status != ERROR_SUCCESS as i32 {
-                return name_status;
-            }
-
-            match entry.origin {
-                ValueOrigin::Host => {
-                    let Some(trampoline) = try_load_trampoline(&REAL_REG_QUERY_VALUE_EX_A) else {
-                        tracing::error!(
-                            "RegEnumValueA: RegQueryValueExA is not hooked, so the host value '{}' cannot be read",
-                            entry.name
-                        );
-                        return ERROR_FILE_NOT_FOUND as i32;
-                    };
-                    let query: FnRegQueryValueExA = unsafe { std::mem::transmute(trampoline) };
-                    let name_ansi = to_ansi(&entry.name);
-                    // SAFETY: `hkey` is the caller's live host handle and `name_ansi` is a
-                    // NUL-terminated ANSI name; the remaining pointers are the caller's own.
-                    unsafe {
-                        query(
-                            hkey,
-                            name_ansi.as_ptr(),
-                            std::ptr::null_mut(),
-                            lp_type,
-                            lp_data,
-                            lpcb_data,
-                        )
-                    }
-                }
-                ValueOrigin::Overlay => {
-                    match get_registry_store().resolve_value(&listing.path, &entry.name) {
-                        ValueResolution::Virtual { val_type, data } => {
-                            // SAFETY: caller-owned out-parameters, bounded inside `serve_value`.
-                            unsafe {
-                                serve_value(
-                                    val_type,
-                                    &ansi_payload(val_type, &data),
-                                    lp_type,
-                                    lp_data,
-                                    lpcb_data,
-                                )
-                            }
-                        }
-                        // The listing named this value a moment ago, so its disappearance means the
-                        // overlay changed underneath; report it the way a deleted value reads.
-                        _ => ERROR_FILE_NOT_FOUND as i32,
-                    }
-                }
-            }
         }
-    )
+    };
+    guard_detour!(&IN_REG_HOOK, host_enum(), {
+        let out = EnumValueOut {
+            name: lp_value_name,
+            name_len: lpcch_value_name,
+            value: ValueOut {
+                lp_type,
+                lp_data,
+                lpcb_data,
+            },
+        };
+        // SAFETY: `out` holds the caller-owned out-parameters of this RegEnumValueA call.
+        unsafe { enum_value_virtually(hkey, dw_index, out, ansi_payload, host_enum, host_read) }
+    })
 }
 
 /// Serves `RegQueryInfoKeyA`. The counts come from the merged listing; the longest names are
@@ -1851,89 +1809,111 @@ unsafe extern "system" fn hook_reg_enum_value_w(
     lpcb_data: *mut u32,
 ) -> i32 {
     let real_fn: FnRegEnumValueW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_VALUE_W)) };
-    guard_detour!(
-        &IN_REG_HOOK,
+    let host_enum = || unsafe {
+        real_fn(
+            hkey,
+            dw_index,
+            lp_value_name,
+            lpcch_value_name,
+            lp_reserved,
+            lp_type,
+            lp_data,
+            lpcb_data,
+        )
+    };
+    let host_read = |name: &str| {
+        let Some(trampoline) = try_load_trampoline(&REAL_REG_QUERY_VALUE_EX_W) else {
+            tracing::error!(
+                "RegEnumValueW: RegQueryValueExW is not hooked, so the host value '{name}' cannot be read"
+            );
+            return ERROR_FILE_NOT_FOUND as i32;
+        };
+        let query: FnRegQueryValueExW = unsafe { std::mem::transmute(trampoline) };
+        let name_wide = to_wide(name);
+        // SAFETY: `hkey` is the caller's live host handle and `name_wide` is a NUL-terminated
+        // name; the remaining pointers are the caller's own.
         unsafe {
-            real_fn(
+            query(
                 hkey,
-                dw_index,
-                lp_value_name,
-                lpcch_value_name,
-                lp_reserved,
+                name_wide.as_ptr(),
+                std::ptr::null_mut(),
                 lp_type,
                 lp_data,
                 lpcb_data,
             )
-        },
-        {
-            let listing = match unsafe { listing_for(hkey) } {
-                Ok(listing) => listing,
-                Err(UNTRACKED_FORWARD) => {
-                    return unsafe {
-                        real_fn(
-                            hkey,
-                            dw_index,
-                            lp_value_name,
-                            lpcch_value_name,
-                            lp_reserved,
-                            lp_type,
-                            lp_data,
-                            lpcb_data,
-                        )
-                    };
-                }
-                Err(status) => return status,
-            };
-
-            let Some(entry) = listing.view.values.get(dw_index as usize) else {
-                return ERROR_NO_MORE_ITEMS as i32;
-            };
-
-            let name_status = unsafe { serve_name(&entry.name, lp_value_name, lpcch_value_name) };
-            if name_status != ERROR_SUCCESS as i32 {
-                return name_status;
-            }
-
-            // The name is the caller's index into the listing; the data comes from whichever
-            // side of the boundary actually holds it.
-            match entry.origin {
-                ValueOrigin::Host => {
-                    let Some(trampoline) = try_load_trampoline(&REAL_REG_QUERY_VALUE_EX_W) else {
-                        tracing::error!(
-                            "RegEnumValueW: RegQueryValueExW is not hooked, so the host value '{}' cannot be read",
-                            entry.name
-                        );
-                        return ERROR_FILE_NOT_FOUND as i32;
-                    };
-                    let query: FnRegQueryValueExW = unsafe { std::mem::transmute(trampoline) };
-                    let name_wide = to_wide(&entry.name);
-                    // SAFETY: `hkey` is the caller's live host handle and `name_wide` is a
-                    // NUL-terminated name; the remaining pointers are the caller's own.
-                    unsafe {
-                        query(
-                            hkey,
-                            name_wide.as_ptr(),
-                            std::ptr::null_mut(),
-                            lp_type,
-                            lp_data,
-                            lpcb_data,
-                        )
-                    }
-                }
-                ValueOrigin::Overlay => {
-                    match get_registry_store().resolve_value(&listing.path, &entry.name) {
-                        ValueResolution::Virtual { val_type, data } => {
-                            // SAFETY: caller-owned out-parameters, bounded inside `serve_value`.
-                            unsafe { serve_value(val_type, &data, lp_type, lp_data, lpcb_data) }
-                        }
-                        // The listing named this value a moment ago, so its disappearance means
-                        // the overlay changed underneath; report it the way a deleted value reads.
-                        _ => ERROR_FILE_NOT_FOUND as i32,
-                    }
-                }
-            }
         }
-    )
+    };
+    guard_detour!(&IN_REG_HOOK, host_enum(), {
+        let out = EnumValueOut {
+            name: lp_value_name,
+            name_len: lpcch_value_name,
+            value: ValueOut {
+                lp_type,
+                lp_data,
+                lpcb_data,
+            },
+        };
+        // SAFETY: `out` holds the caller-owned out-parameters of this RegEnumValueW call.
+        unsafe { enum_value_virtually(hkey, dw_index, out, stored_payload, host_enum, host_read) }
+    })
+}
+
+/// The caller-owned out-parameters of a `RegEnumValue*` call, in the caller's name spelling.
+struct EnumValueOut<C> {
+    name: *mut C,
+    name_len: *mut u32,
+    value: ValueOut,
+}
+
+/// Serves one index of a value enumeration from the merged listing: the name in the caller's
+/// spelling, the data from whichever side of the boundary holds it. `host_enum` is the caller's
+/// own call for an untracked handle; `host_read` reads a host-held value by name into the
+/// caller's data cells.
+///
+/// # Safety
+/// Every pointer in `out` must be a caller-owned out-parameter of the intercepted enumerator.
+unsafe fn enum_value_virtually<C: NameUnit>(
+    hkey: HKEY,
+    dw_index: u32,
+    out: EnumValueOut<C>,
+    payload: PayloadEncoding,
+    host_enum: impl Fn() -> i32,
+    host_read: impl Fn(&str) -> i32,
+) -> i32 {
+    let listing = match unsafe { listing_for(hkey) } {
+        Ok(listing) => listing,
+        Err(UNTRACKED_FORWARD) => return host_enum(),
+        Err(status) => return status,
+    };
+
+    let Some(entry) = listing.view.values.get(dw_index as usize) else {
+        return ERROR_NO_MORE_ITEMS as i32;
+    };
+
+    let name_status = unsafe { serve_name(&entry.name, out.name, out.name_len) };
+    if name_status != ERROR_SUCCESS as i32 {
+        return name_status;
+    }
+
+    // The name is the caller's index into the listing; the data comes from whichever side of the
+    // boundary actually holds it.
+    match entry.origin {
+        ValueOrigin::Host => host_read(&entry.name),
+        ValueOrigin::Overlay => match get_registry_store().resolve_value(&listing.path, &entry.name) {
+            ValueResolution::Virtual { val_type, data } => {
+                let ValueOut {
+                    lp_type,
+                    lp_data,
+                    lpcb_data,
+                } = out.value;
+                // SAFETY: caller-owned out-parameters, bounded inside `serve_value`.
+                unsafe { serve_value(val_type, &payload(val_type, &data), lp_type, lp_data, lpcb_data) }
+            }
+            // The listing named this value a moment ago, so its disappearance means the overlay
+            // changed underneath; report it the way a deleted value reads.
+            _ => ERROR_FILE_NOT_FOUND as i32,
+        },
+    }
 }
 
 /// Reports the key's shape from the same merged listing the enumerators walk.
