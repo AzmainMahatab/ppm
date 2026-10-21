@@ -1,0 +1,70 @@
+# Roadmap
+
+Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done means>`;
+`[ ]` open, `[~]` in progress, `[x]` done, `[-]` dropped (with the reason).
+
+## Where the project stands
+
+- Three crates: `ppm` (CLI + package manager, ~4.1k lines incl. unit tests), `redirector`
+  (injected Detours engine, ~6.5k lines), `test-probe` (live boundary probe, ~1.1k lines). Five hooked isolation boundaries:
+  registry CoW, process re-injection, credential vault, shell paths, process identity.
+- Gates are green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
+  and `cargo test --workspace` (130 tests, including the live e2e injection probe).
+- 44 commits of isolation-boundary work (plus this review) are not on `origin/main`, and local
+  `main` carries 20 of them unpushed. None of it has shipped.
+
+## Review fixes (this branch)
+
+- [x] R1 Confine manifest and archive paths — `target_dir`, `executable`, `extract_subpath`, `post_install` rules and CAB/MSI entry names can no longer leave their base directory; verified by new unit tests (`core::relpath`, `sanitizer`, `config`) and the full suite.
+- [x] R2 Apply `post_install.create_dirs` — the field was accepted by the schema and silently ignored; verified by the extended sanitizer test.
+- [x] R3 Deterministic app ordering — `apps` is a `BTreeMap`, so `install all`, `list`, `check`, launchers and `global_env` collection are reproducible; schema drift test still passes.
+- [x] R4 `ppm validate` checks references — undefined dependencies fail at load, cycles fail in `validate`; verified by the config test.
+- [x] R5 Electron manifest URLs resolve with `Url::join` — verified by `electron_file_references_resolve_against_the_manifest_url`.
+- [x] R6 Engine log filter reads `PPM_LOG`, not the host application's `RUST_LOG` — reviewed diff; suite green.
+- [x] R7 Drop the unused redirector rlib and stale comment; build script de-duplicated with `rerun-if-changed` — debug and release builds plus full suite green.
+- [x] R8 CI installs the toolchain `rust-toolchain.toml` pins — local `rustup toolchain install` verified; the GitHub runs themselves are unverified (see R10).
+- [x] R9 Docs corrected — edition badge, nonexistent `init --force` and `ppm.log`, duplicate boundary numbering, unnumbered SPEC sections, broken ADR links, ARCHITECTURE source tree, build prerequisites; reviewed by diff.
+
+## Ship what exists
+
+- [ ] R10 Land the work on `main` — this branch and `fix/isolation-boundary-escapes` merged, pushed, and CI green on GitHub with the new toolchain steps.
+- [ ] R11 Prove the release workflow — a draft `workflow_dispatch` release produces x64 and arm64 zips, and the arm64 `ppm.exe` runs `init` and `run` on an arm64 host.
+- [ ] R12 Resolve the pending Dependabot GitHub Actions bump — merged or closed.
+
+## Isolation correctness
+
+- [ ] R13 Cross-architecture injection — redirector is built per architecture (x64, arm64, x86) and the runner and CreateProcess hooks choose the DLL from the target image's PE machine. Done when an x64 app on an arm64 host launches injected (today's arm64→x64 fallback injects a mismatched DLL and fails) and a 64-bit app's 32-bit child is virtualized instead of refused.
+- [ ] R14 Non-ASCII deployment roots — `DetourCreateProcessWithDllExW` takes an ANSI DLL path but receives UTF-8 bytes; done when the e2e probe passes from a root path containing non-ASCII characters.
+- [ ] R15 ANSI and legacy registry entry points — `Reg*A`, `RegOpenKeyW`, `RegSetValueW`, `RegQueryValueW` and friends are covered (hooked or routed through the wide path) with probe assertions; ARCHITECTURE's "known gap" paragraph removed.
+- [ ] R16 ANSI credential entry points — `CredReadA`, `CredWriteA`, `CredDeleteA`, `CredEnumerateA` are clean-roomed like their wide counterparts, with probe coverage.
+- [ ] R17 Engine work under the loader lock — logger start-up, file IO and hook installation run inside `DLL_PROCESS_ATTACH`; done when the risk is assessed in an ADR and either deferred safely or justified.
+
+## Package manager
+
+- [ ] R18 MSI fidelity — extraction honours the `Directory` table (today every file lands in the payload root, and same-named files overwrite each other) and reads only the external CABs the `Media` table names (today it extracts every `.cab` in `.ppm/cache`).
+- [ ] R19 Download robustness — write to `.part` and rename on completion, verify `Content-Length`, bound mid-transfer stalls, and validate the remote version string before it becomes part of a cache file name.
+- [ ] R20 CAB failure context — when `expand.exe` fails and the pure-Rust fallback also fails, the error carries both causes instead of dropping the first.
+- [ ] R21 Decide `tar` — implement a tar(.gz) extractor or remove `PackageKind::Tar` from the model and schema.
+- [ ] R22 Replace `serde_yml` — upstream is archived and flagged by RustSec; move to a maintained YAML parser after checking it with `cargo deny`.
+- [ ] R23 `ppm uninstall <app>` and `ppm clean` — remove an installation and its launcher, and prune `.ppm/cache`.
+- [ ] R24 Decide whether `update` stays — it runs the same cycle as `install` without `--force`; keep one command or give `update` distinct behaviour (only touch installed apps).
+- [ ] R25 Launchers that behave like the app — `.bat` launchers use `start`, so the exit code is lost and console apps detach; launchers for uninstalled apps are never removed. Done when exit codes propagate and stale launchers are cleaned.
+- [ ] R26 Typed manifest paths — one `RelativePath` type parsed at deserialization replaces the load-time check plus use-site confinement, with the schema regenerated.
+- [ ] R27 Strict `version_check` variants — restructure like `package` so unknown fields inside a variant are rejected at load, closing the documented serde gap.
+
+## Observability
+
+- [ ] R28 Leveled logging in the CLI — progress and diagnostics go through `tracing` with a console sink and a rotating `.ppm/logs/ppm.log`; tables and other data output stay on stdout.
+- [ ] R29 Bounded engine log — `redirector.log` is never rotated, defaults to `redirector=debug`, and is shared by every injected process; done with rotation or retention and an `info` default.
+
+## Verification and supply chain
+
+- [ ] R30 End-to-end install test — a local HTTPS test server (e.g. WireMock) serves a release, and the test drives check → download → extract → swap-in → launcher generation.
+- [ ] R31 Supply-chain gate — `cargo deny` (advisories, licences, duplicate versions) runs in CI.
+- [ ] R32 arm64 CI — tests run on a Windows arm64 runner, not only the cross-compiled release build.
+
+## Side quests
+
+## Library candidates
+
+- [ ] L1 Multi-writer JSONL op journal — the registry journal (append-only records, atomic appends across processes, shrink-detecting readers, snapshot compaction) generalizes to any small state shared by cooperating processes without a lock server; candidate only if a second consumer appears.

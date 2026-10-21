@@ -118,7 +118,14 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 
 ### Building & Testing from Source
 
+Prerequisites: Windows with the MSVC C++ build tools (Detours is compiled from source) and
+`rustup`. `rust-toolchain.toml` pins the dated nightly the build needs for Cargo's `bindeps`
+feature; `rustup` installs it on first use.
+
 ```bash
+# Fetch the vendored Microsoft Detours sources
+git submodule update --init
+
 # Compile entire workspace
 cargo build --release
 
