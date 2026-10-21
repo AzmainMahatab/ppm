@@ -27,6 +27,7 @@ crate-type = ["cdylib"]
 injection = { path = "../injection" }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_System_SystemServices",
     "Win32_System_Memory",
     "Win32_System_Threading",

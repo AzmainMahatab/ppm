@@ -29,6 +29,67 @@ pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Decodes a NUL-terminated string an `...A` API received, in the system ANSI code page.
+///
+/// # Safety
+/// `ptr` must be null (decoding to the empty string) or point to a NUL-terminated byte string.
+pub(crate) fn ansi_to_string(ptr: *const u8) -> String {
+    use windows_sys::Win32::Globalization::{CP_ACP, MultiByteToWideChar};
+    if ptr.is_null() {
+        return String::new();
+    }
+    // SAFETY: `ptr` is NUL-terminated per the contract; -1 makes both calls stop at the
+    // terminator, and the second writes into a buffer of the size the first reported.
+    unsafe {
+        let needed = MultiByteToWideChar(CP_ACP, 0, ptr, -1, std::ptr::null_mut(), 0);
+        if needed <= 0 {
+            return String::new();
+        }
+        let mut wide = vec![0u16; needed as usize];
+        let written = MultiByteToWideChar(CP_ACP, 0, ptr, -1, wide.as_mut_ptr(), needed);
+        wide.truncate(written.max(1) as usize - 1);
+        String::from_utf16_lossy(&wide)
+    }
+}
+
+/// Encodes `s` as the NUL-terminated ANSI string an `...A` API returns. A character the code
+/// page lacks becomes its default character - the same conversion the system's own `...A`
+/// functions apply to their wide results.
+pub(crate) fn to_ansi(s: &str) -> Vec<u8> {
+    use windows_sys::Win32::Globalization::{CP_ACP, WideCharToMultiByte};
+    let wide = to_wide(s);
+    // SAFETY: `wide` is NUL-terminated; -1 includes the terminator in both calls, and the second
+    // writes into a buffer of the size the first reported.
+    unsafe {
+        let needed = WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            -1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+        if needed <= 0 {
+            return vec![0];
+        }
+        let mut ansi = vec![0u8; needed as usize];
+        let written = WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            -1,
+            ansi.as_mut_ptr(),
+            needed,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+        ansi.truncate(written.max(1) as usize);
+        ansi
+    }
+}
+
 /// Encodes a path as NUL-terminated UTF-16, losslessly through `OsStr` (Windows paths
 /// may contain unpaired surrogates that `str::encode_utf16` cannot represent).
 pub(crate) fn path_to_wide(path: &Path) -> Vec<u16> {
