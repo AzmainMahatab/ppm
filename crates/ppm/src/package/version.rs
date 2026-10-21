@@ -65,6 +65,30 @@ fn resolve_manifest_reference(manifest_url: &str, reference: &str) -> Result<Str
 
 /// Fetches the latest upstream version and resolved download URL for a specific CPU architecture.
 pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
+    let release = fetch_release(config, arch)?;
+    check_version_text(&release.version)?;
+    Ok(release)
+}
+
+/// Rejects a remote version string that is not plain version text.
+///
+/// # Why
+/// The version comes from a server response and becomes part of the cached archive's file name
+/// and of what `ppm check` prints. A value carrying a path separator, a drive colon or a control
+/// character would turn that file name into a different path; real version strings never need
+/// anything beyond the characters allowed here.
+///
+/// # Ex
+/// `1.2.3`, `2024.10.1-beta+7`, `1.0_rc1` -> accepted; `../x`, `1.0\evil`, `` -> rejected
+fn check_version_text(version: &str) -> Result<()> {
+    let is_version_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_');
+    if version.is_empty() || !version.chars().all(is_version_char) || version.chars().all(|c| c == '.') {
+        bail!("Remote release reported an unusable version string {version:?}");
+    }
+    Ok(())
+}
+
+fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
         VersionCheckConfig::ElectronManifest {
             url,
@@ -323,6 +347,25 @@ fn resolve_json_query<'a>(mut current: &'a Value, query: &str) -> Result<&'a Val
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_plain_version_text_is_accepted_from_a_remote() {
+        for accepted in ["1.2.3", "2024.10.1-beta+7", "1.0_rc1", "138.0.3351.83"] {
+            assert!(check_version_text(accepted).is_ok(), "{accepted}");
+        }
+        for rejected in [
+            "",
+            "..",
+            "../x",
+            r"1.0\evil",
+            "1.0/evil",
+            "C:1",
+            "1.0 beta",
+            "1\n2",
+        ] {
+            assert!(check_version_text(rejected).is_err(), "{rejected:?}");
+        }
+    }
 
     #[test]
     fn electron_file_references_resolve_against_the_manifest_url() {
