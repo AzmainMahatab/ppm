@@ -65,10 +65,10 @@ pub(crate) enum Commands {
         arch: ArchTarget,
     },
 
-    /// Install or refresh one or all configured applications (resolves dependencies).
+    /// Install one or all configured applications, dependencies first.
     ///
-    /// An application already installed at the latest version is left alone, so `install`
-    /// doubles as `update`; pass `--force` to reinstall it regardless.
+    /// An application already installed at the latest version is left alone; pass `--force` to
+    /// reinstall it regardless.
     Install {
         /// Application identifier to install, or 'all'
         app: String,
@@ -82,10 +82,15 @@ pub(crate) enum Commands {
         force: bool,
     },
 
-    /// Update outdated applications to the latest online release
+    /// Update installed applications to the latest online release (never installs new ones)
+    #[command(group(clap::ArgGroup::new("target").required(true).args(["app", "all"])))]
     Update {
-        /// Application identifier to update, or 'all'
-        app: String,
+        /// Installed application to update
+        app: Option<String>,
+
+        /// Update every installed application
+        #[arg(long)]
+        all: bool,
 
         /// Target CPU architecture (defaults to current host architecture)
         #[arg(short, long)]
@@ -135,7 +140,7 @@ pub(crate) fn execute(command: &Commands, root: &Path) -> anyhow::Result<i32> {
         Commands::Init => commands::init::run(root),
         Commands::Check { arch } => commands::check::run(root, *arch),
         Commands::Install { app, arch, force } => commands::install::run(root, app, *arch, *force),
-        Commands::Update { app, arch } => commands::update::run(root, app, *arch),
+        Commands::Update { app, all: _, arch } => commands::update::run(root, app.as_deref(), *arch),
         Commands::Link { app } => commands::link::run(root, app),
         Commands::List { arch } => commands::list::run(root, *arch),
         Commands::Schema => commands::schema::run(root),

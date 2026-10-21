@@ -101,8 +101,8 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 | :--- | :--- |
 | `ppm.exe init` | Idempotent: redeploys the engine DLL and regenerates the schema; never overwrites an existing `apps.json`. Scaffolds `.ppm/system/`, `.ppm/lib/`, `.ppm/cache/`, `.ppm/logs/`, `Apps/x64/`, `Apps/arm64/`, `Home/`. |
 | `ppm.exe check [--arch <x64\|arm64\|all>]` | Queries remote release endpoints for the latest versions. |
-| `ppm.exe install <app\|all> [--arch <x64\|arm64\|all>] [--force]` | Downloads and installs applications, resolving dependency DAGs. An application already at the latest release is left alone, so this doubles as `update`; `--force` reinstalls it regardless. |
-| `ppm.exe update <app\|all> [--arch <x64\|arm64\|all>]` | Upgrades installed applications to the latest upstream release — the same cycle `install` runs. |
+| `ppm.exe install <app\|all> [--arch <x64\|arm64\|all>] [--force]` | Downloads and installs applications, resolving dependency DAGs. An application already at the latest release is left alone; `--force` reinstalls it regardless. |
+| `ppm.exe update <app\|--all> [--arch <x64\|arm64\|all>]` | Upgrades already-installed applications to the latest upstream release - one named app, or every installed app with `--all`. Never installs anything new; a named app that is not installed is an error pointing at `install`. |
 | `ppm.exe run <app> [args...]` | Auto-detects host architecture and launches app with lowest-boundary virtualization. |
 | `ppm.exe list [--arch <x64\|arm64\|all>]` | Lists all configured apps and dynamic presence status across architectures. |
 | `ppm.exe uninstall <app> [--arch <x64\|arm64\|all>]` | Removes an installed application (all architectures by default), refusing while an installed application depends on it; removes its launcher once no copy remains. |

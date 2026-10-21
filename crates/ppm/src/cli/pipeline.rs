@@ -215,54 +215,141 @@ pub(crate) fn install_app(
     })
 }
 
-/// Runs one install/refresh cycle over the dependency-closed order for `app`.
+/// One application to process for one architecture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CycleStep {
+    pub(crate) arch: CpuArch,
+    pub(crate) app_id: String,
+}
+
+/// What `install` processes: `app` (or every application) and its dependencies, dependencies
+/// first, for each architecture.
+pub(crate) fn install_plan(
+    manifests: &AppManifests,
+    app: &str,
+    archs: &[CpuArch],
+) -> anyhow::Result<Vec<CycleStep>> {
+    let order = resolve_install_order(manifests, app)?;
+    Ok(archs
+        .iter()
+        .flat_map(|&arch| {
+            order.iter().map(move |app_id| CycleStep {
+                arch,
+                app_id: app_id.clone(),
+            })
+        })
+        .collect())
+}
+
+/// Which applications `update` refreshes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateTarget<'a> {
+    /// One named application.
+    App(&'a str),
+    /// Every installed application.
+    AllInstalled,
+}
+
+/// What `update` processes: installed applications only, in dependency order, for each
+/// architecture they are installed for.
+///
+/// # Why update never installs
+/// `install` brings an application (and its dependencies) onto the root; `update` only refreshes
+/// what is already there. A named application installed for none of the architectures is an
+/// error that points at `install`, rather than an install the user did not ask for.
+pub(crate) fn update_plan(
+    root: &Path,
+    manifests: &AppManifests,
+    target: UpdateTarget<'_>,
+    archs: &[CpuArch],
+) -> anyhow::Result<Vec<CycleStep>> {
+    if let UpdateTarget::App(app_id) = target
+        && !manifests.apps.contains_key(app_id)
+    {
+        anyhow::bail!("Application '{app_id}' is not defined in apps.json");
+    }
+
+    // Ordering every application, not just the targets, keeps dependencies ahead of their
+    // dependents when `--all` refreshes both.
+    let order = resolve_install_order(manifests, "all")?;
+    let plan: Vec<CycleStep> = archs
+        .iter()
+        .flat_map(|&arch| {
+            order
+                .iter()
+                .filter(move |app_id| match target {
+                    UpdateTarget::App(named) => app_id.as_str() == named,
+                    UpdateTarget::AllInstalled => true,
+                })
+                .filter(move |app_id| manifests.apps[app_id.as_str()].is_installed_for_arch(root, arch))
+                .map(move |app_id| CycleStep {
+                    arch,
+                    app_id: app_id.clone(),
+                })
+        })
+        .collect();
+
+    if let UpdateTarget::App(app_id) = target
+        && plan.is_empty()
+    {
+        let archs = archs
+            .iter()
+            .map(|arch| arch.as_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        anyhow::bail!("'{app_id}' is not installed for {archs}; use 'ppm install {app_id}' to install it");
+    }
+    Ok(plan)
+}
+
+/// Runs one install/refresh cycle over `plan`.
 ///
 /// # Why `install` and `update` share this
-/// They differed only in whether they compared versions first, and the copies had already
-/// drifted: the update loop swallowed a failed remote check and still reported success, so
-/// `ppm update all` exited 0 with nothing updated. One cycle attempts every application and
-/// then reports what failed.
+/// They differ in *what* they process (see [`install_plan`] and [`update_plan`]), not in how one
+/// application is refreshed. The copies of this loop had already drifted once: the update loop
+/// swallowed a failed remote check and still reported success, so `ppm update all` exited 0 with
+/// nothing updated. One cycle attempts every step and then reports what failed.
 pub(crate) fn run_install_cycle(
     root: &Path,
     manifests: &AppManifests,
-    app: &str,
-    target_archs: &[CpuArch],
+    plan: &[CycleStep],
     policy: ReinstallPolicy,
 ) -> anyhow::Result<()> {
-    let order = resolve_install_order(manifests, app)?;
     let mut failures: Vec<String> = Vec::new();
+    let mut current_arch = None;
 
-    for &arch in target_archs {
-        tracing::info!("Targeting architecture [{}]", arch.as_str());
+    for step in plan {
+        if current_arch != Some(step.arch) {
+            tracing::info!("Targeting architecture [{}]", step.arch.as_str());
+            current_arch = Some(step.arch);
+        }
+        let app_def = manifests
+            .apps
+            .get(&step.app_id)
+            .expect("invariant: plans only name applications the manifest defines");
+        let arch = step.arch;
 
-        for app_id in &order {
-            let app_def = manifests
-                .apps
-                .get(app_id)
-                .expect("invariant: resolve_install_order only yields ids the manifest defines");
-
-            match install_app(root, app_id, app_def, arch, policy) {
-                Ok(InstallOutcome::Installed { version }) => tracing::info!(
-                    "✓ Successfully installed {} [{}] (v{version})",
-                    app_def.name,
-                    arch.as_str()
-                ),
-                Ok(InstallOutcome::AlreadyCurrent { version }) => tracing::info!(
-                    "✓ {} [{}] is already up to date (v{version})",
-                    app_def.name,
-                    arch.as_str()
-                ),
-                Ok(InstallOutcome::Unsupported) => tracing::info!(
-                    "• Skipping '{}' (Not supported on {})",
-                    app_def.name,
-                    arch.as_str()
-                ),
-                Err(error) => {
-                    // Keep going so one unreachable endpoint does not strand every other
-                    // application, but remember it: the cycle must not report success.
-                    tracing::error!("✗ {} [{}]: {error:#}", app_def.name, arch.as_str());
-                    failures.push(format!("{} [{}]: {error:#}", app_def.name, arch.as_str()));
-                }
+        match install_app(root, &step.app_id, app_def, arch, policy) {
+            Ok(InstallOutcome::Installed { version }) => tracing::info!(
+                "✓ Successfully installed {} [{}] (v{version})",
+                app_def.name,
+                arch.as_str()
+            ),
+            Ok(InstallOutcome::AlreadyCurrent { version }) => tracing::info!(
+                "✓ {} [{}] is already up to date (v{version})",
+                app_def.name,
+                arch.as_str()
+            ),
+            Ok(InstallOutcome::Unsupported) => tracing::info!(
+                "• Skipping '{}' (Not supported on {})",
+                app_def.name,
+                arch.as_str()
+            ),
+            Err(error) => {
+                // Keep going so one unreachable endpoint does not strand every other
+                // application, but remember it: the cycle must not report success.
+                tracing::error!("✗ {} [{}]: {error:#}", app_def.name, arch.as_str());
+                failures.push(format!("{} [{}]: {error:#}", app_def.name, arch.as_str()));
             }
         }
     }
@@ -271,7 +358,7 @@ pub(crate) fn run_install_cycle(
 
     if !failures.is_empty() {
         anyhow::bail!(
-            "{} of the requested installations failed:\n  - {}",
+            "{} of the requested applications failed:\n  - {}",
             failures.len(),
             failures.join("\n  - ")
         );
@@ -428,5 +515,131 @@ mod tests {
         let order = resolve_install_order(&manifests, "all").unwrap();
         assert_eq!(order.len(), 3);
         assert!(order.iter().position(|id| *id == "lib") < order.iter().position(|id| *id == "app"));
+    }
+
+    /// Three applications with their own directories: `app` depends on `lib`; `solo` stands alone.
+    fn distinct_manifest() -> AppManifests {
+        let entry = |dir: &str, deps: Vec<&str>| {
+            json!({
+                "name": dir,
+                "target_dir": dir,
+                "executable": "main.exe",
+                "version_check": {"type": "github_release", "repo": "a/b"},
+                "package": {"type": "zip"},
+                "dependencies": deps
+            })
+        };
+        manifest(json!({ "apps": {
+            "app": entry("App", vec!["lib"]),
+            "lib": entry("Lib", vec![]),
+            "solo": entry("Solo", vec![]),
+        }}))
+    }
+
+    fn install_fixture(root: &Path, dir: &str, arch: CpuArch) {
+        let app_dir = root.join("Apps").join(arch.as_str()).join(dir);
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(app_dir.join("main.exe"), b"MZ").unwrap();
+    }
+
+    fn step(arch: CpuArch, app_id: &str) -> CycleStep {
+        CycleStep {
+            arch,
+            app_id: app_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn update_all_refreshes_installed_apps_in_dependency_order_and_installs_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        install_fixture(root.path(), "App", CpuArch::X64);
+        install_fixture(root.path(), "Lib", CpuArch::X64);
+        install_fixture(root.path(), "Solo", CpuArch::Arm64);
+
+        let plan = update_plan(
+            root.path(),
+            &distinct_manifest(),
+            UpdateTarget::AllInstalled,
+            &[CpuArch::X64, CpuArch::Arm64],
+        )
+        .unwrap();
+
+        // `solo` is not installed for x64 and `app`/`lib` are not installed for arm64: none of
+        // those is planned, and `lib` precedes its dependent.
+        assert_eq!(
+            plan,
+            vec![
+                step(CpuArch::X64, "lib"),
+                step(CpuArch::X64, "app"),
+                step(CpuArch::Arm64, "solo"),
+            ]
+        );
+    }
+
+    #[test]
+    fn update_of_a_named_app_touches_only_that_app() {
+        let root = tempfile::tempdir().unwrap();
+        install_fixture(root.path(), "App", CpuArch::X64);
+        install_fixture(root.path(), "Lib", CpuArch::X64);
+
+        let plan = update_plan(
+            root.path(),
+            &distinct_manifest(),
+            UpdateTarget::App("app"),
+            &[CpuArch::X64],
+        )
+        .unwrap();
+
+        assert_eq!(plan, vec![step(CpuArch::X64, "app")]);
+    }
+
+    #[test]
+    fn updating_an_app_that_is_not_installed_points_at_install() {
+        let root = tempfile::tempdir().unwrap();
+        let manifests = distinct_manifest();
+
+        let error = update_plan(
+            root.path(),
+            &manifests,
+            UpdateTarget::App("solo"),
+            &[CpuArch::X64],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ppm install solo"), "{error}");
+
+        let error = update_plan(
+            root.path(),
+            &manifests,
+            UpdateTarget::App("ghost"),
+            &[CpuArch::X64],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not defined"), "{error}");
+
+        // `--all` with nothing installed is an empty plan, not an error.
+        assert!(
+            update_plan(
+                root.path(),
+                &manifests,
+                UpdateTarget::AllInstalled,
+                &[CpuArch::X64]
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn install_plans_dependencies_first_for_every_architecture() {
+        let plan = install_plan(&distinct_manifest(), "app", &[CpuArch::X64, CpuArch::Arm64]).unwrap();
+        assert_eq!(
+            plan,
+            vec![
+                step(CpuArch::X64, "lib"),
+                step(CpuArch::X64, "app"),
+                step(CpuArch::Arm64, "lib"),
+                step(CpuArch::Arm64, "app"),
+            ]
+        );
     }
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 use ppm::core::arch::{ArchTarget, CpuArch};
 
 use crate::cli::context::load_manifest;
-use crate::cli::pipeline::{ReinstallPolicy, run_install_cycle};
+use crate::cli::pipeline::{ReinstallPolicy, install_plan, run_install_cycle};
 
 pub(crate) fn run(root: &Path, app: &str, arch: Option<ArchTarget>, force: bool) -> anyhow::Result<()> {
     let target_archs = arch
@@ -18,7 +18,8 @@ pub(crate) fn run(root: &Path, app: &str, arch: Option<ArchTarget>, force: bool)
     };
 
     let manifests = load_manifest(root)?;
-    run_install_cycle(root, &manifests, app, &target_archs, policy)?;
+    let plan = install_plan(&manifests, app, &target_archs)?;
+    run_install_cycle(root, &manifests, &plan, policy)?;
 
     tracing::info!("✓ All requested installations completed successfully!");
     Ok(())
