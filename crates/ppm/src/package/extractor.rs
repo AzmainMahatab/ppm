@@ -3,7 +3,7 @@ use crate::core::relpath::confined;
 use crate::package::msi_layout;
 use anyhow::{Context, Result, bail};
 use std::fs::{self, File};
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -186,15 +186,86 @@ pub fn extract_7z_stream(archive_path: &Path, offset: u64, dest_dir: &Path) -> R
         .with_context(|| format!("7-Zip decompression failed for '{}'", archive_path.display()))
 }
 
+// Ex: the first two bytes of every gzip member (RFC 1952 section 2.3.1).
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// Extracts a tar archive, gzip-compressed or plain - the magic bytes decide, since release
+/// URLs and cache names do not reliably say which.
+pub fn extract_tar(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let mut file = BufReader::new(
+        File::open(archive_path).with_context(|| format!("Failed to open '{}'", archive_path.display()))?,
+    );
+    let is_gzip = file.fill_buf()?.starts_with(&GZIP_MAGIC);
+    let reader: Box<dyn Read> = if is_gzip {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+
+    let mut archive = tar::Archive::new(reader);
+    let entries = archive
+        .entries()
+        .with_context(|| format!("'{}' is not a readable tar archive", archive_path.display()))?;
+    for entry in entries {
+        let mut entry = entry.with_context(|| format!("Corrupt entry in '{}'", archive_path.display()))?;
+        write_tar_entry(&mut entry, dest_dir)
+            .with_context(|| format!("Failed to extract '{}'", archive_path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_tar_entry<R: Read>(entry: &mut tar::Entry<'_, R>, dest_dir: &Path) -> Result<()> {
+    let kind = entry.header().entry_type();
+    let raw_path = entry.path()?.to_string_lossy().into_owned();
+
+    // Extended headers carry metadata for the entries that follow, not content of their own.
+    let is_metadata = kind.is_pax_global_extensions()
+        || kind.is_pax_local_extensions()
+        || kind.is_gnu_longname()
+        || kind.is_gnu_longlink();
+    if is_metadata {
+        return Ok(());
+    }
+
+    let out_path = dest_dir.join(confined(&raw_path)?);
+    if kind.is_dir() {
+        fs::create_dir_all(&out_path)
+            .with_context(|| format!("Failed to create '{}'", out_path.display()))?;
+        return Ok(());
+    }
+    // Why links fail rather than being skipped: a portable install cannot reproduce them without
+    // privileges Windows does not grant by default, and dropping them silently leaves an
+    // installation missing the files they stood for.
+    if !(kind.is_file() || kind.is_contiguous()) {
+        bail!("Tar entry '{raw_path}' is a {kind:?}, which a portable install cannot reproduce");
+    }
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("Failed to create '{}'", parent.display()))?;
+    }
+    let mut out_file =
+        File::create(&out_path).with_context(|| format!("Failed to create '{}'", out_path.display()))?;
+    std::io::copy(entry, &mut out_file)
+        .with_context(|| format!("Failed to extract tar entry '{raw_path}'"))?;
+    Ok(())
+}
+
 pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
+        // Why an error rather than a skip: an entry that would land outside the destination
+        // only exists in a malformed or hostile archive, and installing the rest of it as if
+        // nothing happened would hide that.
         let outpath = match entry.enclosed_name() {
             Some(path) => dest_dir.join(path),
-            None => continue,
+            None => bail!(
+                "Zip entry '{}' in '{}' would extract outside the install directory",
+                String::from_utf8_lossy(entry.name_raw()),
+                archive_path.display()
+            ),
         };
 
         if entry.is_dir() {
@@ -492,16 +563,7 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
         PackageKind::Zip => extract_zip(archive_path, &stage_dir)?,
         PackageKind::Cab => extract_cab(archive_path, &stage_dir)?,
         PackageKind::Msi => extract_msi(archive_path, &stage_dir)?,
-        PackageKind::Tar => {
-            // Honest halt: this arm used to dispatch to `extract_zip`, which cannot read a tar
-            // archive and failed with a ZIP parse error that named the wrong format. No tar
-            // reader is linked into this build, so the manifest declares a format the engine
-            // cannot unpack - say so instead of mis-dispatching.
-            bail!(
-                "package type 'tar' is declared for '{}' but no tar extractor is implemented in this build; repackage the release as zip/7z or add a tar reader",
-                archive_path.display()
-            );
-        }
+        PackageKind::Tar => extract_tar(archive_path, &stage_dir)?,
         PackageKind::Binary => {
             let file_name = archive_path.file_name().unwrap_or_default();
             let dest_file = stage_dir.join(file_name);

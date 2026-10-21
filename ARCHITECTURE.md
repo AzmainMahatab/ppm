@@ -214,7 +214,7 @@ crates/ppm/src/
     ├── version.rs                  # Version Resolution & Update Checking
     ├── http.rs                     # Shared HTTP clients (User-Agent, timeouts)
     ├── downloader.rs               # HTTPS-only Downloader with Progress Reporting
-    ├── extractor.rs                # Archive Extractor (NSIS-7z, 7z, Zip, CAB, MSI) & atomic swap-in
+    ├── extractor.rs                # Archive Extractor (NSIS-7z, 7z, Zip, Tar/gzip, CAB, MSI) & atomic swap-in
     ├── msi_layout.rs               # MSI Directory/Component/File/Media tables -> administrative-image paths
     └── sanitizer.rs                # Post-Install Cleanup
 ```

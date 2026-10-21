@@ -40,9 +40,10 @@ core portable variables shielded from redefinition - see [SPEC.md](SPEC.md) sect
   so an update deletes files the new release dropped instead of merging two versions, and a
   failed swap restores the previous installation. Downloads require HTTPS - see
   [SPEC.md](SPEC.md) section 6 for the trust model.
-* **Broad package support**: zip, 7z (incl. LZMA2, and NSIS-embedded payloads), CAB, and MSI
-  (embedded and external-CAB layouts), with post-install sanitization. A `tar` package type is
-  accepted by the manifest schema but has no extractor in this build and fails loudly.
+* **Broad package support**: zip, 7z (incl. LZMA2, and NSIS-embedded payloads), tar (plain or
+  gzip, detected from the payload), CAB, and MSI (laid out by its Directory table, embedded and
+  external cabinets), with post-install sanitization. Every archive entry is confined to the
+  install directory; an entry that would escape it, or a tar link, fails the install.
 * **Version intelligence**: local versions extracted from PE headers
   (`GetFileVersionInfoW`); remote versions resolved from configurable release endpoints.
 * **1-click launchers**: generated root-level `.bat` files for installed applications.

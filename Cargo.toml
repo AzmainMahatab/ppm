@@ -36,6 +36,7 @@ cab = "0.6"
 cc = "1.2"
 clap = "4.5"
 comfy-table = "8.0"
+flate2 = "1.1"
 hex = "0.4"
 indicatif = "0.18"
 msi = "0.10"
@@ -49,6 +50,7 @@ serde-saphyr = "2.0"
 # Why: ppm only decodes; the default encoder and AES features add build time and code for
 #      nothing. Edition 2024 needs the defaults opt-out on the workspace entry itself.
 sevenz-rust2 = { version = "0.24", default-features = false }
+tar = "0.4"
 tempfile = "3.18"
 tracing = "0.1"
 tracing-appender = "0.2"

@@ -300,3 +300,130 @@ fn test_post_install_sanitization_rules() {
     // Assert legitimate payload remains untouched
     assert!(target_dir.join("app.exe").is_file());
 }
+
+fn tar_config() -> PackageConfig {
+    PackageConfig {
+        kind: PackageKind::Tar,
+        extract_subpath: None,
+    }
+}
+
+/// Builds tar bytes from in-memory entries; a `None` body makes a directory entry.
+fn tar_bytes(entries: &[(&str, Option<&[u8]>)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, body) in entries {
+        let mut header = tar::Header::new_gnu();
+        match body {
+            Some(bytes) => {
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                builder
+                    .append_data(&mut header, name, *bytes)
+                    .expect("append file");
+            }
+            None => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+                builder
+                    .append_data(&mut header, name, std::io::empty())
+                    .expect("append dir");
+            }
+        }
+    }
+    builder.into_inner().expect("finish tar")
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).expect("compress");
+    encoder.finish().expect("finish gzip")
+}
+
+/// Regression: `tar` was accepted by the manifest schema but every install of it failed.
+#[test]
+fn tar_packages_install_whether_gzip_compressed_or_plain() {
+    let entries: &[(&str, Option<&[u8]>)] = &[
+        ("App-1.0/", None),
+        ("App-1.0/app.exe", Some(b"exe")),
+        ("App-1.0/res/data.bin", Some(b"data")),
+    ];
+    for (label, archive) in [("gzip", gzip(&tar_bytes(entries))), ("plain", tar_bytes(entries))] {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let package = temp_dir.path().join("download.bin");
+        fs::write(&package, archive).unwrap();
+        let dest_dir = temp_dir.path().join("Apps").join("App");
+
+        extract_package(&package, &tar_config(), &dest_dir)
+            .unwrap_or_else(|error| panic!("{label}: {error:#}"));
+
+        // The single top-level folder is flattened, as for every other archive format.
+        assert_eq!(fs::read(dest_dir.join("app.exe")).unwrap(), b"exe", "{label}");
+        assert_eq!(
+            fs::read(dest_dir.join("res").join("data.bin")).unwrap(),
+            b"data",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn archive_entries_that_escape_the_install_directory_fail_the_install() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let bystander = temp_dir.path().join("evil.txt");
+
+    // tar::Builder refuses `..` paths, so the hostile name is written into the header directly.
+    let mut header = tar::Header::new_gnu();
+    let name = b"../evil.txt";
+    header.as_gnu_mut().expect("gnu header").name[..name.len()].copy_from_slice(name);
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(4);
+    header.set_mode(0o644);
+    header.set_cksum();
+    let mut builder = tar::Builder::new(Vec::new());
+    builder.append(&header, &b"evil"[..]).expect("append");
+    let hostile_tar = temp_dir.path().join("hostile.tar");
+    fs::write(&hostile_tar, builder.into_inner().unwrap()).unwrap();
+
+    let hostile_zip = temp_dir.path().join("hostile.zip");
+    write_zip(&hostile_zip, &[("app.exe", b"ok"), ("../evil.txt", b"evil")]);
+
+    let deep = temp_dir.path().join("a").join("b");
+    for (archive, kind) in [(&hostile_tar, PackageKind::Tar), (&hostile_zip, PackageKind::Zip)] {
+        let config = PackageConfig {
+            kind,
+            extract_subpath: None,
+        };
+        let error = extract_package(archive, &config, &deep.join("App"))
+            .expect_err("an archive with an escaping entry must fail");
+        // The failure must name the hostile entry, not be some unrelated parse error.
+        assert!(format!("{error:#}").contains("evil.txt"), "{kind:?}: {error:#}");
+    }
+    assert!(!bystander.exists());
+    assert!(!deep.join("evil.txt").exists());
+    assert!(
+        !deep.join("App").exists(),
+        "nothing is installed from a hostile archive"
+    );
+}
+
+#[test]
+fn a_tar_link_fails_the_install_instead_of_being_dropped() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    builder
+        .append_link(&mut header, "app.lnk", "app.exe")
+        .expect("append link");
+    let package = temp_dir.path().join("links.tar");
+    fs::write(&package, builder.into_inner().unwrap()).unwrap();
+
+    let error = extract_package(&package, &tar_config(), &temp_dir.path().join("App"))
+        .expect_err("a link cannot be reproduced");
+    assert!(format!("{error:#}").contains("app.lnk"), "{error:#}");
+}
