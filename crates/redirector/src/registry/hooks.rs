@@ -917,61 +917,29 @@ unsafe extern "system" fn hook_reg_enum_key_ex_a(
     lpft_last_write_time: *mut FILETIME,
 ) -> i32 {
     let real_fn: FnRegEnumKeyExA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_KEY_EX_A)) };
-    guard_detour!(
-        &IN_REG_HOOK,
-        unsafe {
-            real_fn(
-                hkey,
-                dw_index,
-                lp_name,
-                lpcch_name,
-                lp_reserved,
-                lp_class,
-                lpcch_class,
-                lpft_last_write_time,
-            )
-        },
-        {
-            let listing = match unsafe { listing_for(hkey) } {
-                Ok(listing) => listing,
-                Err(UNTRACKED_FORWARD) => {
-                    return unsafe {
-                        real_fn(
-                            hkey,
-                            dw_index,
-                            lp_name,
-                            lpcch_name,
-                            lp_reserved,
-                            lp_class,
-                            lpcch_class,
-                            lpft_last_write_time,
-                        )
-                    };
-                }
-                Err(status) => return status,
-            };
-
-            let Some(name) = listing.view.subkeys.get(dw_index as usize) else {
-                return ERROR_NO_MORE_ITEMS as i32;
-            };
-
-            // SAFETY: the class and timestamp cells are caller-owned out-parameters, each
-            // null-checked before use.
-            unsafe {
-                if !lpcch_class.is_null() {
-                    *lpcch_class = 0;
-                }
-                if !lp_class.is_null() {
-                    *lp_class = 0;
-                }
-                if !lpft_last_write_time.is_null() {
-                    *lpft_last_write_time = std::mem::zeroed::<FILETIME>();
-                }
-
-                serve_name(name, lp_name, lpcch_name)
-            }
-        }
-    )
+    let host_enum = || unsafe {
+        real_fn(
+            hkey,
+            dw_index,
+            lp_name,
+            lpcch_name,
+            lp_reserved,
+            lp_class,
+            lpcch_class,
+            lpft_last_write_time,
+        )
+    };
+    guard_detour!(&IN_REG_HOOK, host_enum(), {
+        let out = SubkeyOut {
+            name: lp_name,
+            name_len: lpcch_name,
+            class: lp_class,
+            class_len: lpcch_class,
+            last_write: lpft_last_write_time,
+        };
+        // SAFETY: `out` holds the caller-owned out-parameters of this RegEnumKeyExA call.
+        unsafe { enum_key_virtually(hkey, dw_index, out, host_enum) }
+    })
 }
 
 /// Serves `RegEnumValueA`: the merged value names in the ANSI code page, with data from the
@@ -1796,65 +1764,80 @@ unsafe extern "system" fn hook_reg_enum_key_ex_w(
     lpft_last_write_time: *mut FILETIME,
 ) -> i32 {
     let real_fn: FnRegEnumKeyExW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_ENUM_KEY_EX_W)) };
-    guard_detour!(
-        &IN_REG_HOOK,
-        unsafe {
-            real_fn(
-                hkey,
-                dw_index,
-                lp_name,
-                lpcch_name,
-                lp_reserved,
-                lp_class,
-                lpcch_class,
-                lpft_last_write_time,
-            )
-        },
-        {
-            let listing = match unsafe { listing_for(hkey) } {
-                Ok(listing) => listing,
-                Err(UNTRACKED_FORWARD) => {
-                    return unsafe {
-                        real_fn(
-                            hkey,
-                            dw_index,
-                            lp_name,
-                            lpcch_name,
-                            lp_reserved,
-                            lp_class,
-                            lpcch_class,
-                            lpft_last_write_time,
-                        )
-                    };
-                }
-                Err(status) => return status,
-            };
+    let host_enum = || unsafe {
+        real_fn(
+            hkey,
+            dw_index,
+            lp_name,
+            lpcch_name,
+            lp_reserved,
+            lp_class,
+            lpcch_class,
+            lpft_last_write_time,
+        )
+    };
+    guard_detour!(&IN_REG_HOOK, host_enum(), {
+        let out = SubkeyOut {
+            name: lp_name,
+            name_len: lpcch_name,
+            class: lp_class,
+            class_len: lpcch_class,
+            last_write: lpft_last_write_time,
+        };
+        // SAFETY: `out` holds the caller-owned out-parameters of this RegEnumKeyExW call.
+        unsafe { enum_key_virtually(hkey, dw_index, out, host_enum) }
+    })
+}
 
-            let Some(name) = listing.view.subkeys.get(dw_index as usize) else {
-                return ERROR_NO_MORE_ITEMS as i32;
-            };
+/// The caller-owned out-parameters of a `RegEnumKeyEx*` call, in the caller's name spelling.
+struct SubkeyOut<C> {
+    name: *mut C,
+    name_len: *mut u32,
+    class: *mut C,
+    class_len: *mut u32,
+    last_write: *mut FILETIME,
+}
 
-            // SAFETY: the class and timestamp cells are caller-owned out-parameters, each
-            // null-checked before use.
-            unsafe {
-                // The overlay records no class for a key, and the merged index does not map to
-                // a host index, so neither the class nor the last-write time can be answered
-                // truthfully. They are reported empty and zeroed - the documented "unknown" -
-                // rather than filled with a plausible-looking value.
-                if !lpcch_class.is_null() {
-                    *lpcch_class = 0;
-                }
-                if !lp_class.is_null() {
-                    *lp_class = 0;
-                }
-                if !lpft_last_write_time.is_null() {
-                    *lpft_last_write_time = std::mem::zeroed::<FILETIME>();
-                }
+/// Serves one index of a subkey enumeration from the merged listing. `host_enum` is the caller's
+/// own call, used for a handle the engine does not track.
+///
+/// # Safety
+/// Every pointer in `out` must be a caller-owned out-parameter of the intercepted enumerator.
+unsafe fn enum_key_virtually<C: NameUnit>(
+    hkey: HKEY,
+    dw_index: u32,
+    out: SubkeyOut<C>,
+    host_enum: impl Fn() -> i32,
+) -> i32 {
+    let listing = match unsafe { listing_for(hkey) } {
+        Ok(listing) => listing,
+        Err(UNTRACKED_FORWARD) => return host_enum(),
+        Err(status) => return status,
+    };
 
-                serve_name(name, lp_name, lpcch_name)
-            }
+    let Some(name) = listing.view.subkeys.get(dw_index as usize) else {
+        return ERROR_NO_MORE_ITEMS as i32;
+    };
+
+    // SAFETY: the class and timestamp cells are caller-owned out-parameters, each null-checked
+    // before use.
+    unsafe {
+        // The overlay records no class for a key, and the merged index does not map to a host
+        // index, so neither the class nor the last-write time can be answered truthfully. They
+        // are reported empty and zeroed - the documented "unknown" - rather than filled with a
+        // plausible-looking value.
+        if !out.class_len.is_null() {
+            *out.class_len = 0;
         }
-    )
+        if !out.class.is_null() {
+            *out.class = C::NUL;
+        }
+        if !out.last_write.is_null() {
+            *out.last_write = std::mem::zeroed::<FILETIME>();
+        }
+
+        serve_name(name, out.name, out.name_len)
+    }
 }
 
 unsafe extern "system" fn hook_reg_enum_value_w(
