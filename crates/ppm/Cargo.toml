@@ -30,6 +30,7 @@ flate2.workspace = true
 indicatif.workspace = true
 injection = { path = "../injection" }
 msi.workspace = true
+object = { workspace = true, features = ["read_core", "pe", "std"] }
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 schemars.workspace = true

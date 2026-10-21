@@ -44,6 +44,8 @@ flate2 = "1.1"
 hex = "0.4"
 indicatif = "0.18"
 msi = "0.10"
+# Why defaults off: ppm only reads PE headers; the writers and other formats are dead weight.
+object = { version = "0.40", default-features = false }
 parking_lot = "0.12"
 regex = "1.11"
 reqwest = "0.13"

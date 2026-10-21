@@ -19,7 +19,8 @@ All subsequent paths (`.ppm/`, `Apps/`, `Home/`) are relative to this root.
 `apps.json` (deployed at `.ppm/apps.json`, schema at `.ppm/apps.schema.json`)
 defines applications:
 
-* Identity: unique app id (map key), display `name`, `target_dir`, `executable`.
+* Identity: unique app id (map key; ASCII letters, digits, `.`, `_`, `-` only, because it names
+  the root launcher and is written into it), display `name`, `target_dir`, `executable`.
 * Distribution: `version_check` (remote release endpoint) and `package` (archive type).
 * Optional `dependencies` (list of app ids — must be acyclic) and `post_install`.
 * Optional per-architecture support restrictions.

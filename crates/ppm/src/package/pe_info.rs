@@ -1,4 +1,54 @@
+use anyhow::{Context, Result, bail};
+use object::pe::{IMAGE_NT_OPTIONAL_HDR32_MAGIC, IMAGE_NT_OPTIONAL_HDR64_MAGIC, ImageDosHeader};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader};
 use std::path::Path;
+
+/// Writes a copy of the running test binary to `dest` with its PE `Subsystem` field set to
+/// `subsystem` (2 = Windows GUI, 3 = Windows console).
+///
+/// The field's place is fixed by the PE/COFF specification: the `e_lfanew` value at 0x3C locates
+/// the `PE\0\0` signature, the 20-byte COFF header follows it, and `Subsystem` sits 68 bytes into
+/// the optional header in both PE32 and PE32+.
+#[cfg(test)]
+pub(crate) fn write_test_executable(dest: &Path, subsystem: u16) {
+    let mut image =
+        std::fs::read(std::env::current_exe().expect("test binary path")).expect("read test binary");
+    let pe_offset = u32::from_le_bytes(image[0x3C..0x40].try_into().expect("4 bytes")) as usize;
+    let field = pe_offset + 4 + 20 + 68;
+    image[field..field + 2].copy_from_slice(&subsystem.to_le_bytes());
+    std::fs::write(dest, image).expect("write test executable");
+}
+
+/// Whether an executable is built for the Windows console subsystem rather than the GUI one.
+///
+/// Only the headers are read - through a cache over the open file, not by loading an executable
+/// that may run to hundreds of megabytes.
+pub fn is_console_executable(exe_path: &Path) -> Result<bool> {
+    let file =
+        std::fs::File::open(exe_path).with_context(|| format!("Failed to open '{}'", exe_path.display()))?;
+    let data = object::ReadCache::new(file);
+    let not_pe = || format!("'{}' is not a PE image", exe_path.display());
+
+    let dos = ImageDosHeader::parse(&data).with_context(not_pe)?;
+    let mut offset = u64::from(dos.nt_headers_offset());
+    let subsystem = match object::read::pe::optional_header_magic(&data).with_context(not_pe)? {
+        IMAGE_NT_OPTIONAL_HDR64_MAGIC => object::pe::ImageNtHeaders64::parse(&data, &mut offset)
+            .with_context(not_pe)?
+            .0
+            .optional_header()
+            .subsystem(),
+        IMAGE_NT_OPTIONAL_HDR32_MAGIC => object::pe::ImageNtHeaders32::parse(&data, &mut offset)
+            .with_context(not_pe)?
+            .0
+            .optional_header()
+            .subsystem(),
+        magic => bail!(
+            "'{}' has an unknown optional-header magic 0x{magic:04x}",
+            exe_path.display()
+        ),
+    };
+    Ok(subsystem == object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI)
+}
 
 /// Dynamically extracts the binary product version directly from Windows PE header resources (VS_FIXEDFILEINFO).
 pub fn get_pe_product_version(exe_path: &Path) -> Option<String> {
@@ -200,6 +250,25 @@ fn get_windows_pe_version(exe_path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_subsystem_distinguishes_console_from_gui_executables() {
+        let dir = tempfile::tempdir().unwrap();
+        let console = dir.path().join("console.exe");
+        let gui = dir.path().join("gui.exe");
+        write_test_executable(&console, 3);
+        write_test_executable(&gui, 2);
+
+        assert!(is_console_executable(&console).unwrap());
+        assert!(!is_console_executable(&gui).unwrap());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_pe_image_is_an_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"not an executable").unwrap();
+        assert!(is_console_executable(file.path()).is_err());
+    }
 
     #[test]
     #[cfg(windows)]

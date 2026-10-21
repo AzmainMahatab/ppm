@@ -107,7 +107,7 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 | `ppm.exe list [--arch <x64\|arm64\|all>]` | Lists all configured apps and dynamic presence status across architectures. |
 | `ppm.exe uninstall <app> [--arch <x64\|arm64\|all>]` | Removes an installed application (all architectures by default), refusing while an installed application depends on it; removes its launcher once no copy remains. |
 | `ppm.exe clean` | Empties `.ppm/cache` and removes the staging/retired folders an interrupted install leaves beside an application. |
-| `ppm.exe link [app\|all]` | Generates prefix-free 1-click `.bat` root launchers for installed apps. |
+| `ppm.exe link [app\|all]` | Generates 1-click `.bat` root launchers for installed apps - console apps run attached and return their exit code, GUI apps start detached - and removes ppm-generated launchers of apps no longer installed. |
 | `ppm.exe schema` | Regenerates JSON Schema (`apps.schema.json`) via `schemars`. |
 | `ppm.exe -v <command>` / `ppm.exe -q <command>` | Show debug messages / only warnings and errors on the console (given before the command). |
 | `ppm.exe validate` | Validates `apps.json`: strict field parsing, install-relative paths, defined and acyclic dependencies. |

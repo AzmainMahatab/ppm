@@ -208,10 +208,15 @@ impl AppManifests {
         Ok(manifests)
     }
 
-    /// Checks what the type model alone cannot: that every path a field contributes stays inside
-    /// the directory it is joined onto, and that every dependency names a defined application.
+    /// Checks what the type model alone cannot: that every app id is safe as a launcher name, that
+    /// every path a field contributes stays inside the directory it is joined onto, and that every
+    /// dependency names a defined application.
     pub fn check_references(&self) -> anyhow::Result<()> {
         for (app_id, app) in &self.apps {
+            if !is_valid_app_id(app_id) {
+                anyhow::bail!("App id '{app_id}' may only use ASCII letters, digits, '.', '_' and '-'");
+            }
+
             let paths = [&app.target_dir, &app.executable]
                 .into_iter()
                 .chain(app.package.extract_subpath.as_ref())
@@ -230,6 +235,19 @@ impl AppManifests {
         }
         Ok(())
     }
+}
+
+/// Whether `id` is usable as an app id.
+///
+/// # Why so narrow
+/// The id becomes a file name in the root (`<id>.bat`) and text inside that batch script, where
+/// characters such as `&`, `|`, `%` or `"` are commands rather than text. Restricting ids to
+/// characters with no meaning to cmd.exe or the file system keeps both uses safe by construction.
+fn is_valid_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 impl PostInstallConfig {
@@ -306,6 +324,17 @@ mod tests {
                 manifest(broken.clone()).check_references().is_err(),
                 "{broken} must be rejected"
             );
+        }
+    }
+
+    /// An app id is written into a batch script; one carrying cmd.exe syntax would run commands.
+    #[test]
+    fn app_ids_that_would_inject_into_a_launcher_are_rejected() {
+        for valid in ["webview2", "antigravity-manager", "tool_1.2"] {
+            assert!(is_valid_app_id(valid), "{valid}");
+        }
+        for invalid in ["", "a&calc", "a b", "100%", "x|y", r"..\x", "café"] {
+            assert!(!is_valid_app_id(invalid), "{invalid:?}");
         }
     }
 

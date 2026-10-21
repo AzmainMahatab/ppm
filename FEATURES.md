@@ -47,7 +47,10 @@ core portable variables shielded from redefinition - see [SPEC.md](SPEC.md) sect
   install directory; an entry that would escape it, or a tar link, fails the install.
 * **Version intelligence**: local versions extracted from PE headers
   (`GetFileVersionInfoW`); remote versions resolved from configurable release endpoints.
-* **1-click launchers**: generated root-level `.bat` files for installed applications.
+* **1-click launchers**: generated root-level `.bat` files for installed applications. A console
+  application runs in the launcher's console and returns its exit code; a GUI application is
+  started detached so the console can close. The choice follows the executable's PE subsystem,
+  and launchers ppm generated are removed once their application is no longer installed.
 * **Removal**: `uninstall` removes an application per architecture (refusing while an installed
   application depends on it) and its launcher; `clean` empties the download cache and
   interrupted-install debris. A same-named `.bat` the user wrote is never touched.

@@ -209,7 +209,7 @@ crates/ppm/src/
 │   ├── mod.rs
 │   ├── init.rs                     # Workspace Scaffolding (.ppm/, Apps/, Home/)
 │   ├── runner.rs                   # Process Execution & Win32 Argument Quoting
-│   └── launcher.rs                 # Launcher Script Generator
+│   └── launcher.rs                 # Launcher Scripts: attached (console) or detached (GUI) by PE subsystem
 │
 └── package/                        # Package Domain
     ├── mod.rs
