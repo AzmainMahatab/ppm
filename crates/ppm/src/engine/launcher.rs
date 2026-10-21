@@ -114,7 +114,10 @@ mod tests {
         assert!(!root.path().join("mine.bat").exists());
 
         assert!(!remove_launcher(root.path(), "theirs").unwrap());
-        assert!(user_script.exists(), "a same-named file ppm did not write is left alone");
+        assert!(
+            user_script.exists(),
+            "a same-named file ppm did not write is left alone"
+        );
 
         assert!(!remove_launcher(root.path(), "absent").unwrap());
     }
