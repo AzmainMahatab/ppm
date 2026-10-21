@@ -2,7 +2,7 @@ use crate::detour::{guard_detour, hook_export, load_trampoline, try_load_trampol
 use crate::registry::enumeration::{HostListing, KeyView, ValueOrigin, cached_view, merge};
 use crate::registry::handle_table::{KeyScope, get_handle_table};
 use crate::registry::store::{KeyResolution, ValueResolution, get_registry_store};
-use crate::winstr::{to_wide, wide_to_string};
+use crate::winstr::{ansi_bytes_to_wide, ansi_to_string, to_wide, wide_to_string};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -55,13 +55,76 @@ enum Target {
 
 /// Resolves the key an intercepted call addresses from its base handle and subkey.
 fn resolve_target(hkey: HKEY, subkey: *const u16) -> Target {
+    resolve_subkey(hkey, &wide_to_string(subkey))
+}
+
+/// Resolves the key addressed by `subkey` under the handle `hkey`, already decoded to text.
+fn resolve_subkey(hkey: HKEY, subkey: &str) -> Target {
     match get_handle_table().resolve(hkey.cast()) {
         KeyScope::Tracked { path, synthetic } => Target::Resolved {
-            path: resolve_full_key(&path, &wide_to_string(subkey)),
+            path: resolve_full_key(&path, subkey),
             synthetic,
         },
         KeyScope::Untracked => Target::Untracked,
     }
+}
+
+/// Stores a typed value in the overlay under `subkey` of the key `hkey` names. The wide and
+/// ANSI entry points both end here, so one store path serves every spelling of the call.
+fn set_value_virtually(api: &str, hkey: HKEY, subkey: &str, name: &str, dw_type: u32, data: &[u8]) -> i32 {
+    let Target::Resolved { path, .. } = resolve_subkey(hkey, subkey) else {
+        return refuse_untracked_mutation(api);
+    };
+    tracing::debug!(
+        "{api} [CoW Virtual Store]: {path} / {name} (type: {dw_type}, bytes: {})",
+        data.len()
+    );
+    get_registry_store().set_value(&path, name, dw_type, data);
+    ERROR_SUCCESS as i32
+}
+
+/// Masks a value in the overlay under `subkey` of the key `hkey` names.
+fn delete_value_virtually(api: &str, hkey: HKEY, subkey: &str, name: &str) -> i32 {
+    let Target::Resolved { path, .. } = resolve_subkey(hkey, subkey) else {
+        return refuse_untracked_mutation(api);
+    };
+
+    if get_registry_store().resolve_value(&path, name) == ValueResolution::Masked {
+        // Already masked: Win32 reports a second delete of the same value as absent.
+        return ERROR_FILE_NOT_FOUND as i32;
+    }
+
+    get_registry_store().delete_value(&path, name);
+    tracing::info!("{api} [CoW Mask]: {path} / {name}");
+    ERROR_SUCCESS as i32
+}
+
+/// Borrows the `cb` bytes a value-setting call supplies, or nothing when the payload is absent.
+///
+/// # Safety
+/// `data` must be readable for `cb` bytes whenever it is non-null and `cb` is non-zero.
+unsafe fn value_bytes<'a>(data: *const u8, cb: u32) -> &'a [u8] {
+    if data.is_null() || cb == 0 {
+        return &[];
+    }
+    // SAFETY: the caller guarantees `cb` readable bytes at a non-null `data`.
+    unsafe { std::slice::from_raw_parts(data, cb as usize) }
+}
+
+/// Converts an `...A` value payload to its stored form. Text types are decoded from the ANSI
+/// code page into UTF-16, as the system does; other types are stored as the caller wrote them.
+///
+/// # Why
+/// The overlay keeps the wide representation the `...W` entry points write, so an ANSI write
+/// read back through a wide read must produce the same bytes.
+fn ansi_value_bytes(dw_type: u32, data: &[u8]) -> Vec<u8> {
+    if !matches!(dw_type, REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ) {
+        return data.to_vec();
+    }
+    ansi_bytes_to_wide(data)
+        .iter()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
 }
 
 /// Refuses a mutating registry call whose target key the engine cannot name.
@@ -245,8 +308,30 @@ type FnRegQueryValueExW =
     unsafe extern "system" fn(HKEY, *const u16, *mut u32, *mut u32, *mut u8, *mut u32) -> i32;
 type FnRegGetValueW =
     unsafe extern "system" fn(HKEY, *const u16, *const u16, u32, *mut u32, *mut c_void, *mut u32) -> i32;
+type FnRegOpenKeyExA = unsafe extern "system" fn(HKEY, *const u8, u32, u32, *mut HKEY) -> i32;
+type FnRegCreateKeyExA = unsafe extern "system" fn(
+    HKEY,
+    *const u8,
+    u32,
+    *mut u8,
+    u32,
+    u32,
+    *const c_void,
+    *mut HKEY,
+    *mut u32,
+) -> i32;
 type FnRegSetValueExW = unsafe extern "system" fn(HKEY, *const u16, u32, u32, *const u8, u32) -> i32;
+type FnRegSetValueExA = unsafe extern "system" fn(HKEY, *const u8, u32, u32, *const u8, u32) -> i32;
+type FnRegSetKeyValueW =
+    unsafe extern "system" fn(HKEY, *const u16, *const u16, u32, *const c_void, u32) -> i32;
+type FnRegSetKeyValueA =
+    unsafe extern "system" fn(HKEY, *const u8, *const u8, u32, *const c_void, u32) -> i32;
+type FnRegSetValueW = unsafe extern "system" fn(HKEY, *const u16, u32, *const u8, u32) -> i32;
+type FnRegSetValueA = unsafe extern "system" fn(HKEY, *const u8, u32, *const u8, u32) -> i32;
 type FnRegDeleteValueW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
+type FnRegDeleteValueA = unsafe extern "system" fn(HKEY, *const u8) -> i32;
+type FnRegDeleteKeyValueW = unsafe extern "system" fn(HKEY, *const u16, *const u16) -> i32;
+type FnRegDeleteKeyValueA = unsafe extern "system" fn(HKEY, *const u8, *const u8) -> i32;
 type FnRegDeleteKeyW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
 type FnRegDeleteKeyExW = unsafe extern "system" fn(HKEY, *const u16, u32, u32) -> i32;
 type FnRegDeleteTreeW = unsafe extern "system" fn(HKEY, *const u16) -> i32;
@@ -284,7 +369,17 @@ static REAL_REG_CREATE_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::nu
 static REAL_REG_QUERY_VALUE_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_GET_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_SET_VALUE_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_OPEN_KEY_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_CREATE_KEY_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_SET_VALUE_EX_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_SET_KEY_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_SET_KEY_VALUE_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_SET_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_SET_VALUE_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_DELETE_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_DELETE_VALUE_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_DELETE_KEY_VALUE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static REAL_REG_DELETE_KEY_VALUE_A: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_DELETE_KEY_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_DELETE_KEY_EX_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REAL_REG_DELETE_TREE_W: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -307,52 +402,63 @@ unsafe extern "system" fn hook_reg_open_key_ex_w(
     guard_detour!(
         &IN_REG_HOOK,
         unsafe { real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result) },
-        {
-            let Target::Resolved { path, synthetic } = resolve_target(hkey, lp_sub_key) else {
-                // An unnameable base key cannot be virtualized; a read-side open falls
-                // through to the host, which is the documented copy-on-write behavior for
-                // anything the overlay does not shadow.
-                return unsafe { real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result) };
-            };
-
-            let resolution = get_registry_store().resolve_key(&path);
-            if resolution == KeyResolution::Masked {
-                return ERROR_FILE_NOT_FOUND as i32;
-            }
-
-            if synthetic {
-                if !phk_result.is_null() && resolution == KeyResolution::Virtual {
-                    // SAFETY: `phk_result` is non-null (checked above) and is the caller-owned
-                    // out-parameter for the opened key.
-                    unsafe {
-                        *phk_result = get_handle_table().register_virtual_handle(path).cast();
-                    }
-                    return ERROR_SUCCESS as i32;
-                }
-                return ERROR_FILE_NOT_FOUND as i32;
-            }
-
-            let status = unsafe { real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result) };
-            if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
-                // SAFETY: `phk_result` is non-null (checked above) and `real_fn` wrote a valid
-                // key handle into it on success.
-                unsafe {
-                    get_handle_table().register_host_handle((*phk_result).cast(), path);
-                }
-                return status;
-            }
-
-            if !phk_result.is_null() && resolution == KeyResolution::Virtual {
-                // SAFETY: `phk_result` is non-null (checked above), caller-owned out-parameter.
-                unsafe {
-                    *phk_result = get_handle_table().register_virtual_handle(path).cast();
-                }
-                return ERROR_SUCCESS as i32;
-            }
-
-            status
-        }
+        open_key_virtually(hkey, &wide_to_string(lp_sub_key), phk_result, || unsafe {
+            real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result)
+        })
     )
+}
+
+/// Opens `subkey` under `hkey` through the overlay. `host_open` performs the caller's own call
+/// and serves a key the host owns.
+///
+/// # Why a closure
+/// The `...W` and `...A` entry points differ only in how they spell the arguments. Taking the
+/// host call as a closure lets both share this logic and still fall through with the caller's
+/// own pointers.
+fn open_key_virtually(hkey: HKEY, subkey: &str, phk_result: *mut HKEY, host_open: impl Fn() -> i32) -> i32 {
+    let Target::Resolved { path, synthetic } = resolve_subkey(hkey, subkey) else {
+        // An unnameable base key cannot be virtualized; a read-side open falls through to the
+        // host, which is the documented copy-on-write behavior for anything the overlay does
+        // not shadow.
+        return host_open();
+    };
+
+    let resolution = get_registry_store().resolve_key(&path);
+    if resolution == KeyResolution::Masked {
+        return ERROR_FILE_NOT_FOUND as i32;
+    }
+
+    if synthetic {
+        if !phk_result.is_null() && resolution == KeyResolution::Virtual {
+            // SAFETY: `phk_result` is non-null (checked above) and is the caller-owned
+            // out-parameter for the opened key.
+            unsafe {
+                *phk_result = get_handle_table().register_virtual_handle(path).cast();
+            }
+            return ERROR_SUCCESS as i32;
+        }
+        return ERROR_FILE_NOT_FOUND as i32;
+    }
+
+    let status = host_open();
+    if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
+        // SAFETY: `phk_result` is non-null (checked above) and the host open wrote a valid key
+        // handle into it on success.
+        unsafe {
+            get_handle_table().register_host_handle((*phk_result).cast(), path);
+        }
+        return status;
+    }
+
+    if !phk_result.is_null() && resolution == KeyResolution::Virtual {
+        // SAFETY: `phk_result` is non-null (checked above), caller-owned out-parameter.
+        unsafe {
+            *phk_result = get_handle_table().register_virtual_handle(path).cast();
+        }
+        return ERROR_SUCCESS as i32;
+    }
+
+    status
 }
 
 unsafe extern "system" fn hook_reg_create_key_ex_w(
@@ -383,34 +489,13 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
                 lpdw_disposition,
             )
         },
-        {
-            let Target::Resolved { path, synthetic } = resolve_target(hkey, lp_sub_key) else {
-                return refuse_untracked_mutation("RegCreateKeyExW");
-            };
-
-            get_registry_store().create_key(&path);
-            tracing::info!("RegCreateKeyExW: Virtual key created -> {path}");
-
-            if synthetic && !phk_result.is_null() {
-                // SAFETY: `phk_result` is non-null (checked above) and is the caller-owned
-                // out-parameter for the created key; `lpdw_disposition` likewise for the
-                // disposition value.
-                unsafe {
-                    *phk_result = get_handle_table().register_virtual_handle(path).cast();
-                    if !lpdw_disposition.is_null() {
-                        *lpdw_disposition = 1;
-                    }
-                }
-                return ERROR_SUCCESS as i32;
-            }
-
-            // Why the real create still runs for a host-backed parent: the overlay shadows
-            // values and deletions, but subkey *existence* still falls through to the host so
-            // an app can open the keys its installer left behind. The host key this creates is
-            // empty - every value written into it is virtualized - and the probe's disposition
-            // assertion depends on it. Narrowing this to a pure overlay create is a separate
-            // decision, not an oversight.
-            let status = unsafe {
+        create_key_virtually(
+            "RegCreateKeyExW",
+            hkey,
+            &wide_to_string(lp_sub_key),
+            phk_result,
+            lpdw_disposition,
+            || unsafe {
                 real_fn(
                     hkey,
                     lp_sub_key,
@@ -422,31 +507,68 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
                     phk_result,
                     lpdw_disposition,
                 )
-            };
-
-            if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
-                // SAFETY: `phk_result` is non-null (checked above) and `real_fn` wrote a valid
-                // key handle into it on success.
-                unsafe {
-                    get_handle_table().register_host_handle((*phk_result).cast(), path);
-                }
-                return status;
             }
-
-            if !phk_result.is_null() {
-                // SAFETY: as above - caller-owned out-parameters, null-checked immediately.
-                unsafe {
-                    *phk_result = get_handle_table().register_virtual_handle(path).cast();
-                    if !lpdw_disposition.is_null() {
-                        *lpdw_disposition = 1;
-                    }
-                }
-                return ERROR_SUCCESS as i32;
-            }
-
-            status
-        }
+        )
     )
+}
+
+/// Creates `subkey` under `hkey` in the overlay, then runs `host_create` for the host side.
+///
+/// # Why the host create still runs
+/// The overlay shadows values and deletions, but subkey *existence* still falls through to the
+/// host so an app can open the keys its installer left behind. The host key this creates is
+/// empty - every value written into it is virtualized - and the probe's disposition assertion
+/// depends on it. Narrowing this to a pure overlay create is a separate decision, not an
+/// oversight.
+fn create_key_virtually(
+    api: &str,
+    hkey: HKEY,
+    subkey: &str,
+    phk_result: *mut HKEY,
+    lpdw_disposition: *mut u32,
+    host_create: impl Fn() -> i32,
+) -> i32 {
+    let Target::Resolved { path, synthetic } = resolve_subkey(hkey, subkey) else {
+        return refuse_untracked_mutation(api);
+    };
+
+    get_registry_store().create_key(&path);
+    tracing::info!("{api}: Virtual key created -> {path}");
+
+    if synthetic && !phk_result.is_null() {
+        // SAFETY: `phk_result` is non-null (checked above) and is the caller-owned out-parameter
+        // for the created key; `lpdw_disposition` likewise for the disposition value.
+        unsafe {
+            *phk_result = get_handle_table().register_virtual_handle(path).cast();
+            if !lpdw_disposition.is_null() {
+                *lpdw_disposition = 1;
+            }
+        }
+        return ERROR_SUCCESS as i32;
+    }
+
+    let status = host_create();
+    if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
+        // SAFETY: `phk_result` is non-null (checked above) and the host create wrote a valid key
+        // handle into it on success.
+        unsafe {
+            get_handle_table().register_host_handle((*phk_result).cast(), path);
+        }
+        return status;
+    }
+
+    if !phk_result.is_null() {
+        // SAFETY: as above - caller-owned out-parameters, null-checked immediately.
+        unsafe {
+            *phk_result = get_handle_table().register_virtual_handle(path).cast();
+            if !lpdw_disposition.is_null() {
+                *lpdw_disposition = 1;
+            }
+        }
+        return ERROR_SUCCESS as i32;
+    }
+
+    status
 }
 
 unsafe extern "system" fn hook_reg_query_value_ex_w(
@@ -586,23 +708,224 @@ unsafe extern "system" fn hook_reg_set_value_ex_w(
         &IN_REG_HOOK,
         unsafe { real_fn(hkey, lp_value_name, reserved, dw_type, lp_data, cb_data) },
         {
-            let Target::Resolved { path, .. } = resolve_target(hkey, std::ptr::null()) else {
-                return refuse_untracked_mutation("RegSetValueExW");
-            };
-            let val_name = wide_to_string(lp_value_name);
+            // SAFETY: RegSetValueExW supplies `cb_data` bytes at `lp_data`.
+            let data = unsafe { value_bytes(lp_data, cb_data) };
+            set_value_virtually(
+                "RegSetValueExW",
+                hkey,
+                "",
+                &wide_to_string(lp_value_name),
+                dw_type,
+                data,
+            )
+        }
+    )
+}
 
-            let data_slice = if !lp_data.is_null() && cb_data > 0 {
-                // SAFETY: `lp_data` points to `cb_data` bytes supplied by the caller.
-                unsafe { std::slice::from_raw_parts(lp_data, cb_data as usize) }
-            } else {
-                &[]
-            };
+unsafe extern "system" fn hook_reg_open_key_ex_a(
+    hkey: HKEY,
+    lp_sub_key: *const u8,
+    ul_options: u32,
+    sam_desired: u32,
+    phk_result: *mut HKEY,
+) -> i32 {
+    let real_fn: FnRegOpenKeyExA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_OPEN_KEY_EX_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result) },
+        open_key_virtually(hkey, &ansi_to_string(lp_sub_key), phk_result, || unsafe {
+            real_fn(hkey, lp_sub_key, ul_options, sam_desired, phk_result)
+        })
+    )
+}
 
-            tracing::debug!(
-                "RegSetValueExW [CoW Virtual Store]: {path} / {val_name} (type: {dw_type}, bytes: {cb_data})"
-            );
-            get_registry_store().set_value(&path, &val_name, dw_type, data_slice);
-            ERROR_SUCCESS as i32
+unsafe extern "system" fn hook_reg_create_key_ex_a(
+    hkey: HKEY,
+    lp_sub_key: *const u8,
+    reserved: u32,
+    lp_class: *mut u8,
+    dw_options: u32,
+    sam_desired: u32,
+    lp_security_attributes: *const c_void,
+    phk_result: *mut HKEY,
+    lpdw_disposition: *mut u32,
+) -> i32 {
+    let real_fn: FnRegCreateKeyExA =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_CREATE_KEY_EX_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe {
+            real_fn(
+                hkey,
+                lp_sub_key,
+                reserved,
+                lp_class,
+                dw_options,
+                sam_desired,
+                lp_security_attributes,
+                phk_result,
+                lpdw_disposition,
+            )
+        },
+        create_key_virtually(
+            "RegCreateKeyExA",
+            hkey,
+            &ansi_to_string(lp_sub_key),
+            phk_result,
+            lpdw_disposition,
+            || unsafe {
+                real_fn(
+                    hkey,
+                    lp_sub_key,
+                    reserved,
+                    lp_class,
+                    dw_options,
+                    sam_desired,
+                    lp_security_attributes,
+                    phk_result,
+                    lpdw_disposition,
+                )
+            }
+        )
+    )
+}
+
+/// Serves the ANSI `RegSetValueExA` from the overlay. The system converts the name and text
+/// data from the ANSI code page; this engine's overlay stores the wide form, so it converts the
+/// same way before storing.
+unsafe extern "system" fn hook_reg_set_value_ex_a(
+    hkey: HKEY,
+    lp_value_name: *const u8,
+    reserved: u32,
+    dw_type: u32,
+    lp_data: *const u8,
+    cb_data: u32,
+) -> i32 {
+    let real_fn: FnRegSetValueExA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_SET_VALUE_EX_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_value_name, reserved, dw_type, lp_data, cb_data) },
+        {
+            // SAFETY: RegSetValueExA supplies `cb_data` bytes at `lp_data`.
+            let data = unsafe { value_bytes(lp_data, cb_data) };
+            set_value_virtually(
+                "RegSetValueExA",
+                hkey,
+                "",
+                &ansi_to_string(lp_value_name),
+                dw_type,
+                &ansi_value_bytes(dw_type, data),
+            )
+        }
+    )
+}
+
+unsafe extern "system" fn hook_reg_set_key_value_w(
+    hkey: HKEY,
+    lp_sub_key: *const u16,
+    lp_value_name: *const u16,
+    dw_type: u32,
+    lp_data: *const c_void,
+    cb_data: u32,
+) -> i32 {
+    let real_fn: FnRegSetKeyValueW =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_SET_KEY_VALUE_W)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, lp_value_name, dw_type, lp_data, cb_data) },
+        {
+            // SAFETY: RegSetKeyValueW supplies `cb_data` bytes at `lp_data`.
+            let data = unsafe { value_bytes(lp_data.cast(), cb_data) };
+            set_value_virtually(
+                "RegSetKeyValueW",
+                hkey,
+                &wide_to_string(lp_sub_key),
+                &wide_to_string(lp_value_name),
+                dw_type,
+                data,
+            )
+        }
+    )
+}
+
+unsafe extern "system" fn hook_reg_set_key_value_a(
+    hkey: HKEY,
+    lp_sub_key: *const u8,
+    lp_value_name: *const u8,
+    dw_type: u32,
+    lp_data: *const c_void,
+    cb_data: u32,
+) -> i32 {
+    let real_fn: FnRegSetKeyValueA =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_SET_KEY_VALUE_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, lp_value_name, dw_type, lp_data, cb_data) },
+        {
+            // SAFETY: RegSetKeyValueA supplies `cb_data` bytes at `lp_data`.
+            let data = unsafe { value_bytes(lp_data.cast(), cb_data) };
+            set_value_virtually(
+                "RegSetKeyValueA",
+                hkey,
+                &ansi_to_string(lp_sub_key),
+                &ansi_to_string(lp_value_name),
+                dw_type,
+                &ansi_value_bytes(dw_type, data),
+            )
+        }
+    )
+}
+
+/// The legacy `RegSetValueW` writes the default value of `lpSubKey` and takes no name.
+unsafe extern "system" fn hook_reg_set_value_w(
+    hkey: HKEY,
+    lp_sub_key: *const u16,
+    dw_type: u32,
+    lp_data: *const u8,
+    cb_data: u32,
+) -> i32 {
+    let real_fn: FnRegSetValueW = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_SET_VALUE_W)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, dw_type, lp_data, cb_data) },
+        {
+            // SAFETY: RegSetValueW supplies `cb_data` bytes at `lp_data`.
+            let data = unsafe { value_bytes(lp_data, cb_data) };
+            set_value_virtually(
+                "RegSetValueW",
+                hkey,
+                &wide_to_string(lp_sub_key),
+                "",
+                dw_type,
+                data,
+            )
+        }
+    )
+}
+
+/// The legacy `RegSetValueA` writes the default value of `lpSubKey` and takes no name.
+unsafe extern "system" fn hook_reg_set_value_a(
+    hkey: HKEY,
+    lp_sub_key: *const u8,
+    dw_type: u32,
+    lp_data: *const u8,
+    cb_data: u32,
+) -> i32 {
+    let real_fn: FnRegSetValueA = unsafe { std::mem::transmute(load_trampoline(&REAL_REG_SET_VALUE_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, dw_type, lp_data, cb_data) },
+        {
+            // SAFETY: RegSetValueA supplies `cb_data` bytes at `lp_data`.
+            let data = unsafe { value_bytes(lp_data, cb_data) };
+            set_value_virtually(
+                "RegSetValueA",
+                hkey,
+                &ansi_to_string(lp_sub_key),
+                "",
+                dw_type,
+                &ansi_value_bytes(dw_type, data),
+            )
         }
     )
 }
@@ -611,20 +934,58 @@ unsafe extern "system" fn hook_reg_delete_value_w(hkey: HKEY, lp_value_name: *co
     let real_fn: FnRegDeleteValueW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_REG_DELETE_VALUE_W)) };
     guard_detour!(&IN_REG_HOOK, unsafe { real_fn(hkey, lp_value_name) }, {
-        let Target::Resolved { path, .. } = resolve_target(hkey, std::ptr::null()) else {
-            return refuse_untracked_mutation("RegDeleteValueW");
-        };
-        let val_name = wide_to_string(lp_value_name);
-
-        if get_registry_store().resolve_value(&path, &val_name) == ValueResolution::Masked {
-            // Already masked: Win32 reports a second delete of the same value as absent.
-            return ERROR_FILE_NOT_FOUND as i32;
-        }
-
-        get_registry_store().delete_value(&path, &val_name);
-        tracing::info!("RegDeleteValueW [CoW Mask]: {path} / {val_name}");
-        ERROR_SUCCESS as i32
+        delete_value_virtually("RegDeleteValueW", hkey, "", &wide_to_string(lp_value_name))
     })
+}
+
+unsafe extern "system" fn hook_reg_delete_value_a(hkey: HKEY, lp_value_name: *const u8) -> i32 {
+    let real_fn: FnRegDeleteValueA =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_DELETE_VALUE_A)) };
+    guard_detour!(&IN_REG_HOOK, unsafe { real_fn(hkey, lp_value_name) }, {
+        delete_value_virtually("RegDeleteValueA", hkey, "", &ansi_to_string(lp_value_name))
+    })
+}
+
+unsafe extern "system" fn hook_reg_delete_key_value_w(
+    hkey: HKEY,
+    lp_sub_key: *const u16,
+    lp_value_name: *const u16,
+) -> i32 {
+    let real_fn: FnRegDeleteKeyValueW =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_DELETE_KEY_VALUE_W)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, lp_value_name) },
+        {
+            delete_value_virtually(
+                "RegDeleteKeyValueW",
+                hkey,
+                &wide_to_string(lp_sub_key),
+                &wide_to_string(lp_value_name),
+            )
+        }
+    )
+}
+
+unsafe extern "system" fn hook_reg_delete_key_value_a(
+    hkey: HKEY,
+    lp_sub_key: *const u8,
+    lp_value_name: *const u8,
+) -> i32 {
+    let real_fn: FnRegDeleteKeyValueA =
+        unsafe { std::mem::transmute(load_trampoline(&REAL_REG_DELETE_KEY_VALUE_A)) };
+    guard_detour!(
+        &IN_REG_HOOK,
+        unsafe { real_fn(hkey, lp_sub_key, lp_value_name) },
+        {
+            delete_value_virtually(
+                "RegDeleteKeyValueA",
+                hkey,
+                &ansi_to_string(lp_sub_key),
+                &ansi_to_string(lp_value_name),
+            )
+        }
+    )
 }
 
 /// Masks a key and its subtree in the overlay instead of deleting it on the host.
@@ -1231,7 +1592,7 @@ pub fn init_hooks() {
         //      as a missing row instead of hiding it among a dozen near-identical call blocks -
         //      which is how RegDeleteKeyExW and RegDeleteTreeW stayed unhooked while their
         //      sibling RegDeleteKeyW was fixed.
-        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 14] = [
+        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 24] = [
             (
                 "RegOpenKeyExW",
                 &REAL_REG_OPEN_KEY_EX_W,
@@ -1301,6 +1662,56 @@ pub fn init_hooks() {
                 "RegOpenCurrentUser",
                 &REAL_REG_OPEN_CURRENT_USER,
                 hook_reg_open_current_user as *mut c_void,
+            ),
+            (
+                "RegOpenKeyExA",
+                &REAL_REG_OPEN_KEY_EX_A,
+                hook_reg_open_key_ex_a as *mut c_void,
+            ),
+            (
+                "RegCreateKeyExA",
+                &REAL_REG_CREATE_KEY_EX_A,
+                hook_reg_create_key_ex_a as *mut c_void,
+            ),
+            (
+                "RegSetValueExA",
+                &REAL_REG_SET_VALUE_EX_A,
+                hook_reg_set_value_ex_a as *mut c_void,
+            ),
+            (
+                "RegSetKeyValueW",
+                &REAL_REG_SET_KEY_VALUE_W,
+                hook_reg_set_key_value_w as *mut c_void,
+            ),
+            (
+                "RegSetKeyValueA",
+                &REAL_REG_SET_KEY_VALUE_A,
+                hook_reg_set_key_value_a as *mut c_void,
+            ),
+            (
+                "RegSetValueW",
+                &REAL_REG_SET_VALUE_W,
+                hook_reg_set_value_w as *mut c_void,
+            ),
+            (
+                "RegSetValueA",
+                &REAL_REG_SET_VALUE_A,
+                hook_reg_set_value_a as *mut c_void,
+            ),
+            (
+                "RegDeleteValueA",
+                &REAL_REG_DELETE_VALUE_A,
+                hook_reg_delete_value_a as *mut c_void,
+            ),
+            (
+                "RegDeleteKeyValueW",
+                &REAL_REG_DELETE_KEY_VALUE_W,
+                hook_reg_delete_key_value_w as *mut c_void,
+            ),
+            (
+                "RegDeleteKeyValueA",
+                &REAL_REG_DELETE_KEY_VALUE_A,
+                hook_reg_delete_key_value_a as *mut c_void,
             ),
         ];
 

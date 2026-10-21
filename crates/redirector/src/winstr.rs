@@ -52,6 +52,33 @@ pub(crate) fn ansi_to_string(ptr: *const u8) -> String {
     }
 }
 
+/// Decodes the `bytes` an `...A` value call supplies, in the system ANSI code page.
+///
+/// # Why an explicit length
+/// Value data is counted, not terminated: a `REG_MULTI_SZ` payload holds NULs between its
+/// strings, and a `REG_SZ` payload may omit its terminator. Decoding the counted bytes keeps
+/// every NUL where the caller put it.
+pub(crate) fn ansi_bytes_to_wide(bytes: &[u8]) -> Vec<u16> {
+    use windows_sys::Win32::Globalization::{CP_ACP, MultiByteToWideChar};
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let length = i32::try_from(bytes.len()).expect("invariant: registry value data is below 2 GiB");
+    // SAFETY: both calls read exactly `length` bytes of the live slice and write into a buffer
+    // of the size the first call reported.
+    unsafe {
+        let needed = MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), length, std::ptr::null_mut(), 0);
+        assert!(
+            needed > 0,
+            "invariant: the system ANSI code page decodes any byte sequence"
+        );
+        let mut wide = vec![0u16; needed as usize];
+        let written = MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), length, wide.as_mut_ptr(), needed);
+        wide.truncate(written as usize);
+        wide
+    }
+}
+
 /// Encodes `s` as the NUL-terminated ANSI string an `...A` API returns. A character the code
 /// page lacks becomes its default character - the same conversion the system's own `...A`
 /// functions apply to their wide results.

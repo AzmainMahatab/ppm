@@ -22,6 +22,8 @@ use windows_sys::Win32::System::Registry::{
 
 use crate::support::{from_wide_ptr, to_wide};
 
+mod ansi;
+
 const PROBE_ROOT: &str = "Software\\PPMTestProbe";
 const REG_CREATED_NEW_KEY: u32 = 1;
 const REG_OPENED_EXISTING_KEY: u32 = 2;
@@ -34,6 +36,7 @@ pub(crate) fn run() -> Result<(), String> {
     delete_key_ex_does_not_reach_the_host()?;
     delete_tree_does_not_reach_the_host()?;
     enumeration_reflects_the_boundary()?;
+    ansi::run()?;
     // Runs last: it tombstones the whole probe subtree.
     delete_key_does_not_reach_the_host()?;
 
