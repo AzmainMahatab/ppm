@@ -105,6 +105,8 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
 | `ppm.exe update <app\|all> [--arch <x64\|arm64\|all>]` | Upgrades installed applications to the latest upstream release — the same cycle `install` runs. |
 | `ppm.exe run <app> [args...]` | Auto-detects host architecture and launches app with lowest-boundary virtualization. |
 | `ppm.exe list [--arch <x64\|arm64\|all>]` | Lists all configured apps and dynamic presence status across architectures. |
+| `ppm.exe uninstall <app> [--arch <x64\|arm64\|all>]` | Removes an installed application (all architectures by default), refusing while an installed application depends on it; removes its launcher once no copy remains. |
+| `ppm.exe clean` | Empties `.ppm/cache` and removes the staging/retired folders an interrupted install leaves beside an application. |
 | `ppm.exe link [app\|all]` | Generates prefix-free 1-click `.bat` root launchers for installed apps. |
 | `ppm.exe schema` | Regenerates JSON Schema (`apps.schema.json`) via `schemars`. |
 | `ppm.exe -v <command>` / `ppm.exe -q <command>` | Show debug messages / only warnings and errors on the console (given before the command). |

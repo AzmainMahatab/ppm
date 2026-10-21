@@ -14,12 +14,12 @@ const SEVENZ_SIGNATURE: &[u8] = &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 /// Both sit beside the destination rather than inside it, so they share its volume - which is
 /// what lets the payload be moved into place by rename instead of copied - and so a staging
 /// directory can never be mistaken for part of the payload it is feeding.
-struct SwapPaths {
-    staging: PathBuf,
-    retired: PathBuf,
+pub struct SwapPaths {
+    pub staging: PathBuf,
+    pub retired: PathBuf,
 }
 
-fn swap_paths_for(dest_dir: &Path) -> Result<SwapPaths> {
+pub fn swap_paths_for(dest_dir: &Path) -> Result<SwapPaths> {
     let parent = dest_dir.parent().with_context(|| {
         format!(
             "Install destination '{}' has no parent directory to stage beside",
@@ -39,7 +39,7 @@ fn swap_paths_for(dest_dir: &Path) -> Result<SwapPaths> {
 }
 
 /// Removes a directory tree, treating its absence as success.
-fn remove_tree_if_present(path: &Path) -> Result<()> {
+pub fn remove_tree_if_present(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

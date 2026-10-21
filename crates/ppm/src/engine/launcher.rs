@@ -27,10 +27,38 @@ fn launcher_script(app_id: &str) -> String {
     )
 }
 
+fn launcher_path(root: &Path, app_id: &str) -> std::path::PathBuf {
+    root.join(format!("{app_id}.bat"))
+}
+
+/// Removes `app_id`'s launcher, returning whether one was removed.
+///
+/// # Why only an exact match is removed
+/// The launcher lives in the root beside anything else the user keeps there. A `.bat` file of
+/// the same name that is not byte-for-byte what `ppm` writes is the user's, not ours, and is
+/// left untouched.
+pub fn remove_launcher(root: &Path, app_id: &str) -> Result<bool> {
+    let path = launcher_path(root, app_id);
+    let contents = match fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("Failed to read '{}'", path.display())),
+    };
+    if contents != launcher_script(app_id).as_bytes() {
+        tracing::warn!(
+            "Leaving '{}' in place: it is not a launcher ppm generated",
+            path.display()
+        );
+        return Ok(false);
+    }
+    fs::remove_file(&path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
+    Ok(true)
+}
+
 /// Writes one launcher and returns its file name.
 fn write_launcher(root: &Path, app_id: &str) -> Result<String> {
     let bat_filename = format!("{app_id}.bat");
-    let bat_path = root.join(&bat_filename);
+    let bat_path = launcher_path(root, app_id);
     fs::write(&bat_path, launcher_script(app_id))
         .with_context(|| format!("Failed to write launcher '{}'", bat_path.display()))?;
     Ok(bat_filename)
@@ -73,5 +101,21 @@ mod tests {
 
         let _ = fs::remove_file(&bat_path);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn only_a_launcher_ppm_generated_is_removed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        generate_single_launcher(root.path(), "mine").unwrap();
+        let user_script = root.path().join("theirs.bat");
+        fs::write(&user_script, b"@echo off\r\necho the user's own script\r\n").unwrap();
+
+        assert!(remove_launcher(root.path(), "mine").unwrap());
+        assert!(!root.path().join("mine.bat").exists());
+
+        assert!(!remove_launcher(root.path(), "theirs").unwrap());
+        assert!(user_script.exists(), "a same-named file ppm did not write is left alone");
+
+        assert!(!remove_launcher(root.path(), "absent").unwrap());
     }
 }

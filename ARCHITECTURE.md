@@ -219,6 +219,7 @@ crates/ppm/src/
     ├── downloader.rs               # HTTPS-only Downloader with Progress Reporting
     ├── extractor.rs                # Archive Extractor (NSIS-7z, 7z, Zip, Tar/gzip, CAB, MSI) & atomic swap-in
     ├── msi_layout.rs               # MSI Directory/Component/File/Media tables -> administrative-image paths
+    ├── removal.rs                  # uninstall (dependents-aware) and clean (cache, interrupted-install debris)
     └── sanitizer.rs                # Post-Install Cleanup
 ```
 

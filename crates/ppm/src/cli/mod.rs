@@ -112,6 +112,19 @@ pub(crate) enum Commands {
 
     /// Validate apps.json against the schema
     Validate,
+
+    /// Remove an installed application (and its launcher once no copy remains)
+    Uninstall {
+        /// Application identifier to remove
+        app: String,
+
+        /// Architecture to remove (x64, arm64, or all)
+        #[arg(short, long, default_value = "all")]
+        arch: ArchTarget,
+    },
+
+    /// Empty the download cache and remove debris left by interrupted installs
+    Clean,
 }
 
 /// Executes the parsed command against the resolved portable root and returns the process exit
@@ -127,6 +140,8 @@ pub(crate) fn execute(command: &Commands, root: &Path) -> anyhow::Result<i32> {
         Commands::List { arch } => commands::list::run(root, *arch),
         Commands::Schema => commands::schema::run(root),
         Commands::Validate => commands::validate::run(root),
+        Commands::Uninstall { app, arch } => commands::uninstall::run(root, app, *arch),
+        Commands::Clean => commands::clean::run(root),
     }?;
     Ok(0)
 }
