@@ -33,6 +33,70 @@ pub fn confined(raw: &str) -> Result<PathBuf> {
     Ok(confined)
 }
 
+/// A manifest path that has already been [`confined`]: it can only exist in that form, so code
+/// joining it onto a directory needs no check of its own.
+///
+/// It keeps the text the manifest gave, which is what messages show and what serializes back.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RelativePath {
+    raw: String,
+    path: PathBuf,
+}
+
+impl RelativePath {
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl TryFrom<String> for RelativePath {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: String) -> Result<Self> {
+        let path = confined(&raw)?;
+        Ok(RelativePath { raw, path })
+    }
+}
+
+impl From<RelativePath> for String {
+    fn from(path: RelativePath) -> String {
+        path.raw
+    }
+}
+
+impl AsRef<Path> for RelativePath {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for RelativePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+/// In the published schema a relative path is a plain string, exactly as it was before the type
+/// existed; the confinement rule is enforced at load and documented in SPEC section 2.1.
+impl schemars::JsonSchema for RelativePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        String::schema_name()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        String::json_schema(generator)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

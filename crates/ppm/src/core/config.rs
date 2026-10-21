@@ -1,5 +1,5 @@
 use crate::core::arch::CpuArch;
-use crate::core::relpath::confined;
+use crate::core::relpath::RelativePath;
 use anyhow::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -57,8 +57,8 @@ pub struct AppDefinition {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
-    pub target_dir: String,
-    pub executable: String,
+    pub target_dir: RelativePath,
+    pub executable: RelativePath,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_arch: Option<Vec<CpuArch>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,18 +202,18 @@ pub struct PackageConfig {
         alias = "subpath",
         skip_serializing_if = "Option::is_none"
     )]
-    pub extract_subpath: Option<String>,
+    pub extract_subpath: Option<RelativePath>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PostInstallConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remove_files: Option<Vec<String>>,
+    pub remove_files: Option<Vec<RelativePath>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remove_dirs: Option<Vec<String>>,
+    pub remove_dirs: Option<Vec<RelativePath>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub create_dirs: Option<Vec<String>>,
+    pub create_dirs: Option<Vec<RelativePath>>,
 }
 
 impl AppManifests {
@@ -228,21 +228,13 @@ impl AppManifests {
         Ok(manifests)
     }
 
-    /// Checks what the type model alone cannot: that every app id is safe as a launcher name, that
-    /// every path a field contributes stays inside the directory it is joined onto, and that every
-    /// dependency names a defined application.
+    /// Checks what the type model alone cannot: that every app id is safe as a launcher name and
+    /// that every dependency names a defined application. Path fields need no check here: a
+    /// [`RelativePath`] that leaves its base directory fails to deserialize at all.
     pub fn check_references(&self) -> anyhow::Result<()> {
         for (app_id, app) in &self.apps {
             if !is_valid_app_id(app_id) {
                 anyhow::bail!("App id '{app_id}' may only use ASCII letters, digits, '.', '_' and '-'");
-            }
-
-            let paths = [&app.target_dir, &app.executable]
-                .into_iter()
-                .chain(app.package.extract_subpath.as_ref())
-                .chain(app.post_install.iter().flat_map(PostInstallConfig::paths));
-            for raw in paths {
-                confined(raw).with_context(|| format!("App '{app_id}'"))?;
             }
 
             for dependency in app.dependencies.iter().flatten() {
@@ -268,16 +260,6 @@ fn is_valid_app_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-impl PostInstallConfig {
-    /// Every installation-relative path these rules name.
-    fn paths(&self) -> impl Iterator<Item = &String> {
-        [&self.remove_files, &self.remove_dirs, &self.create_dirs]
-            .into_iter()
-            .flatten()
-            .flatten()
-    }
 }
 
 #[cfg(test)]
@@ -314,36 +296,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn escaping_paths_and_undefined_dependencies_are_rejected() {
-        let manifest = |app: serde_json::Value| -> AppManifests {
-            let mut def = serde_json::json!({
-                "name": "A",
-                "target_dir": "A",
-                "executable": "a.exe",
-                "version_check": {"type": "github_release", "repo": "o/r"},
-                "package": {"type": "zip"}
-            });
-            def.as_object_mut()
-                .expect("invariant: literal object")
-                .extend(app.as_object().expect("invariant: literal object").clone());
-            serde_json::from_value(serde_json::json!({ "apps": { "a": def } }))
-                .expect("invariant: shape is schema-valid")
-        };
+    /// A manifest app built from a valid base with `overrides` merged over it.
+    fn app_manifest(overrides: serde_json::Value) -> serde_json::Value {
+        let mut def = serde_json::json!({
+            "name": "A",
+            "target_dir": "A",
+            "executable": "a.exe",
+            "version_check": {"type": "github_release", "repo": "o/r"},
+            "package": {"type": "zip"}
+        });
+        def.as_object_mut()
+            .expect("invariant: literal object")
+            .extend(overrides.as_object().expect("invariant: literal object").clone());
+        serde_json::json!({ "apps": { "a": def } })
+    }
 
-        assert!(manifest(serde_json::json!({})).check_references().is_ok());
+    /// Regression: manifest paths were joined unchecked, so `..` or an absolute path wrote or
+    /// deleted outside the installation. Every such field is now a `RelativePath`, which cannot
+    /// be deserialized from an escaping path at all.
+    #[test]
+    fn a_manifest_path_that_escapes_its_base_does_not_load() {
         for broken in [
             serde_json::json!({"target_dir": "../Outside"}),
             serde_json::json!({"executable": r"C:\Windows\notepad.exe"}),
             serde_json::json!({"package": {"type": "zip", "extract_subpath": "../x"}}),
             serde_json::json!({"post_install": {"remove_dirs": [r"..\.."]}}),
-            serde_json::json!({"dependencies": ["ghost"]}),
+            serde_json::json!({"post_install": {"remove_files": [r"\\server\share\x"]}}),
         ] {
+            let error = serde_json::from_value::<AppManifests>(app_manifest(broken.clone()))
+                .expect_err("an escaping path must not deserialize");
             assert!(
-                manifest(broken.clone()).check_references().is_err(),
-                "{broken} must be rejected"
+                error.to_string().contains("must stay inside"),
+                "{broken}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn an_undefined_dependency_is_rejected() {
+        let load = |overrides| -> AppManifests {
+            serde_json::from_value(app_manifest(overrides)).expect("invariant: shape is schema-valid")
+        };
+        assert!(load(serde_json::json!({})).check_references().is_ok());
+        assert!(
+            load(serde_json::json!({"dependencies": ["ghost"]}))
+                .check_references()
+                .is_err()
+        );
     }
 
     /// An app id is written into a batch script; one carrying cmd.exe syntax would run commands.
@@ -409,7 +408,7 @@ mod tests {
 
         let demo = &parsed.apps["demo-app"];
         assert_eq!(demo.name, "Demo Application");
-        assert_eq!(demo.target_dir, "DemoApp");
+        assert_eq!(demo.target_dir.as_str(), "DemoApp");
         let exe = demo.executable_for_arch(Path::new("C:\\Root"), crate::core::arch::CpuArch::X64);
         assert_eq!(exe, PathBuf::from("C:\\Root\\Apps\\x64\\DemoApp\\demo.exe"));
 

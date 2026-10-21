@@ -463,6 +463,7 @@ mod tests {
     use crate::core::config::{
         AppDefinition, GitHubReleaseCheck, PackageConfig, PackageKind, VersionCheckConfig,
     };
+    use crate::core::relpath::RelativePath;
 
     #[test]
     fn collect_global_env_gathers_all_entries_and_expands_templates() {
@@ -475,8 +476,10 @@ mod tests {
                         name: "WebView2".to_string(),
                         description: None,
                         homepage: None,
-                        target_dir: "WebView2".to_string(),
-                        executable: "msedgewebview2.exe".to_string(),
+                        target_dir: RelativePath::try_from("WebView2".to_string())
+                            .expect("invariant: literal is relative"),
+                        executable: RelativePath::try_from("msedgewebview2.exe".to_string())
+                            .expect("invariant: literal is relative"),
                         supported_arch: None,
                         default_args: None,
                         dependencies: None,
@@ -502,8 +505,10 @@ mod tests {
                         name: "Plain".to_string(),
                         description: None,
                         homepage: None,
-                        target_dir: "Plain".to_string(),
-                        executable: "plain.exe".to_string(),
+                        target_dir: RelativePath::try_from("Plain".to_string())
+                            .expect("invariant: literal is relative"),
+                        executable: RelativePath::try_from("plain.exe".to_string())
+                            .expect("invariant: literal is relative"),
                         supported_arch: None,
                         default_args: None,
                         dependencies: None,

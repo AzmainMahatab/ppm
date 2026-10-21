@@ -1,8 +1,13 @@
 use ppm::core::config::{PackageConfig, PackageKind, PostInstallConfig};
+use ppm::core::relpath::RelativePath;
 use ppm::package::extractor::extract_package;
 use ppm::package::sanitizer::sanitize_package;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+fn relative(path: &str) -> RelativePath {
+    RelativePath::try_from(path.to_string()).expect("invariant: literal is relative")
+}
 
 fn find_fixture_path(name: &str) -> PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -283,8 +288,8 @@ fn test_post_install_sanitization_rules() {
     fs::write(target_dir.join("unwanted_dir").join("trash.tmp"), b"temp").unwrap();
 
     let post_install = PostInstallConfig {
-        remove_files: Some(vec!["unwanted.log".to_string()]),
-        remove_dirs: Some(vec!["unwanted_dir".to_string()]),
+        remove_files: Some(vec![relative("unwanted.log")]),
+        remove_dirs: Some(vec![relative("unwanted_dir")]),
         create_dirs: None,
     };
 

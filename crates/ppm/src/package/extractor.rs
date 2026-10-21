@@ -574,12 +574,12 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
     // `binary` has no archive to descend into, so a subpath cannot apply to it.
     let extract_subpath = match package_config.kind {
         PackageKind::Binary => None,
-        _ => package_config.extract_subpath.as_deref(),
+        _ => package_config.extract_subpath.as_ref(),
     };
 
     let source_root = match extract_subpath {
         Some(sub) => {
-            let declared = stage_dir.join(confined(sub)?);
+            let declared = stage_dir.join(sub);
             if !declared.is_dir() {
                 bail!(
                     "extract_subpath '{sub}' does not exist in the extracted payload of '{}'; refusing to install the archive root instead of the declared subdirectory",
