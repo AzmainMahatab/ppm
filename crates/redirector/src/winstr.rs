@@ -63,7 +63,8 @@ pub(crate) fn ansi_bytes_to_wide(bytes: &[u8]) -> Vec<u16> {
     if bytes.is_empty() {
         return Vec::new();
     }
-    let length = i32::try_from(bytes.len()).expect("invariant: registry value data is below 2 GiB");
+    let length = i32::try_from(bytes.len())
+        .expect("invariant: callers bound ANSI text payloads to i32::MAX bytes before converting");
     // SAFETY: both calls read exactly `length` bytes of the live slice and write into a buffer
     // of the size the first call reported.
     unsafe {
@@ -92,7 +93,9 @@ pub(crate) fn wide_bytes_to_ansi(bytes: &[u8]) -> Vec<u8> {
     if wide.is_empty() {
         return Vec::new();
     }
-    let length = i32::try_from(wide.len()).expect("invariant: registry value data is below 2 GiB");
+    // Why this holds: a stored payload is at most u32::MAX bytes (the API's cbData), which is
+    // at most i32::MAX UTF-16 units.
+    let length = i32::try_from(wide.len()).expect("invariant: a u32-sized payload is at most i32::MAX units");
     // SAFETY: both calls read exactly `length` units of the live buffer and write into a buffer
     // of the size the first call reported.
     unsafe {

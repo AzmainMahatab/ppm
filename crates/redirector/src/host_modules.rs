@@ -10,21 +10,20 @@
 //!
 //! The statics below exist for their relocations: each references one function of a module the
 //! engine hooks, which makes the linker record that module in redirector.dll's import table.
+//! `loaded` reads them from live code; that read, not `#[used]`, is what keeps them through
+//! `/OPT:REF` (`#[used]` alone was verified to be discarded).
 
 use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::core::{BOOL, GUID, HRESULT, PCWSTR, PWSTR};
 
-#[used]
 static ADVAPI32_IMPORT: unsafe extern "system" fn(*const c_void) =
     windows_sys::Win32::Security::Credentials::CredFree;
 
-#[used]
 static SHELL32_IMPORT: unsafe extern "system" fn(*const GUID, u32, HANDLE, *mut PWSTR) -> HRESULT =
     windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
 
-#[used]
 static USERENV_IMPORT: unsafe extern "system" fn(HANDLE, PWSTR, *mut u32) -> BOOL =
     windows_sys::Win32::UI::Shell::GetUserProfileDirectoryW;
 

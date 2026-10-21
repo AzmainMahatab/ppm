@@ -67,6 +67,7 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 ## Side quests
 
 - [ ] S1 Badge monitor polls every 500 ms — `crates/redirector/src/shell/badge.rs` (`start_taskbar_monitor`) re-enumerates windows on a timer; a window event hook (create/show/hide) would end the polling. Seen while assessing R17 (ADR-008).
+- [ ] S2 Key creation reaches the host registry — after the e2e suites, the real `HKCU\Software\PPMTestProbe` holds 9 empty keys (`Tree\Child`, `Enumerated\Kept`, `DeleteKeyEx`, `AnsiEntryPoints\legacy_created`, ...) and no values: values are virtualized, but `RegCreateKeyEx*` creates the key on the host. Predates the ANSI work (the original suite's keys are there too). Seen 2026-10-21 reviewing `1264f02`.
 
 ## Library candidates
 

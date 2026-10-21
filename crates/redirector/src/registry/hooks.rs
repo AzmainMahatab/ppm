@@ -117,17 +117,27 @@ unsafe fn value_bytes<'a>(data: *const u8, cb: u32) -> &'a [u8] {
 /// Converts an `...A` value payload to its stored form. Text types are decoded from the ANSI
 /// code page into UTF-16, as the system does; other types are stored as the caller wrote them.
 ///
+/// Returns `None` for a text payload longer than the code-page conversion can take (`i32::MAX`
+/// bytes); the caller refuses the write with `ERROR_INVALID_PARAMETER`.
+///
 /// # Why
 /// The overlay keeps the wide representation the `...W` entry points write, so an ANSI write
-/// read back through a wide read must produce the same bytes.
-fn ansi_value_bytes(dw_type: u32, data: &[u8]) -> Vec<u8> {
+/// read back through a wide read must produce the same bytes. The length bound is checked here,
+/// at the caller's input, so an oversized `cbData` is reported to the application instead of
+/// failing an invariant inside its process.
+fn ansi_value_bytes(dw_type: u32, data: &[u8]) -> Option<Vec<u8>> {
     if !matches!(dw_type, REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ) {
-        return data.to_vec();
+        return Some(data.to_vec());
     }
-    ansi_bytes_to_wide(data)
-        .iter()
-        .flat_map(|unit| unit.to_le_bytes())
-        .collect()
+    if i32::try_from(data.len()).is_err() {
+        return None;
+    }
+    Some(
+        ansi_bytes_to_wide(data)
+            .iter()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect(),
+    )
 }
 
 /// Refuses a mutating registry call whose target key the engine cannot name.
@@ -1312,13 +1322,16 @@ unsafe extern "system" fn hook_reg_set_value_ex_a(
         {
             // SAFETY: RegSetValueExA supplies `cb_data` bytes at `lp_data`.
             let data = unsafe { value_bytes(lp_data, cb_data) };
+            let Some(stored) = ansi_value_bytes(dw_type, data) else {
+                return ERROR_INVALID_PARAMETER as i32;
+            };
             set_value_virtually(
                 "RegSetValueExA",
                 hkey,
                 "",
                 &ansi_to_string(lp_value_name),
                 dw_type,
-                &ansi_value_bytes(dw_type, data),
+                &stored,
             )
         }
     )
@@ -1368,13 +1381,16 @@ unsafe extern "system" fn hook_reg_set_key_value_a(
         {
             // SAFETY: RegSetKeyValueA supplies `cb_data` bytes at `lp_data`.
             let data = unsafe { value_bytes(lp_data.cast(), cb_data) };
+            let Some(stored) = ansi_value_bytes(dw_type, data) else {
+                return ERROR_INVALID_PARAMETER as i32;
+            };
             set_value_virtually(
                 "RegSetKeyValueA",
                 hkey,
                 &ansi_to_string(lp_sub_key),
                 &ansi_to_string(lp_value_name),
                 dw_type,
-                &ansi_value_bytes(dw_type, data),
+                &stored,
             )
         }
     )
@@ -1422,13 +1438,16 @@ unsafe extern "system" fn hook_reg_set_value_a(
         {
             // SAFETY: RegSetValueA supplies `cb_data` bytes at `lp_data`.
             let data = unsafe { value_bytes(lp_data, cb_data) };
+            let Some(stored) = ansi_value_bytes(dw_type, data) else {
+                return ERROR_INVALID_PARAMETER as i32;
+            };
             set_value_virtually(
                 "RegSetValueA",
                 hkey,
                 &ansi_to_string(lp_sub_key),
                 "",
                 dw_type,
-                &ansi_value_bytes(dw_type, data),
+                &stored,
             )
         }
     )

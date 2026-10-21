@@ -182,6 +182,12 @@ unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRES
 pub fn init_hooks() {
     unsafe {
         let shell32 = crate::host_modules::loaded(windows_sys::core::w!("shell32.dll"));
+        if shell32.is_null() {
+            tracing::error!(
+                "shell32.dll is not loaded although it is a static import; process identity hooks skipped"
+            );
+            return;
+        }
         init_app_user_model_id(shell32);
         hook_export(
             shell32,
