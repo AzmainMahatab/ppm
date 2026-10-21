@@ -37,7 +37,7 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 - [x] R14 Non-ASCII deployment roots — `DetourCreateProcessWithDllExW` takes an ANSI DLL path but receives UTF-8 bytes; done when the e2e probe passes from a root path containing non-ASCII characters. Verified 2026-10-21: e2e suite passes under `Portable Café`; code-page encoding unit-tested against Windows-1252 literals.
 - [ ] R15 ANSI and legacy registry entry points — `Reg*A`, `RegOpenKeyW`, `RegSetValueW`, `RegQueryValueW` and friends are covered (hooked or routed through the wide path) with probe assertions; ARCHITECTURE's "known gap" paragraph removed.
 - [x] R16 ANSI credential entry points — `CredReadA`, `CredWriteA`, `CredDeleteA`, `CredEnumerateA` are clean-roomed like their wide counterparts, with probe coverage. Verified 2026-10-21: the probe proved `CredWriteA` wrote to the real host store (its cleanup removed the entry; `cmdkey` confirms none left); with the hooks, crossed A/W write-read-enumerate-delete passes in the x64 and x86 probes.
-- [ ] R17 Engine work under the loader lock — logger start-up, file IO and hook installation run inside `DLL_PROCESS_ATTACH`; done when the risk is assessed in an ADR and either deferred safely or justified.
+- [x] R17 Engine work under the loader lock — logger start-up, file IO and hook installation run inside `DLL_PROCESS_ATTACH`; done when the risk is assessed in an ADR and either deferred safely or justified. Verified 2026-10-21: `advapi32`, `shell32` and `userenv` are static imports (`dumpbin /dependents` lists all three in the x64 and x86 builds); `cargo test --workspace` passes 169 tests including the live e2e probes; assessment in ADR-008.
 
 ## Package manager
 
@@ -65,6 +65,8 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 - [ ] R32 arm64 CI — tests run on a Windows arm64 runner, not only the cross-compiled release build.
 
 ## Side quests
+
+- [ ] S1 Badge monitor polls every 500 ms — `crates/redirector/src/shell/badge.rs` (`start_taskbar_monitor`) re-enumerates windows on a timer; a window event hook (create/show/hide) would end the polling. Seen while assessing R17 (ADR-008).
 
 ## Library candidates
 

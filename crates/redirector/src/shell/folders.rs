@@ -236,38 +236,34 @@ unsafe extern "system" fn hook_get_user_profile_directory_w(
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    let shell32 = crate::host_modules::loaded(windows_sys::core::w!("shell32.dll"));
+    let userenv = crate::host_modules::loaded(windows_sys::core::w!("userenv.dll"));
 
-    unsafe {
-        let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
-        let userenv = LoadLibraryW(windows_sys::core::w!("userenv.dll"));
+    if shell32.is_null() {
+        tracing::warn!("shell32.dll unavailable; shell-path hooks skipped");
+    } else {
+        hook_export(
+            shell32,
+            "SHGetKnownFolderPath",
+            &REAL_SH_GET_KNOWN_FOLDER_PATH,
+            hook_sh_get_known_folder_path as *mut c_void,
+        );
+        hook_export(
+            shell32,
+            "SHGetFolderPathW",
+            &REAL_SH_GET_FOLDER_PATH_W,
+            hook_sh_get_folder_path_w as *mut c_void,
+        );
+    }
 
-        if shell32.is_null() {
-            tracing::warn!("shell32.dll unavailable; shell-path hooks skipped");
-        } else {
-            hook_export(
-                shell32,
-                "SHGetKnownFolderPath",
-                &REAL_SH_GET_KNOWN_FOLDER_PATH,
-                hook_sh_get_known_folder_path as *mut c_void,
-            );
-            hook_export(
-                shell32,
-                "SHGetFolderPathW",
-                &REAL_SH_GET_FOLDER_PATH_W,
-                hook_sh_get_folder_path_w as *mut c_void,
-            );
-        }
-
-        if userenv.is_null() {
-            tracing::warn!("userenv.dll unavailable; profile-path hook skipped");
-        } else {
-            hook_export(
-                userenv,
-                "GetUserProfileDirectoryW",
-                &REAL_GET_USER_PROFILE_DIRECTORY_W,
-                hook_get_user_profile_directory_w as *mut c_void,
-            );
-        }
+    if userenv.is_null() {
+        tracing::warn!("userenv.dll unavailable; profile-path hook skipped");
+    } else {
+        hook_export(
+            userenv,
+            "GetUserProfileDirectoryW",
+            &REAL_GET_USER_PROFILE_DIRECTORY_W,
+            hook_get_user_profile_directory_w as *mut c_void,
+        );
     }
 }

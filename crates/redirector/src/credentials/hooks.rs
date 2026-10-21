@@ -623,52 +623,48 @@ unsafe extern "system" fn hook_cred_free(buffer: *const c_void) {
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    let advapi32 = crate::host_modules::loaded(windows_sys::core::w!("advapi32.dll"));
+    if advapi32.is_null() {
+        tracing::warn!("advapi32.dll unavailable; credential vault hooks skipped");
+        return;
+    }
 
-    unsafe {
-        let advapi32 = LoadLibraryW(windows_sys::core::w!("advapi32.dll"));
-        if advapi32.is_null() {
-            tracing::warn!("advapi32.dll unavailable; credential vault hooks skipped");
-            return;
-        }
+    // Intention: One row per intercepted credential API.
+    // Why: The vault boundary is only as good as its least-covered entry point -
+    //      CredEnumerateW forwarded the real user's whole credential list while the read
+    //      path was carefully clean-roomed, and the ANSI family wrote to the host store
+    //      while the wide one was vaulted. A table keeps the covered surface reviewable.
+    let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 9] = [
+        ("CredReadW", &REAL_CRED_READ_W, hook_cred_read_w as *mut c_void),
+        ("CredWriteW", &REAL_CRED_WRITE_W, hook_cred_write_w as *mut c_void),
+        (
+            "CredDeleteW",
+            &REAL_CRED_DELETE_W,
+            hook_cred_delete_w as *mut c_void,
+        ),
+        (
+            "CredEnumerateW",
+            &REAL_CRED_ENUMERATE_W,
+            hook_cred_enumerate_w as *mut c_void,
+        ),
+        ("CredReadA", &REAL_CRED_READ_A, hook_cred_read_a as *mut c_void),
+        ("CredWriteA", &REAL_CRED_WRITE_A, hook_cred_write_a as *mut c_void),
+        (
+            "CredDeleteA",
+            &REAL_CRED_DELETE_A,
+            hook_cred_delete_a as *mut c_void,
+        ),
+        (
+            "CredEnumerateA",
+            &REAL_CRED_ENUMERATE_A,
+            hook_cred_enumerate_a as *mut c_void,
+        ),
+        ("CredFree", &REAL_CRED_FREE, hook_cred_free as *mut c_void),
+    ];
 
-        // Intention: One row per intercepted credential API.
-        // Why: The vault boundary is only as good as its least-covered entry point -
-        //      CredEnumerateW forwarded the real user's whole credential list while the read
-        //      path was carefully clean-roomed, and the ANSI family wrote to the host store
-        //      while the wide one was vaulted. A table keeps the covered surface reviewable.
-        let hooks: [(&str, &AtomicPtr<c_void>, *mut c_void); 9] = [
-            ("CredReadW", &REAL_CRED_READ_W, hook_cred_read_w as *mut c_void),
-            ("CredWriteW", &REAL_CRED_WRITE_W, hook_cred_write_w as *mut c_void),
-            (
-                "CredDeleteW",
-                &REAL_CRED_DELETE_W,
-                hook_cred_delete_w as *mut c_void,
-            ),
-            (
-                "CredEnumerateW",
-                &REAL_CRED_ENUMERATE_W,
-                hook_cred_enumerate_w as *mut c_void,
-            ),
-            ("CredReadA", &REAL_CRED_READ_A, hook_cred_read_a as *mut c_void),
-            ("CredWriteA", &REAL_CRED_WRITE_A, hook_cred_write_a as *mut c_void),
-            (
-                "CredDeleteA",
-                &REAL_CRED_DELETE_A,
-                hook_cred_delete_a as *mut c_void,
-            ),
-            (
-                "CredEnumerateA",
-                &REAL_CRED_ENUMERATE_A,
-                hook_cred_enumerate_a as *mut c_void,
-            ),
-            ("CredFree", &REAL_CRED_FREE, hook_cred_free as *mut c_void),
-        ];
-
-        for (api, slot, hook) in hooks {
-            if !hook_export(advapi32, api, slot, hook) {
-                tracing::warn!("Hook {api}: not attached; credential vault inactive for this API");
-            }
+    for (api, slot, hook) in hooks {
+        if !hook_export(advapi32, api, slot, hook) {
+            tracing::warn!("Hook {api}: not attached; credential vault inactive for this API");
         }
     }
 }

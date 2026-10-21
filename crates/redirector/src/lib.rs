@@ -1,5 +1,6 @@
 pub mod credentials;
 pub mod detour;
+pub(crate) mod host_modules;
 pub mod paths;
 pub(crate) mod persist;
 pub mod process;

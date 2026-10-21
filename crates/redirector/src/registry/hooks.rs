@@ -1219,11 +1219,11 @@ unsafe fn hook_on_first_export(
 }
 
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
     unsafe {
         let kernelbase = GetModuleHandleW(windows_sys::core::w!("kernelbase.dll"));
-        let advapi32 = LoadLibraryW(windows_sys::core::w!("advapi32.dll"));
+        let advapi32 = crate::host_modules::loaded(windows_sys::core::w!("advapi32.dll"));
         let modules = [kernelbase, advapi32];
 
         // Intention: One table entry per intercepted registry API.

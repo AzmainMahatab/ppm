@@ -180,10 +180,8 @@ unsafe extern "system" fn hook_set_app_user_model_id(app_id: *const u16) -> HRES
 /// can exist), then the interception guard so app-initiated identity changes stay in sync
 /// with the isolated namespace instead of clobbering it.
 pub fn init_hooks() {
-    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
-
     unsafe {
-        let shell32 = LoadLibraryW(windows_sys::core::w!("shell32.dll"));
+        let shell32 = crate::host_modules::loaded(windows_sys::core::w!("shell32.dll"));
         init_app_user_model_id(shell32);
         hook_export(
             shell32,
