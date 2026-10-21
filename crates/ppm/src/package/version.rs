@@ -2,7 +2,7 @@ use crate::core::arch::CpuArch;
 use crate::core::config::{AppDefinition, VersionCheckConfig};
 use crate::package::http;
 use crate::package::pe_info::{get_electron_package_version, get_pe_product_version};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
 use serde_json::Value;
 use std::path::Path;
@@ -102,7 +102,8 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
             let response = http::metadata_client()?.get(&manifest_url).send()?;
             let text = response.text()?;
 
-            let yaml: serde_yml::Value = serde_yml::from_str(&text)?;
+            let yaml: Value = serde_saphyr::from_str(&text)
+                .with_context(|| format!("Electron update manifest '{manifest_url}' is not valid YAML"))?;
 
             let key_name = version_key.as_deref().unwrap_or("version");
             let version_val = yaml
@@ -116,7 +117,7 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
                     .resolve(arch)
                     .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
                 expand_release_template(&resolved_tpl, &version_val, arch)
-            } else if let Some(files) = yaml.get("files").and_then(|f| f.as_sequence()) {
+            } else if let Some(files) = yaml.get("files").and_then(|f| f.as_array()) {
                 let first_file = files
                     .first()
                     .and_then(|f| f.get("url"))

@@ -1,0 +1,43 @@
+# cargo-deny policy: `cargo deny check` (CI runs it on every push and pull request).
+
+[graph]
+# Why: ppm only builds for Windows; dependencies that exist only for other platforms never ship
+#      and would otherwise drag their licences and advisories into the report.
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+all-features = false
+
+[advisories]
+# Every RustSec advisory - vulnerability, unsound or unmaintained - fails the check; an exception
+# goes in `ignore` with the advisory id and the reason it does not apply.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Why: permissive licences only, so the MPL-2.0 binary can embed every dependency without
+#      imposing copyleft terms beyond its own. A new licence needs a deliberate decision here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace members depend on each other by path, which cargo-deny counts as a wildcard.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

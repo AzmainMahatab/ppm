@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "Lightweight user-mode Windows virtualization engine and multi-architecture portable package manager"
 readme = "../../README.md"
@@ -28,7 +29,6 @@ anyhow.workspace = true
 cab.workspace = true
 clap = { workspace = true, features = ["derive"] }
 comfy-table.workspace = true
-hex.workspace = true
 indicatif.workspace = true
 msi.workspace = true
 regex.workspace = true
@@ -36,8 +36,8 @@ reqwest = { workspace = true, features = ["blocking", "json"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yml.workspace = true
-sevenz-rust.workspace = true
+serde-saphyr.workspace = true
+sevenz-rust2 = { workspace = true, features = ["util", "bzip2", "ppmd"] }
 tempfile.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

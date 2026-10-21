@@ -45,7 +45,8 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 - [x] R19 Download robustness — write to `.part` and rename on completion, verify `Content-Length`, bound mid-transfer stalls, and validate the remote version string before it becomes part of a cache file name. Verified 2026-10-21: downloader and version unit tests, live `ppm check` across all three release strategies.
 - [x] R20 CAB failure context — when `expand.exe` fails and the pure-Rust fallback also fails, the error carries both causes instead of dropping the first. Verified 2026-10-21 by diff review and the CAB fixture and live WebView2 install; `expand.exe` output is now captured instead of flooding the console.
 - [ ] R21 Decide `tar` — implement a tar(.gz) extractor or remove `PackageKind::Tar` from the model and schema.
-- [ ] R22 Replace `serde_yml` — upstream is archived and flagged by RustSec; move to a maintained YAML parser after checking it with `cargo deny`.
+- [x] R22 Replace `serde_yml` — upstream is archived and flagged by RustSec; move to a maintained YAML parser after checking it with `cargo deny`. Done with `serde-saphyr`; verified 2026-10-21 by `cargo deny check advisories` and a live `ppm check` of the Electron manifest.
+- [x] R33 Replace `sevenz-rust` — RUSTSEC-2026-0245 (path traversal in `decompress_impl`, arbitrary file write) on downloaded NSIS payloads, and unmaintained (RUSTSEC-2026-0246). Done with `sevenz-rust2`, decoders only; verified 2026-10-21 by the LZMA2 fixture and a live NSIS install of Antigravity.
 - [ ] R23 `ppm uninstall <app>` and `ppm clean` — remove an installation and its launcher, and prune `.ppm/cache`.
 - [ ] R24 Decide whether `update` stays — it runs the same cycle as `install` without `--force`; keep one command or give `update` distinct behaviour (only touch installed apps).
 - [ ] R25 Launchers that behave like the app — `.bat` launchers use `start`, so the exit code is lost and console apps detach; launchers for uninstalled apps are never removed. Done when exit codes propagate and stale launchers are cleaned.
@@ -60,7 +61,7 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 ## Verification and supply chain
 
 - [ ] R30 End-to-end install test — a local HTTPS test server (e.g. WireMock) serves a release, and the test drives check → download → extract → swap-in → launcher generation.
-- [ ] R31 Supply-chain gate — `cargo deny` (advisories, licences, duplicate versions) runs in CI.
+- [~] R31 Supply-chain gate — `cargo deny` (advisories, licences, duplicate versions) runs in CI. `deny.toml` and the CI job exist and `cargo deny check` passes locally; done once the job is green on GitHub (after R10).
 - [ ] R32 arm64 CI — tests run on a Windows arm64 runner, not only the cross-compiled release build.
 
 ## Side quests

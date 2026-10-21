@@ -23,6 +23,26 @@ jobs:
       - name: Verify Formatting
         run: cargo fmt --all --check
 
+  supply-chain:
+    name: Advisories, Licences & Sources
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # cargo-deny reads the dependency graph through `cargo metadata`, which must run on the
+      # pinned nightly: stable cargo rejects the `bindeps` artifact dependencies.
+      - name: Install Pinned Rust Toolchain
+        run: rustup toolchain install
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check Dependencies (deny.toml)
+        run: cargo deny check
+
   build:
     name: Lint & Test Suite
     runs-on: windows-latest

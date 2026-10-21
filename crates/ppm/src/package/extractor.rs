@@ -162,27 +162,28 @@ pub fn extract_7z_stream(archive_path: &Path, offset: u64, dest_dir: &Path) -> R
     let mut file = File::open(archive_path)?;
     file.seek(SeekFrom::Start(offset))?;
 
-    let temp_7z = dest_dir.join("__temp_payload.7z");
-    let mut temp_file = File::create(&temp_7z)?;
+    // Why beside `dest_dir` rather than inside it: the payload extracts into `dest_dir`, and the
+    // carved-out archive must neither land in it nor outlive the extraction.
+    let scratch_dir = dest_dir.parent().with_context(|| {
+        format!(
+            "Extraction target '{}' has no parent directory",
+            dest_dir.display()
+        )
+    })?;
+    let mut payload = tempfile::Builder::new()
+        .suffix(".7z")
+        .tempfile_in(scratch_dir)
+        .with_context(|| {
+            format!(
+                "Failed to create a scratch archive in '{}'",
+                scratch_dir.display()
+            )
+        })?;
+    std::io::copy(&mut file, &mut payload)
+        .context("Failed to carve the 7-Zip payload out of the installer")?;
 
-    std::io::copy(&mut file, &mut temp_file)?;
-    drop(temp_file);
-
-    let res = sevenz_rust::decompress_file(&temp_7z, dest_dir);
-    if let Err(error) = fs::remove_file(&temp_7z) {
-        eprintln!(
-            "Warning: failed to remove temporary archive '{}': {error}",
-            temp_7z.display()
-        );
-    }
-    if let Err(e) = res {
-        bail!(
-            "7-Zip decompression failed for '{}': {}",
-            archive_path.display(),
-            e
-        );
-    }
-    Ok(())
+    sevenz_rust2::decompress_file(payload.path(), dest_dir)
+        .with_context(|| format!("7-Zip decompression failed for '{}'", archive_path.display()))
 }
 
 pub fn extract_zip(archive_path: &Path, dest_dir: &Path) -> Result<()> {
@@ -485,13 +486,8 @@ pub fn extract_package(archive_path: &Path, package_config: &PackageConfig, dest
             extract_7z_stream(archive_path, offset, &stage_dir)?;
         }
         PackageKind::SevenZ => {
-            if let Err(e) = sevenz_rust::decompress_file(archive_path, &stage_dir) {
-                bail!(
-                    "7-Zip decompression failed for '{}': {}",
-                    archive_path.display(),
-                    e
-                );
-            }
+            sevenz_rust2::decompress_file(archive_path, &stage_dir)
+                .with_context(|| format!("7-Zip decompression failed for '{}'", archive_path.display()))?;
         }
         PackageKind::Zip => extract_zip(archive_path, &stage_dir)?,
         PackageKind::Cab => extract_cab(archive_path, &stage_dir)?,

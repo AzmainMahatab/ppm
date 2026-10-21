@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Lowest-boundary Win32/NT native system call detours and Copy-on-Write virtualization library"
 keywords = [
     "virtualization",
