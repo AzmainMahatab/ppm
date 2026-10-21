@@ -34,6 +34,8 @@ pub(super) fn run() -> Result<(), String> {
         ansi_reads_see_the_overlay()?;
         ansi_enumerations_list_the_overlay()?;
         legacy_handles_and_info_see_the_overlay(&journal)?;
+        // Last: it adds values under the root, which the info check above counts exactly.
+        non_ascii_text_crosses_the_code_page()?;
     }
     Ok(())
 }
@@ -552,6 +554,98 @@ unsafe fn ansi_enumerations_list_the_overlay() -> Result<(), String> {
         if !subkeys.iter().any(|k| k == "defval_a") {
             return Err(format!(
                 "RegEnumKeyExA omits the overlay subkey 'defval_a': listed {subkeys:?}"
+            ));
+        }
+        // A deleted value is masked: listing it would show the application data it removed.
+        for deleted in ["del_valuea", "del_keyvaluea", "del_keyvaluew"] {
+            if values.iter().any(|v| v == deleted) {
+                return Err(format!(
+                    "RegEnumValueA lists the deleted value '{deleted}': listed {values:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Non-ASCII text the system ANSI code page can represent: one sample per common code page
+/// (Western and Central European, Cyrillic, Greek, Hebrew, Arabic, Thai, Vietnamese, CJK), so the
+/// check runs on any locale.
+fn code_page_sample() -> Result<String, String> {
+    ["café", "жук", "Ωμέγα", "שלום", "عربي", "ไทย", "ăn", "日本"]
+        .into_iter()
+        .find(|sample| to_ansi(sample).is_some())
+        .map(str::to_string)
+        .ok_or_else(|| "no non-ASCII sample is representable in the system ANSI code page".to_string())
+}
+
+/// Text written through one API family must read back through the other unchanged, which only
+/// holds if the engine converts between UTF-16 and the system ANSI code page - not UTF-8, and
+/// not raw UTF-16 bytes. ASCII text cannot tell those apart; this sample can.
+unsafe fn non_ascii_text_crosses_the_code_page() -> Result<(), String> {
+    let sample = code_page_sample()?;
+    let sample_ansi = to_ansi(&sample).ok_or("sample was chosen as ANSI-representable")?;
+    unsafe {
+        let parent = open_root()?;
+
+        // Wide write, ANSI read: the engine encodes the stored UTF-16 into the code page.
+        let name_w = to_wide("nonascii_wide_written");
+        let data_w = to_wide(&sample);
+        let status = RegSetValueExW(
+            parent,
+            name_w.as_ptr(),
+            0,
+            REG_SZ,
+            data_w.as_ptr().cast(),
+            (data_w.len() * 2) as u32,
+        );
+        if status != ERROR_SUCCESS {
+            let _ = RegCloseKey(parent);
+            return Err(format!("RegSetValueExW('{sample}') failed with code {status}"));
+        }
+        let name_a = to_ansi("nonascii_wide_written").ok_or("name is not ANSI-encodable")?;
+        let mut buf = [0u8; 256];
+        let mut len = buf.len() as u32;
+        let status = RegQueryValueExA(
+            parent,
+            name_a.as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            buf.as_mut_ptr(),
+            &mut len,
+        );
+        if status != ERROR_SUCCESS {
+            let _ = RegCloseKey(parent);
+            return Err(format!(
+                "RegQueryValueExA of a non-ASCII value failed with code {status}"
+            ));
+        }
+        if buf[..len as usize] != sample_ansi[..] {
+            let _ = RegCloseKey(parent);
+            return Err(format!(
+                "RegQueryValueExA returned bytes {:02x?} for '{sample}'; the code page encodes it as {sample_ansi:02x?}",
+                &buf[..len as usize]
+            ));
+        }
+
+        // ANSI write, wide read: the engine decodes the code page into the stored UTF-16.
+        let name_a = to_ansi("nonascii_ansi_written").ok_or("name is not ANSI-encodable")?;
+        let status = RegSetValueExA(
+            parent,
+            name_a.as_ptr(),
+            0,
+            REG_SZ,
+            sample_ansi.as_ptr(),
+            sample_ansi.len() as u32,
+        );
+        let _ = RegCloseKey(parent);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegSetValueExA('{sample}') failed with code {status}"));
+        }
+        let read = visible_wide(ANSI_ROOT, "nonascii_ansi_written");
+        if read.as_deref() != Some(sample.as_str()) {
+            return Err(format!(
+                "an ANSI write of '{sample}' read back through the wide API as {read:?}"
             ));
         }
     }
