@@ -1023,116 +1023,49 @@ unsafe extern "system" fn hook_reg_query_info_key_a(
 ) -> i32 {
     let real_fn: FnRegQueryInfoKeyA =
         unsafe { std::mem::transmute(load_trampoline(&REAL_REG_QUERY_INFO_KEY_A)) };
-    guard_detour!(
-        &IN_REG_HOOK,
-        unsafe {
-            real_fn(
-                hkey,
-                lp_class,
-                lpcch_class,
-                lp_reserved,
-                lpc_sub_keys,
-                lpcb_max_sub_key_len,
-                lpcb_max_class_len,
-                lpc_values,
-                lpcb_max_value_name_len,
-                lpcb_max_value_len,
-                lpcb_security_descriptor,
-                lpft_last_write_time,
-            )
-        },
-        {
-            let listing = match unsafe { listing_for(hkey) } {
-                Ok(listing) => listing,
-                Err(UNTRACKED_FORWARD) => {
-                    return unsafe {
-                        real_fn(
-                            hkey,
-                            lp_class,
-                            lpcch_class,
-                            lp_reserved,
-                            lpc_sub_keys,
-                            lpcb_max_sub_key_len,
-                            lpcb_max_class_len,
-                            lpc_values,
-                            lpcb_max_value_name_len,
-                            lpcb_max_value_len,
-                            lpcb_security_descriptor,
-                            lpft_last_write_time,
-                        )
-                    };
-                }
-                Err(status) => return status,
-            };
-
-            let mut host_max_value_len = 0u32;
-            let host_answered = unsafe {
-                real_fn(
-                    hkey,
-                    lp_class,
-                    lpcch_class,
-                    lp_reserved,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    lpcb_max_class_len,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut host_max_value_len,
-                    lpcb_security_descriptor,
-                    lpft_last_write_time,
-                )
-            } == ERROR_SUCCESS as i32;
-            if !host_answered {
-                host_max_value_len = 0;
-            }
-
-            // Stored overlay values are UTF-16, so their byte length over-estimates the ANSI form.
-            // Over-estimating is safe: the caller allocates more than it needs.
-            let overlay_max_value_len = listing
-                .view
-                .values
-                .iter()
-                .filter_map(|entry| get_registry_store().overlay_value_len(&listing.path, &entry.name))
-                .max()
-                .unwrap_or(0) as u32;
-
-            let max_subkey_len = listing
-                .view
-                .subkeys
-                .iter()
-                .map(|name| <u8 as NameUnit>::encode(name).len() as u32)
-                .max()
-                .unwrap_or(0);
-            let max_value_name_len = listing
-                .view
-                .values
-                .iter()
-                .map(|entry| <u8 as NameUnit>::encode(&entry.name).len() as u32)
-                .max()
-                .unwrap_or(0);
-
-            // SAFETY: every cell below is a caller-owned out-parameter, null-checked first.
-            unsafe {
-                if !lpc_sub_keys.is_null() {
-                    *lpc_sub_keys = listing.view.subkeys.len() as u32;
-                }
-                if !lpcb_max_sub_key_len.is_null() {
-                    *lpcb_max_sub_key_len = max_subkey_len;
-                }
-                if !lpc_values.is_null() {
-                    *lpc_values = listing.view.values.len() as u32;
-                }
-                if !lpcb_max_value_name_len.is_null() {
-                    *lpcb_max_value_name_len = max_value_name_len;
-                }
-                if !lpcb_max_value_len.is_null() {
-                    *lpcb_max_value_len = host_max_value_len.max(overlay_max_value_len);
-                }
-            }
-
-            ERROR_SUCCESS as i32
-        }
-    )
+    let host_query = || unsafe {
+        real_fn(
+            hkey,
+            lp_class,
+            lpcch_class,
+            lp_reserved,
+            lpc_sub_keys,
+            lpcb_max_sub_key_len,
+            lpcb_max_class_len,
+            lpc_values,
+            lpcb_max_value_name_len,
+            lpcb_max_value_len,
+            lpcb_security_descriptor,
+            lpft_last_write_time,
+        )
+    };
+    let host_unmodeled = |max_value_len: *mut u32| unsafe {
+        real_fn(
+            hkey,
+            lp_class,
+            lpcch_class,
+            lp_reserved,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            lpcb_max_class_len,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            max_value_len,
+            lpcb_security_descriptor,
+            lpft_last_write_time,
+        )
+    };
+    guard_detour!(&IN_REG_HOOK, host_query(), {
+        let out = KeyInfoOut {
+            sub_keys: lpc_sub_keys,
+            max_sub_key_len: lpcb_max_sub_key_len,
+            values: lpc_values,
+            max_value_name_len: lpcb_max_value_name_len,
+            max_value_len: lpcb_max_value_len,
+        };
+        // SAFETY: `out` holds the caller-owned count cells of this RegQueryInfoKeyA call.
+        unsafe { query_info_key_virtually::<u8>(hkey, out, host_query, host_unmodeled) }
+    })
 }
 
 unsafe extern "system" fn hook_reg_set_value_ex_w(
@@ -1938,104 +1871,127 @@ unsafe extern "system" fn hook_reg_query_info_key_w(
 ) -> i32 {
     let real_fn: FnRegQueryInfoKeyW =
         unsafe { std::mem::transmute(load_trampoline(&REAL_REG_QUERY_INFO_KEY_W)) };
-    guard_detour!(
-        &IN_REG_HOOK,
-        unsafe {
-            real_fn(
-                hkey,
-                lp_class,
-                lpcch_class,
-                lp_reserved,
-                lpc_sub_keys,
-                lpcb_max_sub_key_len,
-                lpcb_max_class_len,
-                lpc_values,
-                lpcb_max_value_name_len,
-                lpcb_max_value_len,
-                lpcb_security_descriptor,
-                lpft_last_write_time,
-            )
-        },
-        {
-            let listing = match unsafe { listing_for(hkey) } {
-                Ok(listing) => listing,
-                Err(UNTRACKED_FORWARD) => {
-                    return unsafe {
-                        real_fn(
-                            hkey,
-                            lp_class,
-                            lpcch_class,
-                            lp_reserved,
-                            lpc_sub_keys,
-                            lpcb_max_sub_key_len,
-                            lpcb_max_class_len,
-                            lpc_values,
-                            lpcb_max_value_name_len,
-                            lpcb_max_value_len,
-                            lpcb_security_descriptor,
-                            lpft_last_write_time,
-                        )
-                    };
-                }
-                Err(status) => return status,
-            };
+    let host_query = || unsafe {
+        real_fn(
+            hkey,
+            lp_class,
+            lpcch_class,
+            lp_reserved,
+            lpc_sub_keys,
+            lpcb_max_sub_key_len,
+            lpcb_max_class_len,
+            lpc_values,
+            lpcb_max_value_name_len,
+            lpcb_max_value_len,
+            lpcb_security_descriptor,
+            lpft_last_write_time,
+        )
+    };
+    // The host fills what the engine does not model - class, security descriptor, timestamp -
+    // and reports its own longest value into `max_value_len`.
+    let host_unmodeled = |max_value_len: *mut u32| unsafe {
+        real_fn(
+            hkey,
+            lp_class,
+            lpcch_class,
+            lp_reserved,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            lpcb_max_class_len,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            max_value_len,
+            lpcb_security_descriptor,
+            lpft_last_write_time,
+        )
+    };
+    guard_detour!(&IN_REG_HOOK, host_query(), {
+        let out = KeyInfoOut {
+            sub_keys: lpc_sub_keys,
+            max_sub_key_len: lpcb_max_sub_key_len,
+            values: lpc_values,
+            max_value_name_len: lpcb_max_value_name_len,
+            max_value_len: lpcb_max_value_len,
+        };
+        // SAFETY: `out` holds the caller-owned count cells of this RegQueryInfoKeyW call.
+        unsafe { query_info_key_virtually::<u16>(hkey, out, host_query, host_unmodeled) }
+    })
+}
 
-            // Let the host fill everything this engine does not model - class, security
-            // descriptor, timestamp - and report its own longest value. A synthetic key has no
-            // host counterpart, so those cells stay as the caller left them.
-            let mut host_max_value_len = 0u32;
-            let host_answered = unsafe {
-                real_fn(
-                    hkey,
-                    lp_class,
-                    lpcch_class,
-                    lp_reserved,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    lpcb_max_class_len,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut host_max_value_len,
-                    lpcb_security_descriptor,
-                    lpft_last_write_time,
-                )
-            } == ERROR_SUCCESS as i32;
-            if !host_answered {
-                host_max_value_len = 0;
-            }
+/// The caller-owned count cells of a `RegQueryInfoKey*` call that the merged listing answers.
+struct KeyInfoOut {
+    sub_keys: *mut u32,
+    max_sub_key_len: *mut u32,
+    values: *mut u32,
+    max_value_name_len: *mut u32,
+    max_value_len: *mut u32,
+}
 
-            let overlay_max_value_len = listing
-                .view
-                .values
-                .iter()
-                .filter_map(|entry| get_registry_store().overlay_value_len(&listing.path, &entry.name))
-                .max()
-                .unwrap_or(0) as u32;
+/// The longest of `names` in the caller's units (UTF-16 units for `...W`, ANSI bytes for `...A`),
+/// excluding the terminator: the size a caller allocates to receive any of them.
+fn longest_name<'a, C: NameUnit>(names: impl Iterator<Item = &'a str>) -> u32 {
+    names.map(|name| C::encode(name).len() as u32).max().unwrap_or(0)
+}
 
-            // SAFETY: every cell below is a caller-owned out-parameter, null-checked first.
-            unsafe {
-                if !lpc_sub_keys.is_null() {
-                    *lpc_sub_keys = listing.view.subkeys.len() as u32;
-                }
-                if !lpcb_max_sub_key_len.is_null() {
-                    *lpcb_max_sub_key_len = listing.view.max_subkey_chars();
-                }
-                if !lpc_values.is_null() {
-                    *lpc_values = listing.view.values.len() as u32;
-                }
-                if !lpcb_max_value_name_len.is_null() {
-                    *lpcb_max_value_name_len = listing.view.max_value_name_chars();
-                }
-                if !lpcb_max_value_len.is_null() {
-                    // Over-estimating is safe - the caller allocates more than it needs - while
-                    // under-estimating truncates a value it is about to read.
-                    *lpcb_max_value_len = host_max_value_len.max(overlay_max_value_len);
-                }
-            }
+/// Answers `RegQueryInfoKey*` from the merged listing: counts and longest names from the listing,
+/// in the caller's units, so they agree with what the enumerators serve.
+///
+/// `host_query` is the caller's own call, for a handle the engine does not track.
+/// `host_unmodeled` lets the host fill the cells the engine does not model (class, security
+/// descriptor, timestamp) and write its own longest value through the pointer it is given; a
+/// synthetic key has no host counterpart, so those cells stay as the caller left them.
+///
+/// # Safety
+/// Every pointer in `out` must be a caller-owned out-parameter of the intercepted call.
+unsafe fn query_info_key_virtually<C: NameUnit>(
+    hkey: HKEY,
+    out: KeyInfoOut,
+    host_query: impl Fn() -> i32,
+    host_unmodeled: impl Fn(*mut u32) -> i32,
+) -> i32 {
+    let listing = match unsafe { listing_for(hkey) } {
+        Ok(listing) => listing,
+        Err(UNTRACKED_FORWARD) => return host_query(),
+        Err(status) => return status,
+    };
 
-            ERROR_SUCCESS as i32
+    let mut host_max_value_len = 0u32;
+    if host_unmodeled(&mut host_max_value_len) != ERROR_SUCCESS as i32 {
+        host_max_value_len = 0;
+    }
+
+    // Stored overlay values are UTF-16, so for an `...A` caller their byte length over-estimates
+    // the ANSI form. Over-estimating is safe - the caller allocates more than it needs - while
+    // under-estimating truncates a value it is about to read.
+    let overlay_max_value_len = listing
+        .view
+        .values
+        .iter()
+        .filter_map(|entry| get_registry_store().overlay_value_len(&listing.path, &entry.name))
+        .max()
+        .unwrap_or(0) as u32;
+
+    // SAFETY: every cell below is a caller-owned out-parameter, null-checked first.
+    unsafe {
+        if !out.sub_keys.is_null() {
+            *out.sub_keys = listing.view.subkeys.len() as u32;
         }
-    )
+        if !out.max_sub_key_len.is_null() {
+            *out.max_sub_key_len = longest_name::<C>(listing.view.subkeys.iter().map(String::as_str));
+        }
+        if !out.values.is_null() {
+            *out.values = listing.view.values.len() as u32;
+        }
+        if !out.max_value_name_len.is_null() {
+            *out.max_value_name_len =
+                longest_name::<C>(listing.view.values.iter().map(|entry| entry.name.as_str()));
+        }
+        if !out.max_value_len.is_null() {
+            *out.max_value_len = host_max_value_len.max(overlay_max_value_len);
+        }
+    }
+
+    ERROR_SUCCESS as i32
 }
 
 /// Hooks `api` on the first module of `modules` that exports it.
@@ -2235,6 +2191,22 @@ pub fn init_hooks() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `RegQueryInfoKeyW` reports name maxima in WCHARs - UTF-16 code units, the unit the
+    /// enumerators fill buffers in - not in characters or UTF-8 bytes.
+    #[test]
+    fn wide_name_maxima_count_utf16_units() {
+        // "ab": 2 units. Three CJK characters: 9 UTF-8 bytes but 3 UTF-16 units.
+        assert_eq!(
+            longest_name::<u16>(["ab", "\u{65e5}\u{672c}\u{8a9e}"].into_iter()),
+            3
+        );
+        // Regression: a character outside the Basic Multilingual Plane is one `char` but a
+        // surrogate pair; counting chars under-reported it, and a buffer sized from the answer
+        // was one unit short.
+        assert_eq!(longest_name::<u16>(["a\u{1F600}"].into_iter()), 3);
+        assert_eq!(longest_name::<u16>(std::iter::empty()), 0);
+    }
 
     #[test]
     fn full_key_composition_tolerates_the_separator_spellings_callers_pass() {

@@ -40,22 +40,6 @@ pub(crate) struct KeyView {
     pub(crate) values: Vec<EnumeratedValue>,
 }
 
-impl KeyView {
-    /// The longest subkey name, in characters, excluding the terminator.
-    pub(crate) fn max_subkey_chars(&self) -> u32 {
-        longest_chars(self.subkeys.iter().map(String::as_str))
-    }
-
-    /// The longest value name, in characters, excluding the terminator.
-    pub(crate) fn max_value_name_chars(&self) -> u32 {
-        longest_chars(self.values.iter().map(|value| value.name.as_str()))
-    }
-}
-
-fn longest_chars<'a>(names: impl Iterator<Item = &'a str>) -> u32 {
-    names.map(|name| name.chars().count() as u32).max().unwrap_or(0)
-}
-
 /// What the host registry itself lists for a key. Empty for a key that exists only in the
 /// overlay, which has no host counterpart to enumerate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -257,25 +241,6 @@ mod tests {
 
         assert_eq!(view.subkeys, vec!["Child"]);
         assert_eq!(value_names(&view), vec!["Value"]);
-    }
-
-    #[test]
-    fn name_maxima_count_characters_not_bytes() {
-        let view = merge(
-            &overlay(&["ab"], &["\u{65e5}\u{672c}\u{8a9e}"]),
-            &HostListing::default(),
-        );
-
-        assert_eq!(view.max_subkey_chars(), 2);
-        // Three CJK characters are nine UTF-8 bytes but three wide characters.
-        assert_eq!(view.max_value_name_chars(), 3);
-    }
-
-    #[test]
-    fn an_empty_key_reports_zero_maxima() {
-        let view = KeyView::default();
-        assert_eq!(view.max_subkey_chars(), 0);
-        assert_eq!(view.max_value_name_chars(), 0);
     }
 
     #[test]
