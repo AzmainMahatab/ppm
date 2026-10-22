@@ -61,8 +61,8 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 ## Verification and supply chain
 
 - [ ] R30 End-to-end install test — a local HTTPS test server (e.g. WireMock) serves a release, and the test drives check → download → extract → swap-in → launcher generation.
-- [~] R31 Supply-chain gate — `cargo deny` (advisories, licences, duplicate versions) runs in CI. `deny.toml` and the CI job exist and `cargo deny check` passes locally; done once the job is green on GitHub (after R10).
-- [ ] R32 arm64 CI — tests run on a Windows arm64 runner, not only the cross-compiled release build.
+- [x] R31 Supply-chain gate — `cargo deny` (advisories, licences, duplicate versions) runs in CI. `deny.toml` and the CI job exist and `cargo deny check` passes locally; done once the job is green on GitHub (after R10). Verified 2026-10-21 on GitHub: CI run 39685382893 (`339eda9`) - deny, format, and lint + 168 tests incl. live e2e all green on windows-latest.
+- [~] R32 arm64 CI — tests run on a Windows arm64 runner, not only the cross-compiled release build. `windows-11-arm` CI job added (lint + full suite natively, plus an emulated-x64 e2e test); done once it is green on GitHub.
 
 ## Side quests
 

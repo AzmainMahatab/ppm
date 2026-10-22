@@ -1643,6 +1643,7 @@ dependencies = [
  "jsonschema",
  "msi",
  "object",
+ "probe-x64",
  "probe-x86",
  "redirector",
  "regex",
@@ -1667,6 +1668,13 @@ name = "ppmd-rust"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "494b4379484fc92217cc7d9e3a532375b1d01a61889ec8333025dc3b0377af56"
+
+[[package]]
+name = "probe-x64"
+version = "0.1.0"
+dependencies = [
+ "test-probe",
+]
 
 [[package]]
 name = "probe-x86"

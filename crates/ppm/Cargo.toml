@@ -75,5 +75,10 @@ test-probe = { path = "../test-probe", artifact = "bin" }
 # The same probe built for x86, so the suite can verify injection across bitness.
 probe-x86 = { path = "../probe-x86" }
 
+# Why only on ARM64: there the suite also runs the probe built for x64, which Windows emulates,
+#      to verify that an emulated x64 application receives the x64 engine.
+[target.'cfg(target_arch = "aarch64")'.dev-dependencies]
+probe-x64 = { path = "../probe-x64" }
+
 [lints]
 workspace = true

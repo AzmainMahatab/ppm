@@ -2,4 +2,6 @@
 channel = "nightly-2026-08-26"
 components = ["clippy", "rustfmt"]
 # Why i686: every build embeds the x86 engine that 32-bit processes are injected with.
-targets = ["i686-pc-windows-msvc"]
+# Why x86_64: an ARM64 build also embeds the x64 engine, for x64 applications it runs emulated
+#      (on an x64 host this is the host target and costs nothing).
+targets = ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc"]

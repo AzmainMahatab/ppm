@@ -121,6 +121,18 @@ impl TestEnvironment {
             .expect("Failed to copy the x86 probe binary");
     }
 
+    /// Deploys the x64 build of the probe, with its x86 peer, as the only installation: with no
+    /// ARM64 build present, `ppm run` takes its emulation fallback and launches the x64 one.
+    #[cfg(target_arch = "aarch64")]
+    fn deploy_emulated_x64_probe_pair(&self) {
+        let dest_dir = self.root().join("Apps").join("x64").join("TestProbe");
+        fs::create_dir_all(&dest_dir).expect("Failed to create the x64 app dir");
+        fs::copy(probe_x64::PROBE_EXE, dest_dir.join("test-probe.exe"))
+            .expect("Failed to copy the x64 probe binary");
+        fs::copy(&self.x86_probe_exe, dest_dir.join("test-probe-x86.exe"))
+            .expect("Failed to copy the x86 probe binary");
+    }
+
     fn write_manifest(&self, apps_json: &str) {
         fs::write(self.root().join(".ppm").join("apps.json"), apps_json).expect("Failed to write apps.json");
     }
@@ -455,6 +467,37 @@ fn test_e2e_root_with_a_non_ascii_path_runs_virtualized() {
     assert!(
         output.status.success(),
         "a root under 'Portable Café' must launch virtualized. Stdout: {stdout}\nStderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("ALL 5 BOUNDARY SUITES PASSED"),
+        "every suite must have run. Stdout: {stdout}"
+    );
+}
+
+/// An x64 application on an ARM64 host runs emulated and can only load an x64 DLL. Before
+/// per-machine engines, the ARM64 build injected its own engine into it and the launch failed.
+/// The x64 probe runs every boundary suite as the root application, and its injection suite
+/// spawns the x86 peer, which an emulated x64 parent can only reach through the ARM64 host's
+/// x86 engine.
+#[test]
+#[cfg(all(windows, target_arch = "aarch64"))]
+fn test_e2e_emulated_x64_application_runs_virtualized_on_arm64() {
+    let env = TestEnvironment::new();
+    env.deploy_emulated_x64_probe_pair();
+    env.write_manifest(SINGLE_PROBE_MANIFEST);
+
+    let output = Command::new(env.root().join("ppm.exe"))
+        .args(["run", "test-probe"])
+        .current_dir(env.root())
+        .env("PPM_ROOT", env.root())
+        .output()
+        .expect("Failed to run ppm run test-probe");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the emulated x64 probe must pass every boundary suite. Stdout: {stdout}\nStderr: {stderr}"
     );
     assert!(
         stdout.contains("ALL 5 BOUNDARY SUITES PASSED"),

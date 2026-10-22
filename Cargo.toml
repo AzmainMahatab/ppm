@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ppm",
+    "crates/probe-x64",
     "crates/probe-x86",
     "crates/engine-x64",
     "crates/engine-x86",
