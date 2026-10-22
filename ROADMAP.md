@@ -68,6 +68,7 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 
 - [ ] S1 Badge monitor polls every 500 ms — `crates/redirector/src/shell/badge.rs` (`start_taskbar_monitor`) re-enumerates windows on a timer; a window event hook (create/show/hide) would end the polling. Seen while assessing R17 (ADR-008).
 - [ ] S2 Key creation reaches the host registry — after the e2e suites, the real `HKCU\Software\PPMTestProbe` holds 9 empty keys (`Tree\Child`, `Enumerated\Kept`, `DeleteKeyEx`, `AnsiEntryPoints\legacy_created`, ...) and no values: values are virtualized, but `RegCreateKeyEx*` creates the key on the host. Predates the ANSI work (the original suite's keys are there too). Seen 2026-10-21 reviewing `1264f02`.
+- [ ] S3 Cross-bitness injection trusts the helper's exit code — Detours' `DetourProcessViaHelperDllsW` treats `rundll32` exit 0 as success, but `rundll32` exits 0 even when it cannot load the DLL, so a helper that fails resumes the child with no engine. Seen on the first ARM64 CI run (39708194996): the ARM64 build used the native `system32\rundll32.exe`, and x86 children ran uninjected. That cause is fixed (DETOURS_OPTION_BITS for ARM64); verifying the child actually received the engine before resuming it would close the class.
 
 ## Library candidates
 

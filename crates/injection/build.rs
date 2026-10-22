@@ -18,6 +18,12 @@ fn main() {
     compile_detours();
 }
 
+/// Whether this build compiles for ARM64, from the target Cargo reports to build scripts.
+fn target_is_arm64() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").expect("invariant: cargo sets CARGO_CFG_TARGET_ARCH for build scripts")
+        == "aarch64"
+}
+
 fn workspace_root() -> PathBuf {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -42,6 +48,15 @@ fn compile_detours() {
     build.include(&detours_src);
     for translation_unit in DETOURS_TRANSLATION_UNITS {
         build.file(detours_src.join(translation_unit));
+    }
+    if target_is_arm64() {
+        // Why: Detours injects a 32-bit process from a 64-bit one through a `rundll32` helper,
+        //      and DETOURS_OPTION_BITS is what makes it start the 32-bit one from SysWOW64.
+        //      detours.h sets it for x64 but not for ARM64, so an ARM64 build started the native
+        //      `system32\rundll32.exe`, which cannot load the x86 engine - and `rundll32` still
+        //      exits 0, so the x86 process was resumed with no engine at all. ARM64 Windows runs
+        //      exactly one 32-bit architecture, x86, from SysWOW64, as x64 Windows does.
+        build.define("DETOURS_OPTION_BITS", "32");
     }
     build.compile("detours");
 
