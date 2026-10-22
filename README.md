@@ -103,7 +103,9 @@ workflow built, from this repository:
 gh attestation verify ppm-v0.1.0-windows-x64.zip --repo AzmainMahatab/ppm
 ```
 
-`SHA256SUMS.txt` on the release lists the archives' checksums for a check without the GitHub CLI.
+`SHA256SUMS.txt` on the release lists the archives' checksums for a check without the GitHub CLI
+(`sha256sum -c SHA256SUMS.txt`). v0.1.0's list has Windows line endings; check it with
+`tr -d '\r' < SHA256SUMS.txt | sha256sum -c -`.
 
 ---
 

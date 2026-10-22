@@ -145,7 +145,7 @@ jobs:
           Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipName -Force
           
           $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ASCII
+          [IO.File]::WriteAllText("$PWD/$zipName.sha256", "$hash  $zipName`n")
 
       # Records, signed through Sigstore, that this exact archive was built by this workflow from
       # this commit; anyone can check a download with `gh attestation verify`.
@@ -226,7 +226,13 @@ jobs:
       - name: Consolidate SHA256 Checksums
         shell: pwsh
         run: |
-          Get-Content release_assets/*.sha256 | Out-File -FilePath release_assets/SHA256SUMS.txt -Encoding ASCII
+          # Why LF and not Out-File: `sha256sum -c` reads a CR as part of the file name, so a CRLF
+          #      list fails on Linux, macOS and Git Bash (v0.1.0 shipped one).
+          $lines = Get-ChildItem release_assets -Filter "*.sha256" | Sort-Object Name | Get-Content
+          [IO.File]::WriteAllText("$PWD/release_assets/SHA256SUMS.txt", ($lines -join "`n") + "`n")
+          if ((Get-Content -Raw release_assets/SHA256SUMS.txt).Contains("`r")) {
+            throw "SHA256SUMS.txt must use LF line endings"
+          }
           Remove-Item release_assets/*.sha256 -Force
 
       - name: Publish GitHub Release
