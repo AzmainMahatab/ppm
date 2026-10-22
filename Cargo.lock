@@ -704,14 +704,14 @@ dependencies = [
 
 [[package]]
 name = "engine-x64"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "redirector",
 ]
 
 [[package]]
 name = "engine-x86"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "redirector",
 ]
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "injection"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tempfile",
@@ -1821,7 +1821,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppm"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "cab",
@@ -1864,14 +1864,14 @@ checksum = "494b4379484fc92217cc7d9e3a532375b1d01a61889ec8333025dc3b0377af56"
 
 [[package]]
 name = "probe-x64"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "test-probe",
 ]
 
 [[package]]
 name = "probe-x86"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "test-probe",
 ]
@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "redirector"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hex",
  "injection",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "test-probe"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "windows-sys 0.61.2",
 ]
