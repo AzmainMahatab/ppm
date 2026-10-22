@@ -5,13 +5,17 @@ Status as of the 2026-10-21 review. Format: `- [ ] R<n> <title> — <what done m
 
 ## Where the project stands
 
-- Three crates: `ppm` (CLI + package manager, ~4.1k lines incl. unit tests), `redirector`
-  (injected Detours engine, ~6.5k lines), `test-probe` (live boundary probe, ~1.1k lines). Five hooked isolation boundaries:
-  registry CoW, process re-injection, credential vault, shell paths, process identity.
-- Gates are green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
-  and `cargo test --workspace` (130 tests, including the live e2e injection probe).
-- 44 commits of isolation-boundary work (plus this review) are not on `origin/main`, and local
-  `main` carries 20 of them unpushed. None of it has shipped.
+Updated 2026-10-22.
+
+- Eight crates: `ppm` (CLI + package manager), `redirector` (injected Detours engine), `injection`
+  (shared injection and the helper handshake), `test-probe` (live boundary probe), and the
+  per-architecture build crates `engine-x86`, `engine-x64`, `probe-x86`, `probe-x64`. Five hooked
+  isolation boundaries: registry CoW, process re-injection, credential vault, shell paths, process identity.
+- Gates are green locally and in CI on x64 and ARM64: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -D warnings`, `cargo deny check`, and `cargo test --workspace` (176 tests, including
+  the live e2e probes for x64, x86, a non-ASCII root, and refused unreachable children).
+- Everything is on `main` on GitHub. A draft release v0.1.0 (x64 and ARM64 zips, each smoke-tested on
+  its own architecture) awaits publishing; no tag exists yet.
 
 ## Review fixes (this branch)
 

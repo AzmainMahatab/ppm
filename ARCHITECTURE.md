@@ -157,7 +157,9 @@ graph TD
 ### A. `crates/redirector/src/`
 ```
 crates/redirector/src/
-├── lib.rs                          # DLL Entrypoint (helper check, import restore) & Hook Orchestration
+├── lib.rs                          # DLL Entrypoint (helper check, import restore), Hook Orchestration
+│                                   # & ordinal-1 helper export (ppm_finish_helper)
+├── host_modules.rs                 # advapi32/shell32/userenv as static imports (ADR-008)
 ├── paths.rs                        # Path Resolution (Home/, .ppm/logs/, .ppm/system/)
 ├── detour.rs                       # Hook Attach, Re-Entrancy Guard & Export-Resolution Seam
 ├── winstr.rs                       # Win16 String, UTF-16 Encoding & COM-Task Allocators
@@ -199,8 +201,8 @@ crates/ppm/src/
 │   ├── pipeline.rs                 # Dependency Ordering & Install Pipeline
 │   ├── pipeline/install_over_https.rs # End-to-end install against a local HTTPS release host
 │   └── commands/                   # One Module Per Command
-│       ├── init.rs  run.rs  check.rs  install.rs  update.rs
-│       └── link.rs  list.rs  schema.rs  validate.rs
+│       ├── init.rs  run.rs  check.rs  install.rs  update.rs  uninstall.rs
+│       └── clean.rs  link.rs  list.rs  schema.rs  validate.rs
 │
 ├── core/                           # Core Domain
 │   ├── mod.rs
@@ -237,11 +239,13 @@ crates/injection/                   # Shared by ppm (root launch) and redirector
     ├── lib.rs                      # inject_suspended: machine -> engine choice -> Detours
     ├── detours.rs                  # Detours API (extern "system")
     ├── machine.rs                  # Machine of a process / of the host
-    └── engine.rs                   # choose_engine (pure), ANSI path encoding
+    ├── engine.rs                   # choose_engine (pure), ANSI path encoding
+    └── helper.rs                   # Helper-route handshake: the helper verifies, the injector confirms
 
 crates/engine-x86/                  # redirector.dll built for i686, embedded by every ppm
 crates/engine-x64/                  # redirector.dll built for x86_64, embedded by ARM64 ppm
 crates/probe-x86/                   # test-probe built for i686 (cross-bitness e2e)
+crates/probe-x64/                   # test-probe built for x86_64 (emulated-x64 e2e on ARM64 only)
 ```
 
 ### D. Verification Probe & Integration Tests
@@ -250,7 +254,8 @@ crates/test-probe/                  # Isolated probe package (bin-artifact dev-d
 ├── src/main.rs                     # Suite Dispatcher (--child / --echo-args / --help modes)
 ├── src/support.rs                  # UTF-16 Marshalling Helpers
 └── src/suites/                     # One Suite Per Isolation Boundary
-    ├── registry.rs                 # Registry Copy-on-Write
+    ├── registry.rs                 # Registry Copy-on-Write (against a harness-seeded host tree)
+    ├── registry/ansi.rs            # ANSI and legacy registry entry points
     ├── shell.rs                    # Known-Folder Redirection
     ├── credentials.rs              # Credential Vault
     ├── injection.rs                # Child-Process Re-Injection
@@ -258,6 +263,7 @@ crates/test-probe/                  # Isolated probe package (bin-artifact dev-d
 
 crates/ppm/tests/
 ├── e2e_virtualization.rs           # Integration test consuming the probe via CARGO_BIN_FILE_* edge
+├── e2e_support/host_registry.rs    # Seeds a real HKCU tree per run; asserts it is left unchanged
 ├── init_semantics.rs               # `ppm init` idempotency and engine deployment
 ├── package_extraction.rs           # Extractor fixtures (zip, 7z/LZMA2, CAB, MSI embedded/external)
 └── fixtures/                       # Sample archives
