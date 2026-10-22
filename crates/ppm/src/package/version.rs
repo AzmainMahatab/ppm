@@ -94,6 +94,23 @@ fn check_version_text(version: &str) -> Result<()> {
     Ok(())
 }
 
+/// Requests a release-metadata document, accepting only a successful response.
+///
+/// # Why the status is checked before the body is read
+/// An error page is still a body: a 404 or 503 carrying JSON or HTML used to be parsed as the
+/// release document, surfacing as a missing-key error - or, when the error body happened to hold
+/// the expected keys, as a release that was never published.
+fn fetch_metadata(clients: &HttpClients, url: &str) -> Result<reqwest::blocking::Response> {
+    let response = clients
+        .metadata()
+        .get(url)
+        .send()
+        .with_context(|| format!("Failed to request release metadata from '{url}'"))?;
+    response
+        .error_for_status()
+        .with_context(|| format!("Release endpoint '{url}' did not serve its document"))
+}
+
 fn fetch_release(clients: &HttpClients, config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
         VersionCheckConfig::ElectronManifest(ElectronManifestCheck {
@@ -105,7 +122,7 @@ fn fetch_release(clients: &HttpClients, config: &VersionCheckConfig, arch: CpuAr
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No manifest URL configured for arch '{}'", arch.as_str()))?;
 
-            let response = clients.metadata().get(&manifest_url).send()?;
+            let response = fetch_metadata(clients, &manifest_url)?;
             let text = response.text()?;
 
             let yaml: Value = serde_saphyr::from_str(&text)
@@ -144,7 +161,7 @@ fn fetch_release(clients: &HttpClients, config: &VersionCheckConfig, arch: CpuAr
 
         VersionCheckConfig::GitHubRelease(GitHubReleaseCheck { repo, asset_pattern }) => {
             let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
-            let resp = clients.metadata().get(&api_url).send()?;
+            let resp = fetch_metadata(clients, &api_url)?;
             let json: Value = resp.json()?;
 
             let tag_name = json
@@ -208,7 +225,7 @@ fn fetch_release(clients: &HttpClients, config: &VersionCheckConfig, arch: CpuAr
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No version_key configured for arch '{}'", arch.as_str()))?;
 
-            let resp = clients.metadata().get(&api_url).send()?;
+            let resp = fetch_metadata(clients, &api_url)?;
             let json: Value = resp.json()?;
 
             let version = resolve_json_query(&json, &v_key)?
@@ -256,7 +273,7 @@ fn fetch_release(clients: &HttpClients, config: &VersionCheckConfig, arch: CpuAr
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
 
-            let resp = clients.metadata().get(&scrape_url).send()?;
+            let resp = fetch_metadata(clients, &scrape_url)?;
             let body = resp.text()?;
 
             let re = Regex::new(&regex_str)?;
@@ -353,7 +370,36 @@ fn resolve_json_query<'a>(mut current: &'a Value, query: &str) -> Result<&'a Val
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::http::TrustRoots;
     use serde_json::json;
+
+    #[test]
+    fn an_error_status_from_a_release_endpoint_is_reported_not_parsed() {
+        let server = httpmock::MockServer::start();
+        // Why a well-formed release document as the error body: it is exactly what a parser
+        // would accept, so only the status can tell this response apart from a real release.
+        server.mock(|when, then| {
+            when.path("/latest.json");
+            then.status(503)
+                .json_body(json!({ "tag": "9.9.9", "url": "https://h/App.zip" }));
+        });
+        let config: VersionCheckConfig = serde_json::from_value(json!({
+            "type": "json_api",
+            "url": server.url("/latest.json"),
+            "version_key": "/tag",
+            "url_key": "/url"
+        }))
+        .expect("schema-valid check");
+        let authority = reqwest::Certificate::from_pem(httpmock::server::DEFAULT_CA_CERTIFICATE.as_bytes())
+            .expect("httpmock's CA certificate is valid PEM");
+        let clients = HttpClients::new(&TrustRoots::Only(vec![authority])).expect("clients");
+
+        let error = match check_remote_version(&clients, &config, CpuArch::X64) {
+            Ok(release) => panic!("a 503 was taken as release {}", release.version),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("503"), "{error}");
+    }
 
     #[test]
     fn only_plain_version_text_is_accepted_from_a_remote() {
