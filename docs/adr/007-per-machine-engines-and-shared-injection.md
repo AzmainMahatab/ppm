@@ -49,8 +49,14 @@ site handed Detours that one file:
 * 32-bit applications and 32-bit children run virtualized; this is verified live by an x86 build
   of the probe that runs every suite as a root application and is spawned as a child of the
   64-bit probe (and spawns it in turn).
-* x64-on-ARM64 selection is covered by unit tests of `choose_engine`, but has not been run on an
-  ARM64 host; ARM64 CI (ROADMAP R32) closes that gap.
+* x64-on-ARM64 selection is covered by unit tests of `choose_engine` and runs live on the ARM64 CI
+  runner (ROADMAP R32), including an emulated x64 probe and x86 children of ARM64 parents.
+* Detours' own success is not taken as proof of injection: its `rundll32` helper exits 0 even
+  when it cannot load the engine, which once resumed x86 children with no engine on ARM64. After
+  injecting, `inject_suspended` looks for the restore payload Detours writes into the child once
+  its import table is patched (`DetourFindRemotePayload`) and refuses the spawn when it is
+  missing. A 32-bit injector cannot read a 64-bit child's memory above 4 GiB, so that route
+  still relies on the helper's exit code (ROADMAP S5).
 * An x86 process cannot inject an x64 child on an ARM64 host: Detours' helper for a 64-bit target
   is the host's native `rundll32`, which cannot load the x64 engine. Such a spawn is refused with
   `ERROR_NOT_SUPPORTED`.

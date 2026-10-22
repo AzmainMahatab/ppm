@@ -2,7 +2,13 @@
 
 use std::ffi::{c_char, c_void};
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::core::BOOL;
+use windows_sys::core::{BOOL, GUID};
+
+unsafe extern "C" {
+    /// The payload Detours writes into a process as the last step of adding DLLs to its import
+    /// table, holding what it needs to restore the original table.
+    pub static DETOUR_EXE_RESTORE_GUID: GUID;
+}
 
 // Why "system": Detours declares its API WINAPI (stdcall). On x64 and ARM64 that is the C
 // convention, but on 32-bit x86 a "C" declaration links against the wrong symbol.
@@ -25,6 +31,9 @@ unsafe extern "system" {
         rlpDlls: *const *const c_char,
         pfCreateProcessW: *const c_void,
     ) -> BOOL;
+
+    /// The payload `rguid` names in another process, or null when that process holds none.
+    pub fn DetourFindRemotePayload(hProcess: HANDLE, rguid: *const GUID, pcbData: *mut u32) -> *mut c_void;
 
     /// Whether this process is a Detours helper, in which case the engine must stay inert.
     pub fn DetourIsHelperProcess() -> BOOL;

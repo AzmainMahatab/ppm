@@ -503,3 +503,28 @@ fn test_e2e_emulated_x64_application_runs_virtualized_on_arm64() {
         "every suite must have run. Stdout: {stdout}"
     );
 }
+
+/// Regression: when the x86 engine could not load, Detours' `rundll32` helper still exited 0, so
+/// a 64-bit application's x86 child was resumed with no engine and ran outside virtualization.
+/// The x86 engine is replaced here by the native build, which the x86 helper cannot load.
+#[test]
+#[cfg(windows)]
+fn test_e2e_a_child_the_engine_cannot_reach_is_refused_rather_than_run_unvirtualized() {
+    let env = TestEnvironment::new();
+    env.deploy_probe_pair();
+    env.write_manifest(SINGLE_PROBE_MANIFEST);
+    let lib = env.root().join(".ppm").join("lib").join(env.arch);
+    fs::copy(lib.join("redirector64.dll"), lib.join("redirector32.dll")).expect("replace the x86 engine");
+
+    let output = env.run_probe("test-probe");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to spawn child test probe"),
+        "the x86 child must be refused at spawn. Stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("[CHILD"),
+        "the x86 child must never run without its engine. Stderr: {stderr}"
+    );
+}
