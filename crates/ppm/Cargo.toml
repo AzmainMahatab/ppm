@@ -65,7 +65,7 @@ engine-x86 = { path = "../engine-x86" }
 engine-x64 = { path = "../engine-x64" }
 
 [dev-dependencies]
-jsonschema = "0.52.1"
+jsonschema = "0.59.0"
 # The e2e harness seeds and inspects the real registry around each virtualized probe run.
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry"] }
 # A local HTTPS release host for the end-to-end install test.
