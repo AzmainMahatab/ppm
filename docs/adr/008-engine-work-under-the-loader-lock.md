@@ -48,5 +48,5 @@ work is justified rather than moved.
   `host_modules.rs` as a static import, and its entry must reference one function so the linker
   keeps it. `loaded` returns null only for a name outside the engine's imports, a programming
   error that the caller reports (see `host_modules.rs`).
-- Side quest S1 (badge monitor polling every 500 ms) is recorded in `ROADMAP.md`; an event hook
-  would end the polling. Not in scope here.
+- Side quest S1 (badge monitor polling every 500 ms) has since replaced the polling with window
+  event hooks on the same monitor thread; the loader-lock analysis above is unchanged.

@@ -1,15 +1,21 @@
 use crate::{BOOL, FALSE, TRUE};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, S_OK};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, S_OK, WPARAM};
 use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, HICON,
-    IsWindowVisible, WS_EX_TOOLWINDOW,
+    CHILDID_SELF, CWPSTRUCT, CallNextHookEx, DispatchMessageW, EVENT_OBJECT_SHOW, EnumWindows, GA_ROOT,
+    GWL_EXSTYLE, GetAncestor, GetClassNameW, GetMessageW, GetWindowLongW, GetWindowTextW,
+    GetWindowThreadProcessId, HC_ACTION, HICON, IsWindowVisible, MSG, OBJID_WINDOW, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, RegisterWindowMessageW, SetWindowsHookExW, WH_CALLWNDPROC,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNTHREAD, WM_APP, WM_USER, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::{GUID, HRESULT};
 
@@ -291,60 +297,213 @@ unsafe fn apply_overlay_to_window(hwnd: HWND, hicon: HICON) -> bool {
     }
 }
 
-unsafe fn is_window_owned_by_current_session(hwnd: HWND) -> bool {
+/// The registered message Explorer sends a window each time it creates that window's taskbar
+/// button - when it first appears, when it returns from the tray, and after Explorer restarts.
+static TASKBAR_BUTTON_CREATED: AtomicU32 = AtomicU32::new(0);
+
+/// The monitor thread, to which the per-thread message hooks post newly buttoned windows.
+static MONITOR_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+// Intention: Name the thread message that hands the monitor a window to badge (`wParam`).
+// Why: The `WM_APP` range is reserved for the application's own messages, and this one is only
+//      ever posted to the monitor thread's queue, never to a window.
+const WM_BADGE_WINDOW: u32 = WM_APP + 1;
+
+thread_local! {
+    /// GUI threads of this process that already carry the message hook. Touched only on the
+    /// monitor thread, where every hook callback runs.
+    static WATCHED_THREADS: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
+}
+
+/// Badges `hwnd` when it is a window that gets a taskbar button: top-level, visible, and not a
+/// tool window.
+unsafe fn badge_if_eligible(hwnd: HWND, hicon: HICON) {
     unsafe {
-        let mut window_pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, &mut window_pid);
-        if window_pid == std::process::id() {
-            return true;
+        let is_top_level = GetAncestor(hwnd, GA_ROOT) == hwnd;
+        let is_visible = IsWindowVisible(hwnd) != FALSE;
+        let is_tool_window = (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW) != 0;
+        if is_top_level && is_visible && !is_tool_window {
+            apply_overlay_to_window(hwnd, hicon);
         }
-        if window_pid == 0 {
-            return false;
+    }
+}
+
+/// Runs on an application GUI thread for every message sent to its windows, and forwards
+/// `TaskbarButtonCreated` to the monitor.
+///
+/// # Why the badge is not applied here
+/// Applying it initializes COM and calls into the shell; doing that on the application's own
+/// thread would change that thread's COM state under the application. The monitor thread owns
+/// all of it instead.
+unsafe extern "system" fn on_window_message(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        // SAFETY: for `HC_ACTION`, a `WH_CALLWNDPROC` hook's `lParam` points to the message's
+        // `CWPSTRUCT`, valid for the duration of the call.
+        let message = unsafe { &*(lparam as *const CWPSTRUCT) };
+        let button_created = TASKBAR_BUTTON_CREATED.load(Ordering::Acquire);
+        if button_created != 0 && message.message == button_created {
+            // SAFETY: posting a thread message has no memory preconditions; a failure only
+            // forfeits this badge.
+            unsafe {
+                PostThreadMessageW(
+                    MONITOR_THREAD_ID.load(Ordering::Acquire),
+                    WM_BADGE_WINDOW,
+                    message.hwnd as WPARAM,
+                    0,
+                )
+            };
         }
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    }
+    // SAFETY: passes the hook chain's own arguments on unchanged.
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+/// Hooks `thread_id`'s window messages once, so its windows' `TaskbarButtonCreated` reaches the
+/// monitor.
+///
+/// # Why the hook goes in before the first badge attempt
+/// A window's button is created some time after it is shown. With the hook in place first,
+/// either the button already exists when the attempt runs, or its creation message arrives
+/// through the hook - there is no moment in between where it can be missed.
+///
+/// # Known gap
+/// A hook belongs to the thread object, but this set remembers thread ids. If a GUI thread
+/// exits and Windows reuses its id for a new GUI thread, that thread is never hooked: its
+/// windows are still badged when shown, but not when their button only appears later.
+fn watch_thread(thread_id: u32) {
+    WATCHED_THREADS.with_borrow_mut(|watched| {
+        if !watched.insert(thread_id) {
+            return;
+        }
+        // SAFETY: a thread-local hook on a thread of this process needs no module handle;
+        // `on_window_message` lives in this DLL for the life of the process.
+        let hook = unsafe {
+            SetWindowsHookExW(
+                WH_CALLWNDPROC,
+                Some(on_window_message),
+                std::ptr::null_mut(),
+                thread_id,
+            )
         };
-        let h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, window_pid);
-        if !h_proc.is_null() {
-            let mut buf = [0u16; 1024];
-            let mut size = 1024u32;
-            if QueryFullProcessImageNameW(h_proc, 0, buf.as_mut_ptr(), &mut size) != 0 {
-                CloseHandle(h_proc);
-                let exe_str = String::from_utf16_lossy(&buf[..size as usize]);
-                let exe_path = std::path::PathBuf::from(exe_str);
-                let cfg = crate::paths::init_paths();
-                return exe_path.starts_with(&cfg.root);
-            }
-            CloseHandle(h_proc);
+        if hook.is_null() {
+            watched.remove(&thread_id);
+            tracing::warn!(
+                "Taskbar badge cannot watch GUI thread {thread_id}: {}",
+                std::io::Error::last_os_error()
+            );
         }
-        false
-    }
+    });
 }
 
-unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+/// Hooks the window's thread, then attempts the badge.
+unsafe fn on_shown(hwnd: HWND, thread_id: u32, hicon: HICON) {
+    watch_thread(thread_id);
+    // SAFETY: `hwnd` came from the system for a window of this process.
+    unsafe { badge_if_eligible(hwnd, hicon) };
+}
+
+/// Receives `EVENT_OBJECT_SHOW` for this process's windows, on the monitor thread.
+unsafe extern "system" fn on_window_shown(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    thread_id: u32,
+    _time: u32,
+) {
+    if id_object != OBJID_WINDOW || id_child != CHILDID_SELF as i32 {
+        return;
+    }
+    // SAFETY: the event names a window of this process.
+    unsafe { on_shown(hwnd, thread_id, get_or_create_badge_icon()) };
+}
+
+unsafe extern "system" fn collect_own_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let mut pid = 0u32;
+    // SAFETY: `hwnd` comes from EnumWindows and `lparam` is the `Vec` `badge_existing_windows`
+    // passed, alive for the whole enumeration.
     unsafe {
-        // Structural ownership filter only: a window qualifies when it belongs to this
-        // process or to any process rooted in the portable tree, and it is a visible,
-        // non-tool window. Class-name and title heuristics are gone - ownership is the
-        // contract, so every qualifying window gets the badge.
-        if is_window_owned_by_current_session(hwnd) {
-            let is_visible = IsWindowVisible(hwnd) != FALSE;
-            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            let is_tool_window = (ex_style & WS_EX_TOOLWINDOW) != 0;
-
-            if is_visible && !is_tool_window {
-                let list = &mut *(lparam as *mut Vec<HWND>);
-                list.push(hwnd);
-            }
+        let thread_id = GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == GetCurrentProcessId() {
+            (*(lparam as *mut Vec<(HWND, u32)>)).push((hwnd, thread_id));
         }
-        TRUE
+    }
+    TRUE
+}
+
+/// Treats every window this process already has as just shown: any shown before the event hook
+/// was registered would otherwise never be seen.
+unsafe fn badge_existing_windows(hicon: HICON) {
+    let mut windows: Vec<(HWND, u32)> = Vec::new();
+    // SAFETY: the callback only appends to `windows`, which outlives the call.
+    unsafe {
+        EnumWindows(Some(collect_own_window), &mut windows as *mut _ as LPARAM);
+        for (hwnd, thread_id) in windows {
+            on_shown(hwnd, thread_id, hicon);
+        }
     }
 }
 
-/// Background reconciliation loop: every 500 ms it re-enumerates this session's candidate
-/// windows and (re-)applies the overlay badge to any not yet badged. Windows that close or
-/// hide to tray are evicted from the badged set via `retain`, so restoring them re-badges.
+/// The monitor thread: hooks this process's window events, then pumps the messages those
+/// hooks deliver until the process ends.
+fn run_monitor() {
+    let hicon = get_or_create_badge_icon();
+    if hicon.is_null() {
+        return;
+    }
+    // SAFETY: plain Win32 calls on this thread; `msg` and the name buffer outlive their calls.
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        // Why: a thread has no message queue until it first calls a message function, and a
+        //      thread message posted before that is lost - so the queue exists before any hook
+        //      can post to it.
+        PeekMessageW(&mut msg, std::ptr::null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
+        MONITOR_THREAD_ID.store(GetCurrentThreadId(), Ordering::Release);
+        let name: Vec<u16> = "TaskbarButtonCreated\0".encode_utf16().collect();
+        TASKBAR_BUTTON_CREATED.store(RegisterWindowMessageW(name.as_ptr()), Ordering::Release);
+
+        let hook = SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_SHOW,
+            std::ptr::null_mut(),
+            Some(on_window_shown),
+            GetCurrentProcessId(),
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNTHREAD,
+        );
+        if hook.is_null() {
+            tracing::warn!(
+                "Taskbar badge monitor cannot hook window events; portable-mode overlay badges inactive"
+            );
+            return;
+        }
+        badge_existing_windows(hicon);
+
+        loop {
+            match GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) {
+                0 => return,
+                -1 => {
+                    tracing::warn!(
+                        "Taskbar badge monitor stopped: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    return;
+                }
+                _ if msg.hwnd.is_null() && msg.message == WM_BADGE_WINDOW => {
+                    apply_overlay_to_window(msg.wParam as HWND, hicon);
+                }
+                _ => {
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
+    }
+}
+
+/// Starts the badge monitor once per process. It badges this process's own windows: each
+/// virtualized process runs its own monitor, so every window of the session is covered, and a
+/// window of a process that runs outside virtualization is not badged as if it were inside.
 /// Best-effort by design: a spawn failure only forfeits the badge, never the virtualization.
 pub fn start_taskbar_monitor() {
     if MONITOR_RUNNING.swap(true, Ordering::SeqCst) {
@@ -353,37 +512,7 @@ pub fn start_taskbar_monitor() {
 
     if let Err(e) = std::thread::Builder::new()
         .name("taskbar_monitor".to_string())
-        .spawn(|| {
-            let hicon = get_or_create_badge_icon();
-            if hicon.is_null() {
-                return;
-            }
-
-            let mut badged_windows: HashSet<usize> = HashSet::new();
-
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-
-                let mut current_windows: Vec<HWND> = Vec::new();
-                unsafe {
-                    use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
-                    EnumWindows(
-                        Some(enum_windows_callback),
-                        &mut current_windows as *mut _ as LPARAM,
-                    );
-
-                    // Evict windows that were hidden to tray or closed so badges re-apply on restore
-                    badged_windows.retain(|&id| current_windows.iter().any(|&h| (h as usize) == id));
-
-                    for hwnd in current_windows {
-                        let id = hwnd as usize;
-                        if !badged_windows.contains(&id) && apply_overlay_to_window(hwnd, hicon) {
-                            badged_windows.insert(id);
-                        }
-                    }
-                }
-            }
-        })
+        .spawn(run_monitor)
     {
         // Release the single-flight flag so a later attach can retry the monitor.
         MONITOR_RUNNING.store(false, Ordering::SeqCst);

@@ -24,9 +24,10 @@ core portable variables shielded from redefinition - see [SPEC.md](SPEC.md) sect
 * **Root-scoped `AppUserModelID`**: `PPM.Portable.<16-hex root hash>.<app identity>` — derived
   from the canonicalized deployment root, so two deployments of the same app group separately
   on the taskbar and never collide with a host-installed copy.
-* **Portable Mode overlay badge**: a background monitor stamps visible top-level windows with
-  a drawn 16×16 teal "P" badge via `ITaskbarList3::SetOverlayIcon`, with continuous
-  reconciliation as windows appear, hide, and restore.
+* **Portable Mode overlay badge**: each virtualized process stamps its own visible top-level
+  windows with a drawn 16×16 teal "P" badge via `ITaskbarList3::SetOverlayIcon`. It reacts to
+  window events instead of polling: a window is badged when shown and again whenever Explorer
+  recreates its taskbar button (`TaskbarButtonCreated` - restore from tray, Explorer restart).
 
 ## Multi-Architecture Package Management
 
