@@ -197,6 +197,7 @@ crates/ppm/src/
 │   ├── context.rs                  # Root Resolution & Manifest Loading
 │   ├── logging.rs                  # Console (stderr) & rotating file log sinks
 │   ├── pipeline.rs                 # Dependency Ordering & Install Pipeline
+│   ├── pipeline/install_over_https.rs # End-to-end install against a local HTTPS release host
 │   └── commands/                   # One Module Per Command
 │       ├── init.rs  run.rs  check.rs  install.rs  update.rs
 │       └── link.rs  list.rs  schema.rs  validate.rs
@@ -220,7 +221,7 @@ crates/ppm/src/
     ├── mod.rs
     ├── pe_info.rs                  # PE Version Header Extractor (GetFileVersionInfoW)
     ├── version.rs                  # Version Resolution & Update Checking
-    ├── http.rs                     # Shared HTTP clients (User-Agent, timeouts)
+    ├── http.rs                     # HttpClients built once per command (User-Agent, timeouts, trust roots)
     ├── downloader.rs               # HTTPS-only Downloader with Progress Reporting
     ├── extractor.rs                # Archive Extractor (NSIS-7z, 7z, Zip, Tar/gzip, CAB, MSI) & atomic swap-in
     ├── msi_layout.rs               # MSI Directory/Component/File/Media tables -> administrative-image paths

@@ -5,6 +5,7 @@ use ppm::core::arch::CpuArch;
 use ppm::core::config::{AppDefinition, AppManifests, PackageKind};
 use ppm::engine;
 use ppm::package;
+use ppm::package::http::HttpClients;
 
 /// Resolves the dependency-closed install/update order for the target application.
 ///
@@ -141,6 +142,7 @@ fn is_already_current(policy: ReinstallPolicy, installed: Option<&str>, availabl
 
 /// Installs or refreshes a single application: resolve, fetch, download, extract, sanitize.
 pub(crate) fn install_app(
+    clients: &HttpClients,
     root: &Path,
     app_id: &str,
     app_def: &AppDefinition,
@@ -164,7 +166,7 @@ pub(crate) fn install_app(
     // installer that checked it again, paying two round trips per application to learn the
     // same answer.
     tracing::info!("• Checking online release for {}...", arch.as_str());
-    let release = package::version::check_remote_version(&app_def.version_check, arch)?;
+    let release = package::version::check_remote_version(clients, &app_def.version_check, arch)?;
     tracing::info!("• Found version {} at: {}", release.version, release.download_url);
 
     let installed = package::version::detect_local_version(root, app_def, arch);
@@ -188,6 +190,7 @@ pub(crate) fn install_app(
 
     tracing::info!("• Downloading package...");
     package::downloader::download_file(
+        clients,
         &release.download_url,
         &temp_archive,
         &format!("{} ({})", app_def.name, arch.as_str()),
@@ -310,6 +313,7 @@ pub(crate) fn update_plan(
 /// swallowed a failed remote check and still reported success, so `ppm update all` exited 0 with
 /// nothing updated. One cycle attempts every step and then reports what failed.
 pub(crate) fn run_install_cycle(
+    clients: &HttpClients,
     root: &Path,
     manifests: &AppManifests,
     plan: &[CycleStep],
@@ -329,7 +333,7 @@ pub(crate) fn run_install_cycle(
             .expect("invariant: plans only name applications the manifest defines");
         let arch = step.arch;
 
-        match install_app(root, &step.app_id, app_def, arch, policy) {
+        match install_app(clients, root, &step.app_id, app_def, arch, policy) {
             Ok(InstallOutcome::Installed { version }) => tracing::info!(
                 "✓ Successfully installed {} [{}] (v{version})",
                 app_def.name,
@@ -366,6 +370,9 @@ pub(crate) fn run_install_cycle(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod install_over_https;
 
 #[cfg(test)]
 mod tests {

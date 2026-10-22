@@ -3,6 +3,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::package::http::HttpClients;
+
 // Intention: Accept a package download only over TLS.
 // Why: The trust model is that the upstream host's latest release is authoritative (SPEC 6),
 //      which rests entirely on the transport authenticating that host. A plain-http URL in a
@@ -13,7 +15,7 @@ const REQUIRED_SCHEME: &str = "https";
 
 const CHUNK_SIZE: usize = 64 * 1024;
 
-pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<()> {
+pub fn download_file(clients: &HttpClients, url: &str, dest_path: &Path, display_name: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(url).with_context(|| format!("Malformed download URL '{url}'"))?;
     if parsed.scheme() != REQUIRED_SCHEME {
         bail!(
@@ -22,7 +24,8 @@ pub fn download_file(url: &str, dest_path: &Path, display_name: &str) -> Result<
         );
     }
 
-    let response = crate::package::http::download_client()?
+    let response = clients
+        .download()
         .get(url)
         .send()
         .with_context(|| format!("Failed to request '{url}'"))?;

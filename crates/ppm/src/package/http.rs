@@ -1,13 +1,16 @@
 //! The HTTP clients every remote operation shares.
 //!
-//! # Why this module exists
+//! # Why one value passed down rather than process-wide clients
 //! The version resolver built a client in each of its four strategies and the downloader built
 //! a fifth. Each copy hard-coded the same User-Agent string with a version literal that had
 //! already drifted from the crate version, none of them set any timeout, and no connection was
-//! ever reused across the `apps x architectures` check matrix.
+//! ever reused across the `apps x architectures` check matrix. A command now builds one
+//! [`HttpClients`] and hands it to everything that goes to the network, which also lets a test
+//! decide which certificate authorities the whole install pipeline trusts.
 
 use anyhow::{Context, Result};
-use std::sync::OnceLock;
+use reqwest::Certificate;
+use reqwest::blocking::{Client, ClientBuilder};
 use std::time::Duration;
 
 // How reqwest's blocking client applies `timeout`: to each blocking wait separately - `send()`
@@ -33,44 +36,66 @@ const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 //      minutes.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-static METADATA_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-static DOWNLOAD_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+/// Which certificate authorities a TLS server must chain to.
+#[derive(Debug, Clone)]
+pub enum TrustRoots {
+    /// The operating system's trust store, as a browser on the same machine would use.
+    Platform,
+    /// Exactly these roots and no others, such as the authority of a local test server.
+    Only(Vec<Certificate>),
+}
+
+/// The clients one command uses for all of its requests.
+#[derive(Debug, Clone)]
+pub struct HttpClients {
+    metadata: Client,
+    download: Client,
+}
+
+impl HttpClients {
+    pub fn new(trust: &TrustRoots) -> Result<Self> {
+        Ok(Self {
+            metadata: build(METADATA_TIMEOUT, trust)?,
+            download: build(DOWNLOAD_STALL_TIMEOUT, trust)?,
+        })
+    }
+
+    /// The client for release-metadata requests: small responses, each wait bounded.
+    pub fn metadata(&self) -> &Client {
+        &self.metadata
+    }
+
+    /// The client for package downloads.
+    ///
+    /// # Why a stall bound rather than a whole-request budget
+    /// A package is hundreds of megabytes; any fixed budget for the whole transfer would abort
+    /// legitimate slow downloads. Bounding each chunk read instead fails only a transfer that has
+    /// stopped delivering bytes.
+    pub fn download(&self) -> &Client {
+        &self.download
+    }
+}
 
 /// The User-Agent every request carries, derived from the crate version so it cannot drift.
 fn user_agent() -> String {
     format!("ppm-portable-package-manager/{}", env!("CARGO_PKG_VERSION"))
 }
 
-fn build(wait_timeout: Duration) -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+fn build(wait_timeout: Duration, trust: &TrustRoots) -> Result<Client> {
+    let builder = Client::builder()
         .user_agent(user_agent())
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(wait_timeout)
+        .timeout(wait_timeout);
+    trusting(builder, trust)
         .build()
         .context("Failed to build the HTTP client")
 }
 
-/// The shared client for release-metadata requests: small responses, each wait bounded.
-pub fn metadata_client() -> Result<&'static reqwest::blocking::Client> {
-    if let Some(existing) = METADATA_CLIENT.get() {
-        return Ok(existing);
+fn trusting(builder: ClientBuilder, trust: &TrustRoots) -> ClientBuilder {
+    match trust {
+        TrustRoots::Platform => builder,
+        TrustRoots::Only(roots) => builder.tls_certs_only(roots.iter().cloned()),
     }
-    let built = build(METADATA_TIMEOUT)?;
-    Ok(METADATA_CLIENT.get_or_init(|| built))
-}
-
-/// The shared client for package downloads.
-///
-/// # Why a stall bound rather than a whole-request budget
-/// A package is hundreds of megabytes; any fixed budget for the whole transfer would abort
-/// legitimate slow downloads. Bounding each chunk read instead fails only a transfer that has
-/// stopped delivering bytes.
-pub fn download_client() -> Result<&'static reqwest::blocking::Client> {
-    if let Some(existing) = DOWNLOAD_CLIENT.get() {
-        return Ok(existing);
-    }
-    let built = build(DOWNLOAD_STALL_TIMEOUT)?;
-    Ok(DOWNLOAD_CLIENT.get_or_init(|| built))
 }
 
 #[cfg(test)]
@@ -84,19 +109,6 @@ mod tests {
         assert!(
             agent.ends_with(env!("CARGO_PKG_VERSION")),
             "the User-Agent must not carry a literal that drifts from the crate version"
-        );
-    }
-
-    #[test]
-    fn each_shared_client_is_built_once() {
-        let first = metadata_client().expect("metadata client");
-        let second = metadata_client().expect("metadata client");
-        assert!(std::ptr::eq(first, second));
-
-        let download = download_client().expect("download client");
-        assert!(
-            !std::ptr::eq(first, download),
-            "downloads carry their own stall bound, not the metadata client's"
         );
     }
 }

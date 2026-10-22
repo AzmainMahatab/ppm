@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ppm::core::arch::{ArchTarget, CpuArch};
+use ppm::package::http::{HttpClients, TrustRoots};
 
 use crate::cli::context::load_manifest;
 use crate::cli::pipeline::{ReinstallPolicy, UpdateTarget, run_install_cycle, update_plan};
@@ -20,7 +21,14 @@ pub(crate) fn run(root: &Path, app: Option<&str>, arch: Option<ArchTarget>) -> a
         );
         return Ok(());
     }
-    run_install_cycle(root, &manifests, &plan, ReinstallPolicy::SkipWhenCurrent)?;
+    let clients = HttpClients::new(&TrustRoots::Platform)?;
+    run_install_cycle(
+        &clients,
+        root,
+        &manifests,
+        &plan,
+        ReinstallPolicy::SkipWhenCurrent,
+    )?;
 
     tracing::info!("✓ Update check and upgrade cycle complete!");
     Ok(())

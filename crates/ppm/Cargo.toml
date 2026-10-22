@@ -66,6 +66,8 @@ engine-x64 = { path = "../engine-x64" }
 
 [dev-dependencies]
 jsonschema = "0.52.1"
+# A local HTTPS release host for the end-to-end install test.
+httpmock = { version = "0.9", default-features = false, features = ["https"] }
 # Intention: Provide the virtualization probe executable through Cargo's own build graph.
 # Why: A bin-artifact dependency makes Cargo compile the probe whenever test targets are built and
 #      export its absolute path (CARGO_BIN_FILE_TEST_PROBE_test-probe); dev-dependencies never enter

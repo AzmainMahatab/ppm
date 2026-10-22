@@ -4,6 +4,7 @@ use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Table};
 use ppm::core::arch::ArchTarget;
 use ppm::package;
+use ppm::package::http::{HttpClients, TrustRoots};
 
 use crate::cli::context::load_manifest;
 
@@ -14,6 +15,7 @@ pub(crate) fn run(root: &Path, arch: ArchTarget) -> anyhow::Result<()> {
         target_archs.iter().map(|a| a.as_str()).collect::<Vec<_>>()
     );
     let manifests = load_manifest(root)?;
+    let clients = HttpClients::new(&TrustRoots::Platform)?;
 
     let mut table = Table::new();
     table
@@ -43,7 +45,8 @@ pub(crate) fn run(root: &Path, arch: ArchTarget) -> anyhow::Result<()> {
 
             // 100% Dynamic presence-based local version detection from PE header
             let local_v = package::version::detect_local_version(root, app_def, target_arch);
-            let remote_res = package::version::check_remote_version(&app_def.version_check, target_arch);
+            let remote_res =
+                package::version::check_remote_version(&clients, &app_def.version_check, target_arch);
 
             let is_installed = app_def.is_installed_for_arch(root, target_arch);
             let local_display = match (&local_v, is_installed) {

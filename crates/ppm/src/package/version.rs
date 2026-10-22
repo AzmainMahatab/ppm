@@ -2,7 +2,7 @@ use crate::core::arch::CpuArch;
 use crate::core::config::{
     AppDefinition, ElectronManifestCheck, GitHubReleaseCheck, JsonApiCheck, RegexUrlCheck, VersionCheckConfig,
 };
-use crate::package::http;
+use crate::package::http::HttpClients;
 use crate::package::pe_info::{get_electron_package_version, get_pe_product_version};
 use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
@@ -66,8 +66,12 @@ fn resolve_manifest_reference(manifest_url: &str, reference: &str) -> Result<Str
 }
 
 /// Fetches the latest upstream version and resolved download URL for a specific CPU architecture.
-pub fn check_remote_version(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
-    let release = fetch_release(config, arch)?;
+pub fn check_remote_version(
+    clients: &HttpClients,
+    config: &VersionCheckConfig,
+    arch: CpuArch,
+) -> Result<RemoteRelease> {
+    let release = fetch_release(clients, config, arch)?;
     check_version_text(&release.version)?;
     Ok(release)
 }
@@ -90,7 +94,7 @@ fn check_version_text(version: &str) -> Result<()> {
     Ok(())
 }
 
-fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
+fn fetch_release(clients: &HttpClients, config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRelease> {
     match config {
         VersionCheckConfig::ElectronManifest(ElectronManifestCheck {
             url,
@@ -101,7 +105,7 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No manifest URL configured for arch '{}'", arch.as_str()))?;
 
-            let response = http::metadata_client()?.get(&manifest_url).send()?;
+            let response = clients.metadata().get(&manifest_url).send()?;
             let text = response.text()?;
 
             let yaml: Value = serde_saphyr::from_str(&text)
@@ -140,7 +144,7 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
 
         VersionCheckConfig::GitHubRelease(GitHubReleaseCheck { repo, asset_pattern }) => {
             let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
-            let resp = http::metadata_client()?.get(&api_url).send()?;
+            let resp = clients.metadata().get(&api_url).send()?;
             let json: Value = resp.json()?;
 
             let tag_name = json
@@ -204,7 +208,7 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No version_key configured for arch '{}'", arch.as_str()))?;
 
-            let resp = http::metadata_client()?.get(&api_url).send()?;
+            let resp = clients.metadata().get(&api_url).send()?;
             let json: Value = resp.json()?;
 
             let version = resolve_json_query(&json, &v_key)?
@@ -252,7 +256,7 @@ fn fetch_release(config: &VersionCheckConfig, arch: CpuArch) -> Result<RemoteRel
                 .resolve(arch)
                 .ok_or_else(|| anyhow!("No URL template configured for arch '{}'", arch.as_str()))?;
 
-            let resp = http::metadata_client()?.get(&scrape_url).send()?;
+            let resp = clients.metadata().get(&scrape_url).send()?;
             let body = resp.text()?;
 
             let re = Regex::new(&regex_str)?;
