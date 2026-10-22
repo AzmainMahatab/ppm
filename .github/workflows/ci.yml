@@ -58,9 +58,8 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup MSVC Environment
-        uses: ilammy/msvc-dev-cmd@v1
-
+      # No MSVC environment action: `cc` finds the compiler for each target (x64, x86) through
+      # vswhere, and rustc finds the linker the same way.
       - name: Install Pinned Rust Toolchain
         run: rustup toolchain install
 

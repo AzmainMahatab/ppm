@@ -99,10 +99,8 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: x64
-            msvc_arch: x64
           - target: aarch64-pc-windows-msvc
             arch: arm64
-            msvc_arch: amd64_arm64
     steps:
       - name: Checkout Repository with Submodules
         uses: actions/checkout@v7
@@ -110,10 +108,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Setup MSVC Cross-Compilation Environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.msvc_arch }}
+      # No MSVC environment action: `cc` and rustc locate the compiler and linker for the target,
+      # including the x64-hosted ARM64 cross tools, through vswhere.
 
       # The target must be added to the toolchain rust-toolchain.toml pins, which is the one
       # cargo runs; adding it to a separately installed stable toolchain leaves the pinned
