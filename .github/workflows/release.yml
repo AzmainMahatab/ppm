@@ -155,11 +155,43 @@ jobs:
             ppm-*-windows-${{ matrix.arch }}.zip.sha256
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # STAGE 3: Publish GitHub Release & Checksums
+  # STAGE 3: Smoke-test each archive on a runner of its own architecture
+  # ─────────────────────────────────────────────────────────────────────────────
+  smoke:
+    name: Smoke Test (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - name: Checkout Smoke Script
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ppm-artifact-${{ matrix.arch }}
+          path: artifact
+
+      - name: Run init and run from the archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem artifact -Filter "ppm-*-windows-${{ matrix.arch }}.zip" | Select-Object -First 1
+          ./.github/scripts/smoke-release.ps1 -Archive $archive.FullName -Arch ${{ matrix.arch }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # STAGE 4: Publish GitHub Release & Checksums
   # ─────────────────────────────────────────────────────────────────────────────
   publish:
     name: Publish GitHub Release
-    needs: [version, build]
+    needs: [version, build, smoke]
     runs-on: windows-latest
     steps:
       - name: Download Build Artifacts
