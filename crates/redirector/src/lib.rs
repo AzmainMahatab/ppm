@@ -13,8 +13,30 @@ pub const TRUE: BOOL = 1;
 pub const FALSE: BOOL = 0;
 
 use std::sync::atomic::{AtomicIsize, Ordering};
-use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
+use windows_sys::Win32::System::Threading::ExitProcess;
+
+/// Ordinal 1 (exports.def): the entry point Detours' `rundll32` helper runs to inject a process of
+/// this DLL's bitness. It patches the child, verifies the patch, and confirms it to the injector
+/// (`injection::helper`); the exit code is what Detours reports to the injector.
+///
+/// # Safety
+/// Only `rundll32` may call it, as ordinal 1 in a helper process Detours started: it ends the
+/// process.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ppm_finish_helper(
+    _window: HWND,
+    _instance: HMODULE,
+    _command_line: *const u8,
+    _show: i32,
+) {
+    // SAFETY: `rundll32` calls ordinal 1 only in the helper process Detours started, where the
+    // helper payload is present.
+    let code = unsafe { injection::helper::finish_helper_process() };
+    // SAFETY: the helper process exists only to run this export.
+    unsafe { ExitProcess(code) }
+}
 
 pub static HMODULE_SELF: AtomicIsize = AtomicIsize::new(0);
 

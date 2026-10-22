@@ -17,6 +17,7 @@
 
 pub mod detours;
 mod engine;
+pub mod helper;
 mod machine;
 
 pub use engine::{ENGINE_DLL_32, ENGINE_DLL_64, EngineChoice, Route, choose_engine, encode_in_code_page};
@@ -56,6 +57,8 @@ pub enum InjectError {
     },
     #[error("Detours reported success, but '{}' is not in the process's import table", dll.display())]
     NotApplied { dll: PathBuf },
+    #[error("cannot set up the helper's confirmation for the child process")]
+    HelperHandshake(#[source] std::io::Error),
 }
 
 impl InjectError {
@@ -67,7 +70,9 @@ impl InjectError {
                 .map_or(ERROR_NOT_SUPPORTED, |code| code as u32)
         };
         match self {
-            InjectError::MachineQuery(cause) | InjectError::Detours { cause, .. } => from_io(cause),
+            InjectError::MachineQuery(cause)
+            | InjectError::Detours { cause, .. }
+            | InjectError::HelperHandshake(cause) => from_io(cause),
             InjectError::EngineMissing { .. } => ERROR_FILE_NOT_FOUND,
             InjectError::NotApplied { .. } => ERROR_MOD_NOT_FOUND,
             InjectError::UnsupportedMachine(_)
@@ -108,34 +113,40 @@ pub unsafe fn inject_suspended(
 
     let dll = engine::ansi_path(&choice.dll)?;
     let dlls = [dll.as_ptr()];
+    // Why each route verifies differently: the direct route patches a child of the injector's own
+    // bitness, which the injector can inspect; through the helper the child may be beyond what the
+    // injector can read, so the helper inspects it and confirms through the handshake.
     // SAFETY: `dlls` holds one NUL-terminated string that outlives both calls; the process is
     // suspended and the handle carries the rights the caller guarantees.
-    let injected = unsafe {
+    let verified = unsafe {
         match choice.route {
-            Route::Direct => detours::DetourUpdateProcessWithDll(process, dlls.as_ptr(), 1),
-            Route::ViaHelper => detours::DetourProcessViaHelperDllsW(pid, 1, dlls.as_ptr(), create_process_w),
+            Route::Direct => {
+                if detours::DetourUpdateProcessWithDll(process, dlls.as_ptr(), 1) == 0 {
+                    return Err(detours_failure(choice.dll));
+                }
+                import_table_was_patched(process)
+            }
+            Route::ViaHelper => {
+                let handshake = helper::Handshake::create(pid).map_err(InjectError::HelperHandshake)?;
+                if detours::DetourProcessViaHelperDllsW(pid, 1, dlls.as_ptr(), create_process_w) == 0 {
+                    return Err(detours_failure(choice.dll));
+                }
+                handshake.confirmed()
+            }
         }
     };
-    if injected == 0 {
-        return Err(InjectError::Detours {
-            dll: choice.dll,
-            cause: std::io::Error::last_os_error(),
-        });
-    }
-    // SAFETY: forwarded caller contract - `process` is a live process handle.
-    if can_inspect(Machine::current(), child) && !unsafe { import_table_was_patched(process) } {
+    if !verified {
         return Err(InjectError::NotApplied { dll: choice.dll });
     }
     Ok(child)
 }
 
-/// Whether an injector built for `injector` can read the memory of a `child` process.
-///
-/// # Why a 32-bit injector cannot check a 64-bit child
-/// A 32-bit process sees only the low 4 GiB of another process's address space, and a 64-bit
-/// child's image - with the payload Detours places near it - normally loads above that.
-fn can_inspect(injector: Machine, child: Machine) -> bool {
-    injector.is_64_bit() || !child.is_64_bit()
+/// Detours' own failure for `dll`, with the error it left.
+fn detours_failure(dll: PathBuf) -> InjectError {
+    InjectError::Detours {
+        dll,
+        cause: std::io::Error::last_os_error(),
+    }
 }
 
 /// Whether Detours finished adding a DLL to the suspended process's import table.
@@ -144,12 +155,13 @@ fn can_inspect(injector: Machine, child: Machine) -> bool {
 /// For a process of the other bitness, Detours reports the exit code of its `rundll32` helper,
 /// and `rundll32` exits 0 even when it cannot load the DLL at all - so a failed helper resumed
 /// the child with no engine, outside virtualization. The restore payload is the last thing
-/// Detours writes into the target once the import table is patched, by either route, and it is
-/// in place before the process runs.
+/// Detours writes into the target once the import table is patched, and it is in place before
+/// the process runs. The caller must have the child's bitness: a 32-bit process cannot read a
+/// 64-bit child's memory above 4 GiB, where the payload normally lies.
 ///
 /// # Safety
 /// `process` must be a live process handle with `PROCESS_VM_READ` and `PROCESS_QUERY_INFORMATION`.
-unsafe fn import_table_was_patched(process: HANDLE) -> bool {
+pub(crate) unsafe fn import_table_was_patched(process: HANDLE) -> bool {
     // SAFETY: the caller guarantees the handle; the GUID is a static Detours defines, and the
     // optional size output is null.
     let payload = unsafe {
@@ -160,19 +172,4 @@ unsafe fn import_table_was_patched(process: HANDLE) -> bool {
         )
     };
     !payload.is_null()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_import_check_runs_wherever_the_injector_can_address_the_child() {
-        // The route that resumed children with no engine on ARM64: a 64-bit injector, an x86 child.
-        assert!(can_inspect(Machine::X64, Machine::X86));
-        assert!(can_inspect(Machine::Arm64, Machine::X86));
-        assert!(can_inspect(Machine::X64, Machine::Arm64));
-        assert!(can_inspect(Machine::X86, Machine::X86));
-        assert!(!can_inspect(Machine::X86, Machine::X64));
-    }
 }

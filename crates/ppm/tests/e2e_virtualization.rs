@@ -510,21 +510,39 @@ fn test_e2e_emulated_x64_application_runs_virtualized_on_arm64() {
 #[test]
 #[cfg(windows)]
 fn test_e2e_a_child_the_engine_cannot_reach_is_refused_rather_than_run_unvirtualized() {
+    assert_unloadable_engine_refuses_the_child("test-probe", "redirector32.dll", "redirector64.dll");
+}
+
+/// Regression: an x86 application's 64-bit child had the same gap, and the parent could not check
+/// it itself - a 32-bit process cannot read a 64-bit child's memory - so the 64-bit helper now
+/// verifies its own work and signals the parent. The native engine is replaced here by the x86
+/// build, which the native helper cannot load.
+#[test]
+#[cfg(windows)]
+fn test_e2e_a_native_child_of_an_x86_application_is_refused_when_its_engine_cannot_load() {
+    assert_unloadable_engine_refuses_the_child("test-probe-x86", "redirector64.dll", "redirector32.dll");
+}
+
+/// Replaces the `broken` engine with a copy of `other`, which the helper for `broken`'s bitness
+/// cannot load, runs `app`, and requires that its peer of that bitness is refused at spawn rather
+/// than run without an engine. The root launch itself never needs `broken`.
+#[cfg(windows)]
+fn assert_unloadable_engine_refuses_the_child(app: &str, broken: &str, other: &str) {
     let env = TestEnvironment::new();
     env.deploy_probe_pair();
     env.write_manifest(SINGLE_PROBE_MANIFEST);
     let lib = env.root().join(".ppm").join("lib").join(env.arch);
-    fs::copy(lib.join("redirector64.dll"), lib.join("redirector32.dll")).expect("replace the x86 engine");
+    fs::copy(lib.join(other), lib.join(broken)).expect("replace the engine");
 
-    let output = env.run_probe("test-probe");
+    let output = env.run_probe(app);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("failed to spawn child test probe"),
-        "the x86 child must be refused at spawn. Stderr: {stderr}"
+        "the child must be refused at spawn. Stderr: {stderr}"
     );
     assert!(
         !stderr.contains("[CHILD"),
-        "the x86 child must never run without its engine. Stderr: {stderr}"
+        "the child must never run without its engine. Stderr: {stderr}"
     );
 }

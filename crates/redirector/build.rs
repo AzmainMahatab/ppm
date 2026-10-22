@@ -3,8 +3,9 @@ use std::path::PathBuf;
 
 // Intention: Export Detours' helper entry point from redirector.dll.
 // Why: Detours injects a process of the other bitness through `rundll32 <dll>,#1`, so ordinal 1
-//      must be `DetourFinishHelperProcess` (exports.def). Detours itself is compiled and linked
-//      by the `injection` crate.
+//      must be the helper entry point (exports.def): `ppm_finish_helper`, which does what
+//      Detours' `DetourFinishHelperProcess` does and then confirms the injection to the
+//      injector. Detours itself is compiled and linked by the `injection` crate.
 fn main() {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)

@@ -52,11 +52,14 @@ site handed Detours that one file:
 * x64-on-ARM64 selection is covered by unit tests of `choose_engine` and runs live on the ARM64 CI
   runner (ROADMAP R32), including an emulated x64 probe and x86 children of ARM64 parents.
 * Detours' own success is not taken as proof of injection: its `rundll32` helper exits 0 even
-  when it cannot load the engine, which once resumed x86 children with no engine on ARM64. After
-  injecting, `inject_suspended` looks for the restore payload Detours writes into the child once
-  its import table is patched (`DetourFindRemotePayload`) and refuses the spawn when it is
-  missing. A 32-bit injector cannot read a 64-bit child's memory above 4 GiB, so that route
-  still relies on the helper's exit code (ROADMAP S5).
+  when it cannot load the engine, which once resumed x86 children with no engine on ARM64. On
+  the direct route `inject_suspended` looks for the restore payload Detours writes into the child
+  once its import table is patched (`DetourFindRemotePayload`). Through the helper the injector
+  may not be able to read the child (a 32-bit process cannot see a 64-bit child's memory above
+  4 GiB), so the engine's ordinal-1 export (`ppm_finish_helper`) does the helper's work itself,
+  checks that payload from the child's own bitness, and only then sets a named event the
+  injector created for that child (`injection::helper`). A spawn whose check fails, or whose
+  helper never ran our code, is refused instead of resumed without an engine.
 * An x86 process cannot inject an x64 child on an ARM64 host: Detours' helper for a 64-bit target
   is the host's native `rundll32`, which cannot load the x64 engine. Such a spawn is refused with
   `ERROR_NOT_SUPPORTED`.

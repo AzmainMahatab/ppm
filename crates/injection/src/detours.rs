@@ -8,6 +8,9 @@ unsafe extern "C" {
     /// The payload Detours writes into a process as the last step of adding DLLs to its import
     /// table, holding what it needs to restore the original table.
     pub static DETOUR_EXE_RESTORE_GUID: GUID;
+
+    /// The payload Detours copies into its `rundll32` helper: the target's pid and the DLLs to add.
+    pub static DETOUR_EXE_HELPER_GUID: GUID;
 }
 
 // Why "system": Detours declares its API WINAPI (stdcall). On x64 and ARM64 that is the C
@@ -31,6 +34,12 @@ unsafe extern "system" {
         rlpDlls: *const *const c_char,
         pfCreateProcessW: *const c_void,
     ) -> BOOL;
+
+    /// The payload `rguid` names in this process, or null; `pcbData` receives its size.
+    pub fn DetourFindPayloadEx(rguid: *const GUID, pcbData: *mut u32) -> *mut c_void;
+
+    /// Releases a payload found with `DetourFindPayloadEx`.
+    pub fn DetourFreePayload(pvData: *mut c_void) -> BOOL;
 
     /// The payload `rguid` names in another process, or null when that process holds none.
     pub fn DetourFindRemotePayload(hProcess: HANDLE, rguid: *const GUID, pcbData: *mut u32) -> *mut c_void;
