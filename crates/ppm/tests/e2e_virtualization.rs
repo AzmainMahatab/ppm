@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+
+#[cfg(windows)]
+#[path = "e2e_support/host_registry.rs"]
+mod host_registry;
 
 const SINGLE_PROBE_MANIFEST: &str = r#"{
         "$schema": "./apps.schema.json",
@@ -133,6 +137,21 @@ impl TestEnvironment {
             .expect("Failed to copy the x86 probe binary");
     }
 
+    /// Runs `app` through `ppm run` with its registry suite pointed at a freshly seeded host
+    /// tree, and asserts afterwards that the run left the real tree exactly as seeded.
+    fn run_probe(&self, app: &str) -> Output {
+        let host_keys = host_registry::SeededProbeRoot::seed(app);
+        let output = Command::new(self.root().join("ppm.exe"))
+            .args(["run", app])
+            .current_dir(self.root())
+            .env("PPM_ROOT", self.root())
+            .env("PPM_TEST_REGISTRY_ROOT", host_keys.path())
+            .output()
+            .unwrap_or_else(|error| panic!("Failed to run ppm run {app}: {error}"));
+        host_keys.assert_untouched();
+        output
+    }
+
     fn write_manifest(&self, apps_json: &str) {
         fs::write(self.root().join(".ppm").join("apps.json"), apps_json).expect("Failed to write apps.json");
     }
@@ -146,12 +165,7 @@ fn test_e2e_virtualization_with_probe() {
     let apps_json = SINGLE_PROBE_MANIFEST;
     env.write_manifest(apps_json);
 
-    let output = Command::new(env.root().join("ppm.exe"))
-        .args(["run", "test-probe"])
-        .current_dir(env.root())
-        .env("PPM_ROOT", env.root())
-        .output()
-        .expect("Failed to run ppm run test-probe");
+    let output = env.run_probe("test-probe");
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     let stderr_str = String::from_utf8_lossy(&output.stderr);
@@ -425,12 +439,7 @@ fn test_e2e_x86_application_runs_virtualized() {
     env.deploy_probe_pair();
     env.write_manifest(SINGLE_PROBE_MANIFEST);
 
-    let output = Command::new(env.root().join("ppm.exe"))
-        .args(["run", "test-probe-x86"])
-        .current_dir(env.root())
-        .env("PPM_ROOT", env.root())
-        .output()
-        .expect("Failed to run ppm run test-probe-x86");
+    let output = env.run_probe("test-probe-x86");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -455,12 +464,7 @@ fn test_e2e_root_with_a_non_ascii_path_runs_virtualized() {
     env.deploy_probe_pair();
     env.write_manifest(SINGLE_PROBE_MANIFEST);
 
-    let output = Command::new(env.root().join("ppm.exe"))
-        .args(["run", "test-probe"])
-        .current_dir(env.root())
-        .env("PPM_ROOT", env.root())
-        .output()
-        .expect("Failed to run ppm run test-probe");
+    let output = env.run_probe("test-probe");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -486,12 +490,7 @@ fn test_e2e_emulated_x64_application_runs_virtualized_on_arm64() {
     env.deploy_emulated_x64_probe_pair();
     env.write_manifest(SINGLE_PROBE_MANIFEST);
 
-    let output = Command::new(env.root().join("ppm.exe"))
-        .args(["run", "test-probe"])
-        .current_dir(env.root())
-        .env("PPM_ROOT", env.root())
-        .output()
-        .expect("Failed to run ppm run test-probe");
+    let output = env.run_probe("test-probe");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

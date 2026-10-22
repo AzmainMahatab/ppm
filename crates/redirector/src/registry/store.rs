@@ -221,7 +221,9 @@ fn resolve_key_in(data: &VirtualRegistryData, norm_key: &str) -> KeyResolution {
 /// # Why a key can be born masked
 /// Creating a key inside a subtree the application already deleted must not resurrect the
 /// host copy's values or children: the app asked for a fresh key. When the chain resolves as
-/// `Masked`, the new entries are therefore born with both host masks set.
+/// `Masked`, the entries this call brings to life - new ones and revived tombstones - are
+/// therefore born with both host masks set. A live ancestor the walk stops at is left as it
+/// was: masking it would hide every host sibling of the re-created key.
 ///
 /// # Invariant
 /// On return, `data.keys[..]` holds the returned normalized key and it is not a tombstone.
@@ -237,6 +239,7 @@ fn materialize_chain(data: &mut VirtualRegistryData, key_path: &str) -> String {
         let is_self = depth == 0;
         let existed = data.keys.contains_key(&candidate);
         let node = data.keys.entry(candidate).or_default();
+        let comes_to_life = is_self || !existed || node.is_tombstone;
 
         node.is_tombstone = false;
         // First writer names the key: a later differently-cased reference must not rewrite the
@@ -244,7 +247,7 @@ fn materialize_chain(data: &mut VirtualRegistryData, key_path: &str) -> String {
         if node.display_name.is_none() {
             node.display_name = Some(display);
         }
-        if born_masked {
+        if born_masked && comes_to_life {
             node.host_values_masked = true;
             node.host_subkeys_masked = true;
         }
@@ -700,6 +703,31 @@ mod tests {
         // A sibling never re-created stays masked by the original tombstone.
         assert_eq!(
             store.resolve_key("HKCU\\Software\\App\\Untouched"),
+            KeyResolution::Masked
+        );
+    }
+
+    /// Regression: re-creating a deleted key also set the host masks on its live parent, so every
+    /// host sibling of that key - and the parent's own host values - vanished from view.
+    #[test]
+    fn re_creating_a_deleted_key_leaves_its_live_parent_untouched() {
+        let (_dir, store) = store();
+
+        store.create_key("HKCU\\Software\\App");
+        store.delete_key("HKCU\\Software\\App\\Doomed");
+        store.create_key("HKCU\\Software\\App\\Doomed");
+
+        assert_eq!(
+            store.resolve_key("HKCU\\Software\\App\\HostSibling"),
+            KeyResolution::PassThrough
+        );
+        assert_eq!(
+            store.resolve_value("HKCU\\Software\\App", "HostValue"),
+            ValueResolution::PassThrough
+        );
+        // The re-created key itself is fresh: nothing of its deleted host copy shows through.
+        assert_eq!(
+            store.resolve_key("HKCU\\Software\\App\\Doomed\\HostChild"),
             KeyResolution::Masked
         );
     }

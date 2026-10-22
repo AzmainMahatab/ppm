@@ -15,7 +15,8 @@ use windows_sys::Win32::Foundation::{
     ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, FILETIME, HMODULE,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ, RRF_NOEXPAND, RRF_RT_ANY,
+    HKEY, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_CREATED_NEW_KEY, REG_EXPAND_SZ, REG_MULTI_SZ,
+    REG_OPENED_EXISTING_KEY, REG_SZ, RRF_NOEXPAND, RRF_RT_ANY,
 };
 
 // Intention: Name the `RegGetValueW` flag that winreg.h defines but the windows-sys bindings
@@ -543,80 +544,80 @@ unsafe extern "system" fn hook_reg_create_key_ex_w(
             &wide_to_string(lp_sub_key),
             phk_result,
             lpdw_disposition,
-            || unsafe {
-                real_fn(
-                    hkey,
-                    lp_sub_key,
-                    reserved,
-                    lp_class,
-                    dw_options,
-                    sam_desired,
-                    lp_security_attributes,
-                    phk_result,
-                    lpdw_disposition,
-                )
+            || {
+                let host_open: FnRegOpenKeyExW =
+                    unsafe { std::mem::transmute(load_trampoline(&REAL_REG_OPEN_KEY_EX_W)) };
+                unsafe { host_open(hkey, lp_sub_key, 0, host_read_access(sam_desired), phk_result) }
             }
         )
     )
 }
 
-/// Creates `subkey` under `hkey` in the overlay, then runs `host_create` for the host side.
+/// The access a create hook asks for when it opens the host side of a key: read access in the
+/// view (`KEY_WOW64_*`) the caller selected.
 ///
-/// # Why the host create still runs
-/// The overlay shadows values and deletions, but subkey *existence* still falls through to the
-/// host so an app can open the keys its installer left behind. The host key this creates is
-/// empty - every value written into it is virtualized - and the probe's disposition assertion
-/// depends on it. Narrowing this to a pure overlay create is a separate decision, not an
-/// oversight.
+/// # Why read access is enough
+/// Every write through the returned handle reaches a hooked entry point, which records it in the
+/// overlay; the host handle only serves reads of what the host already holds.
+fn host_read_access(sam_desired: u32) -> u32 {
+    KEY_READ | (sam_desired & (KEY_WOW64_32KEY | KEY_WOW64_64KEY))
+}
+
+/// Creates `subkey` under `hkey` in the overlay; on the host side the key is only ever opened,
+/// through `host_open`.
+///
+/// # Why the host key is opened, never created
+/// Subkey existence still falls through to the host so an app can open the keys its installer
+/// left behind, so a key the host already holds is opened and its handle registered, letting
+/// reads merge host data beneath the overlay. Creating the key on the host instead left an empty
+/// key in the real registry for every key the app ever made.
+///
+/// # Ex
+/// existing host key -> host handle, `REG_OPENED_EXISTING_KEY`; key in neither -> virtual handle,
+/// `REG_CREATED_NEW_KEY`; host key the app deleted earlier -> host handle over a masked key,
+/// `REG_CREATED_NEW_KEY`
 fn create_key_virtually(
     api: &str,
     hkey: HKEY,
     subkey: &str,
     phk_result: *mut HKEY,
     lpdw_disposition: *mut u32,
-    host_create: impl Fn() -> i32,
+    host_open: impl Fn() -> i32,
 ) -> i32 {
+    if phk_result.is_null() {
+        return ERROR_INVALID_PARAMETER as i32;
+    }
     let Target::Resolved { path, synthetic } = resolve_subkey(hkey, subkey) else {
         return refuse_untracked_mutation(api);
     };
 
+    let before = get_registry_store().resolve_key(&path);
     get_registry_store().create_key(&path);
     tracing::info!("{api}: Virtual key created -> {path}");
 
-    if synthetic && !phk_result.is_null() {
-        // SAFETY: `phk_result` is non-null (checked above) and is the caller-owned out-parameter
-        // for the created key; `lpdw_disposition` likewise for the disposition value.
-        unsafe {
-            *phk_result = get_handle_table().register_virtual_handle(path).cast();
-            if !lpdw_disposition.is_null() {
-                *lpdw_disposition = 1;
-            }
-        }
-        return ERROR_SUCCESS as i32;
-    }
-
-    let status = host_create();
-    if status == ERROR_SUCCESS as i32 && !phk_result.is_null() {
-        // SAFETY: `phk_result` is non-null (checked above) and the host create wrote a valid key
-        // handle into it on success.
-        unsafe {
+    let on_host = !synthetic && host_open() == ERROR_SUCCESS as i32;
+    let existed = match before {
+        KeyResolution::Virtual => true,
+        KeyResolution::Masked => false,
+        KeyResolution::PassThrough => on_host,
+    };
+    // SAFETY: `phk_result` is non-null (checked above) and is the caller-owned out-parameter for
+    // the key; on success `host_open` wrote a valid host key handle into it. `lpdw_disposition`
+    // is the caller-owned out-parameter for the disposition, null-checked before the write.
+    unsafe {
+        if on_host {
             get_handle_table().register_host_handle((*phk_result).cast(), path);
-        }
-        return status;
-    }
-
-    if !phk_result.is_null() {
-        // SAFETY: as above - caller-owned out-parameters, null-checked immediately.
-        unsafe {
+        } else {
             *phk_result = get_handle_table().register_virtual_handle(path).cast();
-            if !lpdw_disposition.is_null() {
-                *lpdw_disposition = 1;
-            }
         }
-        return ERROR_SUCCESS as i32;
+        if !lpdw_disposition.is_null() {
+            *lpdw_disposition = match existed {
+                true => REG_OPENED_EXISTING_KEY,
+                false => REG_CREATED_NEW_KEY,
+            };
+        }
     }
-
-    status
+    ERROR_SUCCESS as i32
 }
 
 unsafe extern "system" fn hook_reg_query_value_ex_w(
@@ -1146,18 +1147,10 @@ unsafe extern "system" fn hook_reg_create_key_ex_a(
             &ansi_to_string(lp_sub_key),
             phk_result,
             lpdw_disposition,
-            || unsafe {
-                real_fn(
-                    hkey,
-                    lp_sub_key,
-                    reserved,
-                    lp_class,
-                    dw_options,
-                    sam_desired,
-                    lp_security_attributes,
-                    phk_result,
-                    lpdw_disposition,
-                )
+            || {
+                let host_open: FnRegOpenKeyExA =
+                    unsafe { std::mem::transmute(load_trampoline(&REAL_REG_OPEN_KEY_EX_A)) };
+                unsafe { host_open(hkey, lp_sub_key, 0, host_read_access(sam_desired), phk_result) }
             }
         )
     )

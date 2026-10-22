@@ -7,9 +7,8 @@
 //! plain text. A write with no journal record, yet visible through the hooked wide read, lives
 //! in the host registry: unshadowed values fall through to it.
 //!
-//! # Host residue
-//! Key creation still falls through to the host by design (see the registry suite), so this
-//! suite leaves empty keys under `ANSI_ROOT`. No value reaches the host.
+//! Every key lives under `AnsiEntryPoints` below the harness-seeded probe root; the harness
+//! checks afterwards that none of them reached the host.
 
 use std::fs;
 use std::ptr;
@@ -24,18 +23,17 @@ use windows_sys::Win32::System::Registry::{
 
 use crate::support::{to_ansi, to_wide};
 
-const ANSI_ROOT: &str = "Software\\PPMTestProbe\\AnsiEntryPoints";
-
-pub(super) fn run() -> Result<(), String> {
+pub(super) fn run(probe_root: &str) -> Result<(), String> {
+    let ansi_root = &format!("{probe_root}\\AnsiEntryPoints");
     let journal = journal_path()?;
     unsafe {
-        ansi_writes_reach_the_overlay(&journal)?;
-        ansi_deletes_mask_the_overlay(&journal)?;
-        ansi_reads_see_the_overlay()?;
-        ansi_enumerations_list_the_overlay()?;
-        legacy_handles_and_info_see_the_overlay(&journal)?;
+        ansi_writes_reach_the_overlay(ansi_root, &journal)?;
+        ansi_deletes_mask_the_overlay(ansi_root, &journal)?;
+        ansi_reads_see_the_overlay(ansi_root)?;
+        ansi_enumerations_list_the_overlay(ansi_root)?;
+        legacy_handles_and_info_see_the_overlay(ansi_root, &journal)?;
         // Last: it adds values under the root, which the info check above counts exactly.
-        non_ascii_text_crosses_the_code_page()?;
+        non_ascii_text_crosses_the_code_page(ansi_root)?;
     }
     Ok(())
 }
@@ -76,9 +74,9 @@ unsafe fn visible_wide(subkey: &str, name: &str) -> Option<String> {
 }
 
 /// Opens (creating if needed) the probe's ANSI test key through the wide API.
-unsafe fn open_root() -> Result<HKEY, String> {
+unsafe fn open_root(ansi_root: &str) -> Result<HKEY, String> {
     unsafe {
-        let root = to_wide(ANSI_ROOT);
+        let root = to_wide(ansi_root);
         let mut hkey: HKEY = ptr::null_mut();
         let mut disposition = 0;
         let status = RegCreateKeyExW(
@@ -94,7 +92,7 @@ unsafe fn open_root() -> Result<HKEY, String> {
         );
         if status != ERROR_SUCCESS {
             return Err(format!(
-                "RegCreateKeyExW('{ANSI_ROOT}') failed with code {status}"
+                "RegCreateKeyExW('{ansi_root}') failed with code {status}"
             ));
         }
         Ok(hkey)
@@ -126,9 +124,9 @@ fn assert_overlay_write(
     Ok(())
 }
 
-unsafe fn ansi_writes_reach_the_overlay(journal: &str) -> Result<(), String> {
+unsafe fn ansi_writes_reach_the_overlay(ansi_root: &str, journal: &str) -> Result<(), String> {
     unsafe {
-        let parent = open_root()?;
+        let parent = open_root(ansi_root)?;
         let name_virtual = to_ansi("ansi_setvalueexa_virtual").ok_or("name is not ANSI-encodable")?;
         let data_virtual = to_ansi("ansi_setvalueexa_virtual").ok_or("data is not ANSI-encodable")?;
         let status = RegSetValueExA(
@@ -144,10 +142,10 @@ unsafe fn ansi_writes_reach_the_overlay(journal: &str) -> Result<(), String> {
             status,
             journal,
             "ansi_setvalueexa_virtual",
-            visible_wide(ANSI_ROOT, "ansi_setvalueexa_virtual"),
+            visible_wide(ansi_root, "ansi_setvalueexa_virtual"),
         )?;
 
-        let root_a = to_ansi(ANSI_ROOT).ok_or("root is not ANSI-encodable")?;
+        let root_a = to_ansi(ansi_root).ok_or("root is not ANSI-encodable")?;
         let mut opened: HKEY = ptr::null_mut();
         let open_status = RegOpenKeyExA(HKEY_CURRENT_USER, root_a.as_ptr(), 0, KEY_ALL_ACCESS, &mut opened);
         if open_status != ERROR_SUCCESS {
@@ -169,7 +167,7 @@ unsafe fn ansi_writes_reach_the_overlay(journal: &str) -> Result<(), String> {
             status,
             journal,
             "ansi_setvalueexa_open",
-            visible_wide(ANSI_ROOT, "ansi_setvalueexa_open"),
+            visible_wide(ansi_root, "ansi_setvalueexa_open"),
         )?;
 
         let name_key = to_ansi("ansi_setkeyvaluea").ok_or("name is not ANSI-encodable")?;
@@ -187,12 +185,12 @@ unsafe fn ansi_writes_reach_the_overlay(journal: &str) -> Result<(), String> {
             status,
             journal,
             "ansi_setkeyvaluea",
-            visible_wide(ANSI_ROOT, "ansi_setkeyvaluea"),
+            visible_wide(ansi_root, "ansi_setkeyvaluea"),
         )?;
 
         let name_wide = to_wide("wide_setkeyvaluew");
         let data_wide = to_wide("wide_setkeyvaluew");
-        let root_w = to_wide(ANSI_ROOT);
+        let root_w = to_wide(ansi_root);
         let status = RegSetKeyValueW(
             HKEY_CURRENT_USER,
             root_w.as_ptr(),
@@ -206,11 +204,11 @@ unsafe fn ansi_writes_reach_the_overlay(journal: &str) -> Result<(), String> {
             status,
             journal,
             "wide_setkeyvaluew",
-            visible_wide(ANSI_ROOT, "wide_setkeyvaluew"),
+            visible_wide(ansi_root, "wide_setkeyvaluew"),
         )?;
 
         // The legacy default-value writers store under the subkey they are given, named "".
-        let default_w = format!("{ANSI_ROOT}\\defval_w");
+        let default_w = format!("{ansi_root}\\defval_w");
         let default_w_wide = to_wide(&default_w);
         let data_default_w = to_wide("defval_w");
         let status = RegSetValueW(
@@ -228,7 +226,7 @@ unsafe fn ansi_writes_reach_the_overlay(journal: &str) -> Result<(), String> {
             visible_wide(&default_w, ""),
         )?;
 
-        let default_a = format!("{ANSI_ROOT}\\defval_a");
+        let default_a = format!("{ansi_root}\\defval_a");
         let default_a_ansi = to_ansi(&default_a).ok_or("key is not ANSI-encodable")?;
         let data_default_a = to_ansi("defval_a").ok_or("data is not ANSI-encodable")?;
         let status = RegSetValueA(
@@ -300,26 +298,26 @@ unsafe fn assert_overlay_delete(
     Ok(())
 }
 
-unsafe fn ansi_deletes_mask_the_overlay(journal: &str) -> Result<(), String> {
+unsafe fn ansi_deletes_mask_the_overlay(ansi_root: &str, journal: &str) -> Result<(), String> {
     unsafe {
-        let parent = open_root()?;
-        let root_a = to_ansi(ANSI_ROOT).ok_or("root is not ANSI-encodable")?;
-        let root_w = to_wide(ANSI_ROOT);
+        let parent = open_root(ansi_root)?;
+        let root_a = to_ansi(ansi_root).ok_or("root is not ANSI-encodable")?;
+        let root_w = to_wide(ansi_root);
 
         seed_wide_value(parent, "del_valuea")?;
         let name_a = to_ansi("del_valuea").ok_or("name is not ANSI-encodable")?;
         let status = RegDeleteValueA(parent, name_a.as_ptr());
-        assert_overlay_delete("RegDeleteValueA", status, journal, "del_valuea", ANSI_ROOT)?;
+        assert_overlay_delete("RegDeleteValueA", status, journal, "del_valuea", ansi_root)?;
 
         seed_wide_value(parent, "del_keyvaluea")?;
         let name_key_a = to_ansi("del_keyvaluea").ok_or("name is not ANSI-encodable")?;
         let status = RegDeleteKeyValueA(HKEY_CURRENT_USER, root_a.as_ptr(), name_key_a.as_ptr());
-        assert_overlay_delete("RegDeleteKeyValueA", status, journal, "del_keyvaluea", ANSI_ROOT)?;
+        assert_overlay_delete("RegDeleteKeyValueA", status, journal, "del_keyvaluea", ansi_root)?;
 
         seed_wide_value(parent, "del_keyvaluew")?;
         let name_key_w = to_wide("del_keyvaluew");
         let status = RegDeleteKeyValueW(HKEY_CURRENT_USER, root_w.as_ptr(), name_key_w.as_ptr());
-        assert_overlay_delete("RegDeleteKeyValueW", status, journal, "del_keyvaluew", ANSI_ROOT)?;
+        assert_overlay_delete("RegDeleteKeyValueW", status, journal, "del_keyvaluew", ansi_root)?;
 
         let _ = RegCloseKey(parent);
     }
@@ -328,9 +326,9 @@ unsafe fn ansi_deletes_mask_the_overlay(journal: &str) -> Result<(), String> {
 
 /// The ANSI read entry points must return what the overlay holds for values the write paths
 /// stored, or an application that writes and reads through the ANSI API sees host data.
-unsafe fn ansi_reads_see_the_overlay() -> Result<(), String> {
+unsafe fn ansi_reads_see_the_overlay(ansi_root: &str) -> Result<(), String> {
     unsafe {
-        let root_a = to_ansi(ANSI_ROOT).ok_or("root is not ANSI-encodable")?;
+        let root_a = to_ansi(ansi_root).ok_or("root is not ANSI-encodable")?;
         let mut opened: HKEY = ptr::null_mut();
         let status = RegOpenKeyExA(HKEY_CURRENT_USER, root_a.as_ptr(), 0, KEY_ALL_ACCESS, &mut opened);
         if status != ERROR_SUCCESS {
@@ -387,9 +385,9 @@ unsafe fn ansi_reads_see_the_overlay() -> Result<(), String> {
 
 /// Legacy entry points that open keys by wide name must hand back a handle the engine tracks, so
 /// ANSI calls through it reach the overlay; `RegQueryInfoKeyA` must count what the overlay holds.
-unsafe fn legacy_handles_and_info_see_the_overlay(journal: &str) -> Result<(), String> {
+unsafe fn legacy_handles_and_info_see_the_overlay(ansi_root: &str, journal: &str) -> Result<(), String> {
     unsafe {
-        let root_w = to_wide(ANSI_ROOT);
+        let root_w = to_wide(ansi_root);
         let mut opened: HKEY = ptr::null_mut();
         let status = RegOpenKeyW(HKEY_CURRENT_USER, root_w.as_ptr(), &mut opened);
         if status != ERROR_SUCCESS {
@@ -452,7 +450,7 @@ unsafe fn legacy_handles_and_info_see_the_overlay(journal: &str) -> Result<(), S
             ));
         }
 
-        let created_path = format!("{ANSI_ROOT}\\legacy_created");
+        let created_path = format!("{ansi_root}\\legacy_created");
         let created_w = to_wide(&created_path);
         let mut created: HKEY = ptr::null_mut();
         let status = RegCreateKeyW(HKEY_CURRENT_USER, created_w.as_ptr(), &mut created);
@@ -488,9 +486,9 @@ fn ansi_text(bytes: &[u8]) -> String {
 
 /// The ANSI enumeration entry points must list the overlay's values and subkeys, or an
 /// application that enumerates through the ANSI API misses what it wrote.
-unsafe fn ansi_enumerations_list_the_overlay() -> Result<(), String> {
+unsafe fn ansi_enumerations_list_the_overlay(ansi_root: &str) -> Result<(), String> {
     unsafe {
-        let root_a = to_ansi(ANSI_ROOT).ok_or("root is not ANSI-encodable")?;
+        let root_a = to_ansi(ansi_root).ok_or("root is not ANSI-encodable")?;
         let mut opened: HKEY = ptr::null_mut();
         let status = RegOpenKeyExA(HKEY_CURRENT_USER, root_a.as_ptr(), 0, KEY_ALL_ACCESS, &mut opened);
         if status != ERROR_SUCCESS {
@@ -582,11 +580,11 @@ fn code_page_sample() -> Result<String, String> {
 /// Text written through one API family must read back through the other unchanged, which only
 /// holds if the engine converts between UTF-16 and the system ANSI code page - not UTF-8, and
 /// not raw UTF-16 bytes. ASCII text cannot tell those apart; this sample can.
-unsafe fn non_ascii_text_crosses_the_code_page() -> Result<(), String> {
+unsafe fn non_ascii_text_crosses_the_code_page(ansi_root: &str) -> Result<(), String> {
     let sample = code_page_sample()?;
     let sample_ansi = to_ansi(&sample).ok_or("sample was chosen as ANSI-representable")?;
     unsafe {
-        let parent = open_root()?;
+        let parent = open_root(ansi_root)?;
 
         // Wide write, ANSI read: the engine encodes the stored UTF-16 into the code page.
         let name_w = to_wide("nonascii_wide_written");
@@ -642,7 +640,7 @@ unsafe fn non_ascii_text_crosses_the_code_page() -> Result<(), String> {
         if status != ERROR_SUCCESS {
             return Err(format!("RegSetValueExA('{sample}') failed with code {status}"));
         }
-        let read = visible_wide(ANSI_ROOT, "nonascii_ansi_written");
+        let read = visible_wide(ansi_root, "nonascii_ansi_written");
         if read.as_deref() != Some(sample.as_str()) {
             return Err(format!(
                 "an ANSI write of '{sample}' read back through the wide API as {read:?}"

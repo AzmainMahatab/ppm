@@ -1,15 +1,15 @@
 //! Registry Copy-on-Write boundary verification.
 //!
-//! # How a host escape is detected from inside the sandbox
-//! The probe runs under injection, so it cannot read the real registry directly to prove a
-//! delete never landed there. `RegCreateKeyExW` reports it instead: subkey *existence* still
-//! falls through to the host, so the disposition of a re-create names the side the key lives
-//! on. `REG_OPENED_EXISTING_KEY` means the host key survived and the delete was virtualized;
-//! `REG_CREATED_NEW_KEY` means the delete escaped the hook and really destroyed it.
+//! # Where a host escape is detected
+//! The probe runs under injection, so it cannot read the real registry to prove a write or a
+//! delete never landed there. The harness that launches it can: before the run it seeds real
+//! host keys under the root named by `PPM_TEST_REGISTRY_ROOT`, and afterwards it checks that the
+//! seeded tree is exactly as it left it - nothing deleted, nothing changed, nothing added. From
+//! inside, the probe asserts what the application sees: seeded host keys open as existing
+//! keys, and keys it deletes disappear from its view.
 //!
-//! # Host residue
-//! Every subkey below lives under one root, `HKCU\Software\PPMTestProbe`, because deletes are
-//! virtualized and the probe therefore cannot remove what its own creates leave behind.
+//! Seeded by the harness: the root (with a value), `DeleteKeyEx`, `Tree` and `Tree\Child` (each
+//! with a value), and `Enumerated\Doomed` and `Enumerated\Kept` (no values).
 
 use std::ptr;
 
@@ -24,21 +24,26 @@ use crate::support::{from_wide_ptr, to_wide};
 
 mod ansi;
 
-const PROBE_ROOT: &str = "Software\\PPMTestProbe";
 const REG_CREATED_NEW_KEY: u32 = 1;
 const REG_OPENED_EXISTING_KEY: u32 = 2;
 
+/// The HKCU-relative key the harness seeded for this run.
+fn probe_root() -> Result<String, String> {
+    std::env::var("PPM_TEST_REGISTRY_ROOT").map_err(|e| format!("PPM_TEST_REGISTRY_ROOT is not set: {e}"))
+}
+
 pub(crate) fn run() -> Result<(), String> {
     println!("[SUITE 1/5] Registry Boundary (Copy-on-Write)...");
+    let root = probe_root()?;
 
-    copy_on_write_value_round_trip()?;
-    reg_get_value_with_subkey_reads_the_overlay()?;
-    delete_key_ex_does_not_reach_the_host()?;
-    delete_tree_does_not_reach_the_host()?;
-    enumeration_reflects_the_boundary()?;
-    ansi::run()?;
+    copy_on_write_value_round_trip(&root)?;
+    reg_get_value_with_subkey_reads_the_overlay(&root)?;
+    delete_key_ex_is_virtualized(&root)?;
+    delete_tree_is_virtualized(&root)?;
+    enumeration_reflects_the_boundary(&root)?;
+    ansi::run(&root)?;
     // Runs last: it tombstones the whole probe subtree.
-    delete_key_does_not_reach_the_host()?;
+    delete_key_is_virtualized(&root)?;
 
     println!("  -> Registry Boundary PASSED!");
     Ok(())
@@ -69,15 +74,32 @@ unsafe fn create_probe_key(subkey: &str) -> Result<(HKEY, u32), String> {
     }
 }
 
-/// Asserts that re-creating `subkey` opens a surviving host key rather than making a new one.
-unsafe fn assert_host_key_survived(subkey: &str, deleting_api: &str) -> Result<(), String> {
+/// Asserts that creating the seeded `subkey` opens the host key the harness made: host keys
+/// still show through the overlay.
+unsafe fn assert_opens_seeded_key(subkey: &str) -> Result<(), String> {
     unsafe {
         let (hkey, disposition) = create_probe_key(subkey)?;
         let _ = RegCloseKey(hkey);
 
         if disposition != REG_OPENED_EXISTING_KEY {
             return Err(format!(
-                "{deleting_api} escaped the hook and deleted the real host key '{subkey}': the re-create reported disposition {disposition} (REG_CREATED_NEW_KEY = {REG_CREATED_NEW_KEY}) instead of opening the surviving host key (REG_OPENED_EXISTING_KEY = {REG_OPENED_EXISTING_KEY})"
+                "RegCreateKeyExW('{subkey}') reported disposition {disposition} for a key the host holds; expected REG_OPENED_EXISTING_KEY ({REG_OPENED_EXISTING_KEY})"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Asserts that `subkey`, deleted through `deleting_api`, is gone from the application's view:
+/// re-creating it makes a new key rather than reopening the host copy.
+unsafe fn assert_deleted_in_view(subkey: &str, deleting_api: &str) -> Result<(), String> {
+    unsafe {
+        let (hkey, disposition) = create_probe_key(subkey)?;
+        let _ = RegCloseKey(hkey);
+
+        if disposition != REG_CREATED_NEW_KEY {
+            return Err(format!(
+                "after {deleting_api}, re-creating '{subkey}' reported disposition {disposition}; expected REG_CREATED_NEW_KEY ({REG_CREATED_NEW_KEY}) for a deleted key"
             ));
         }
         Ok(())
@@ -105,9 +127,9 @@ unsafe fn set_string_value(hkey: HKEY, name: &str, value: &str) -> Result<(), St
 
 /// The original boundary contract: a value written through the hook reads back through it,
 /// and deleting it masks it.
-fn copy_on_write_value_round_trip() -> Result<(), String> {
+fn copy_on_write_value_round_trip(root: &str) -> Result<(), String> {
     unsafe {
-        let (hkey, _) = create_probe_key(PROBE_ROOT)?;
+        let (hkey, _) = create_probe_key(root)?;
         set_string_value(hkey, "VirtualKey", "VirtualSuccess123").inspect_err(|_| {
             let _ = RegCloseKey(hkey);
         })?;
@@ -147,11 +169,17 @@ fn copy_on_write_value_round_trip() -> Result<(), String> {
 
 /// Regression: `RegGetValueW` resolves its `lpSubKey` through an entry point the engine does
 /// not intercept, so the read used to reach the host registry and miss the overlay entirely.
-fn reg_get_value_with_subkey_reads_the_overlay() -> Result<(), String> {
-    let subkey = format!("{PROBE_ROOT}\\GetValue");
+fn reg_get_value_with_subkey_reads_the_overlay(root: &str) -> Result<(), String> {
+    let subkey = format!("{root}\\GetValue");
 
     unsafe {
-        let (hkey, _) = create_probe_key(&subkey)?;
+        let (hkey, disposition) = create_probe_key(&subkey)?;
+        if disposition != REG_CREATED_NEW_KEY {
+            let _ = RegCloseKey(hkey);
+            return Err(format!(
+                "RegCreateKeyExW('{subkey}') reported disposition {disposition} for a key that exists nowhere; expected REG_CREATED_NEW_KEY ({REG_CREATED_NEW_KEY})"
+            ));
+        }
         let result = set_string_value(hkey, "Answer", "OverlayAnswer");
         let _ = RegCloseKey(hkey);
         result?;
@@ -192,12 +220,11 @@ fn reg_get_value_with_subkey_reads_the_overlay() -> Result<(), String> {
 
 /// Regression: `RegDeleteKeyExW` reaches `RegDeleteKeyExInternalW` without passing through
 /// `RegDeleteKeyW`, so it used to delete keys in the real host registry.
-fn delete_key_ex_does_not_reach_the_host() -> Result<(), String> {
-    let subkey = format!("{PROBE_ROOT}\\DeleteKeyEx");
+fn delete_key_ex_is_virtualized(root: &str) -> Result<(), String> {
+    let subkey = format!("{root}\\DeleteKeyEx");
 
     unsafe {
-        let (hkey, _) = create_probe_key(&subkey)?;
-        let _ = RegCloseKey(hkey);
+        assert_opens_seeded_key(&subkey)?;
 
         let wide = to_wide(&subkey);
         let status = RegDeleteKeyExW(HKEY_CURRENT_USER, wide.as_ptr(), KEY_ALL_ACCESS, 0);
@@ -205,20 +232,18 @@ fn delete_key_ex_does_not_reach_the_host() -> Result<(), String> {
             return Err(format!("RegDeleteKeyExW failed with code {status}"));
         }
 
-        assert_host_key_survived(&subkey, "RegDeleteKeyExW")
+        assert_deleted_in_view(&subkey, "RegDeleteKeyExW")
     }
 }
 
 /// Regression: `RegDeleteTreeW` walked and destroyed whole host subtrees unhooked.
-fn delete_tree_does_not_reach_the_host() -> Result<(), String> {
-    let tree = format!("{PROBE_ROOT}\\Tree");
+fn delete_tree_is_virtualized(root: &str) -> Result<(), String> {
+    let tree = format!("{root}\\Tree");
     let child = format!("{tree}\\Child");
 
     unsafe {
-        let (tree_key, _) = create_probe_key(&tree)?;
-        let _ = RegCloseKey(tree_key);
-        let (child_key, _) = create_probe_key(&child)?;
-        let _ = RegCloseKey(child_key);
+        assert_opens_seeded_key(&tree)?;
+        assert_opens_seeded_key(&child)?;
 
         let tree_wide = to_wide(&tree);
         let status = RegDeleteTreeW(HKEY_CURRENT_USER, tree_wide.as_ptr());
@@ -245,9 +270,9 @@ fn delete_tree_does_not_reach_the_host() -> Result<(), String> {
             ));
         }
 
-        // The host copies of both keys must have survived the virtualized delete.
-        assert_host_key_survived(&child, "RegDeleteTreeW")?;
-        assert_host_key_survived(&tree, "RegDeleteTreeW")
+        // The tree key itself stays in view (with its subtree gone); the child does not.
+        assert_opens_seeded_key(&tree).map_err(|e| format!("after RegDeleteTreeW: {e}"))?;
+        assert_deleted_in_view(&child, "RegDeleteTreeW")
     }
 }
 
@@ -312,8 +337,8 @@ unsafe fn enumerate_subkey_names(hkey: HKEY) -> Result<Vec<String>, String> {
 /// Regression: value and key enumeration were never intercepted, so an application could write
 /// a value through the boundary and then not see it when it enumerated its own key, and a key
 /// it had deleted through the boundary kept appearing because the host copy survives by design.
-fn enumeration_reflects_the_boundary() -> Result<(), String> {
-    let enum_key = format!("{PROBE_ROOT}\\Enumerated");
+fn enumeration_reflects_the_boundary(root: &str) -> Result<(), String> {
+    let enum_key = format!("{root}\\Enumerated");
     let doomed = format!("{enum_key}\\Doomed");
     let kept = format!("{enum_key}\\Kept");
 
@@ -447,14 +472,14 @@ fn enumeration_reflects_the_boundary() -> Result<(), String> {
 }
 
 /// The already-covered contract, kept last because it tombstones the whole probe subtree.
-fn delete_key_does_not_reach_the_host() -> Result<(), String> {
+fn delete_key_is_virtualized(root: &str) -> Result<(), String> {
     unsafe {
-        let wide = to_wide(PROBE_ROOT);
+        let wide = to_wide(root);
         let status = RegDeleteKeyW(HKEY_CURRENT_USER, wide.as_ptr());
         if status != ERROR_SUCCESS {
             return Err(format!("RegDeleteKeyW failed with code {status}"));
         }
 
-        assert_host_key_survived(PROBE_ROOT, "RegDeleteKeyW")
+        assert_deleted_in_view(root, "RegDeleteKeyW")
     }
 }
