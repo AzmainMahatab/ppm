@@ -93,6 +93,18 @@ The complete capability matrix lives in [FEATURES.md](FEATURES.md).
    * Double-click `antigravity.bat` (or run `ppm.exe run antigravity`)
    * Double-click `antigravity-manager.bat` (or run `ppm.exe run antigravity-manager`)
 
+### Verifying a Download
+
+Every release archive is built by the repository's release workflow, which records a signed
+build-provenance attestation for it. To confirm that a zip you downloaded is exactly what that
+workflow built, from this repository:
+
+```bash
+gh attestation verify ppm-v0.1.0-windows-x64.zip --repo AzmainMahatab/ppm
+```
+
+`SHA256SUMS.txt` on the release lists the archives' checksums for a check without the GitHub CLI.
+
 ---
 
 ## Command Reference

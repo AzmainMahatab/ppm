@@ -94,6 +94,11 @@ jobs:
     name: Build (${{ matrix.arch }})
     needs: version
     runs-on: windows-latest
+    # The attestation is signed with this job's OIDC identity and stored with the repository.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         include:
@@ -142,6 +147,13 @@ jobs:
           $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
           "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ASCII
 
+      # Records, signed through Sigstore, that this exact archive was built by this workflow from
+      # this commit; anyone can check a download with `gh attestation verify`.
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ppm-*-windows-${{ matrix.arch }}.zip
+
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v7
         with:
@@ -189,12 +201,27 @@ jobs:
     name: Publish GitHub Release
     needs: [version, build, smoke]
     runs-on: windows-latest
+    permissions:
+      contents: write
+      attestations: read
     steps:
       - name: Download Build Artifacts
         uses: actions/download-artifact@v8
         with:
           path: release_assets
           merge-multiple: true
+
+      # The last gate before anything is public: every archive must carry this repository's
+      # build-provenance attestation, signed by this workflow.
+      - name: Verify Build Provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          foreach ($archive in Get-ChildItem release_assets -Filter "ppm-*.zip") {
+            gh attestation verify $archive.FullName --repo "${{ github.repository }}" --signer-workflow "${{ github.repository }}/.github/workflows/release.yml"
+            if ($LASTEXITCODE -ne 0) { throw "No valid build provenance for $($archive.Name)" }
+          }
 
       - name: Consolidate SHA256 Checksums
         shell: pwsh
