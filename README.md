@@ -153,3 +153,15 @@ cargo test --workspace
 ```
 
 **Build Output**: `target/release/ppm.exe`.
+
+### Releasing
+
+The released version is the one `Cargo.toml` declares (`[workspace.package] version`), so the
+binary, the tag and the source at the tag always agree:
+
+1. Commit the version bump: `chore(release): x.y.z`, then push and wait for CI.
+2. Run the **Release** workflow (`gh workflow run release.yml -f draft=true` to trial it first).
+
+The workflow refuses a version that is already released. It builds both archives, smoke-tests
+each on its own architecture (the binary must report the release version), attests their
+build provenance and verifies it, and publishes an immutable release.
