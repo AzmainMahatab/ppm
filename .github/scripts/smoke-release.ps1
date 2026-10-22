@@ -2,7 +2,8 @@
 # console application, and requires that the application ran injected.
 param(
     [Parameter(Mandatory)] [string] $Archive,
-    [Parameter(Mandatory)] [ValidateSet("x64", "arm64")] [string] $Arch
+    [Parameter(Mandatory)] [ValidateSet("x64", "arm64")] [string] $Arch,
+    [Parameter(Mandatory)] [string] $Tag
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,6 +13,11 @@ if (Test-Path $root) { Remove-Item $root -Recurse -Force }
 Expand-Archive -Path $Archive -DestinationPath $root
 $env:PPM_ROOT = $root
 $ppm = Join-Path $root "ppm.exe"
+
+# Why: the binary must report the version it is released as (v0.1.1 shipped reporting 0.1.0).
+$reported = (& $ppm --version | Select-Object -Last 1).Trim()
+if ($LASTEXITCODE -ne 0) { throw "ppm --version exited $LASTEXITCODE" }
+if ($reported -ne "ppm $($Tag.TrimStart('v'))") { throw "ppm reports '$reported' but is released as $Tag" }
 
 & $ppm init
 if ($LASTEXITCODE -ne 0) { throw "ppm init exited $LASTEXITCODE" }
@@ -45,4 +51,4 @@ $attached = Get-ChildItem (Join-Path $root ".ppm/logs") -Filter "redirector*" |
     Select-String -Pattern "redirector.dll attached to process" -SimpleMatch
 if (-not $attached) { throw "the application ran, but the engine log shows no injection" }
 
-Write-Output "Release archive for ${Arch}: init, run and injection verified"
+Write-Output "Release archive for ${Arch}: version $Tag, init, run and injection verified"

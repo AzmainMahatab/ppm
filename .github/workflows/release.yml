@@ -1,18 +1,9 @@
 name: Release
 
 on:
+  # The version released is the one Cargo.toml declares: bump it in a commit first.
   workflow_dispatch:
     inputs:
-      bump_type:
-        description: "Version Bump Type (auto inspects conventional commits)"
-        required: true
-        default: "auto"
-        type: choice
-        options:
-          - "auto"
-          - "patch"
-          - "minor"
-          - "major"
       draft:
         description: "Create release as draft"
         required: false
@@ -32,7 +23,7 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # STAGE 1: Automated Semantic Version Resolution & Tagging
+  # STAGE 1: Version From Cargo.toml, Tag & Changelog
   # ─────────────────────────────────────────────────────────────────────────────
   version:
     name: Determine Version & Generate Changelog
@@ -46,17 +37,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      # `auto` lets the conventional commits decide, with `minor` for commits that select no
-      # bump; an explicit choice is forced. A draft only calculates the tag (`dry_run`): the
-      # release records the built commit, and the tag is created when the draft is published.
-      - name: Resolve Dynamic Version & Changelog
+      # Why the manifest and not the commits: the binary reports the version Cargo.toml
+      # declares, so a tag computed from commits drifted from it (v0.1.1 shipped reporting
+      # 0.1.0). The tag is derived from the code; the code, the tag and the binary agree.
+      - name: Read the Declared Version
+        id: declared
+        run: echo "version=$(python3 .github/scripts/cargo-version.py Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse a Released or Mismatched Version
+        env:
+          TAG: v${{ steps.declared.outputs.version }}
+          PUSHED_TAG: ${{ github.ref_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "$PUSHED_TAG" != "$TAG" ]; then
+              echo "::error::Pushed tag $PUSHED_TAG does not match the version Cargo.toml declares ($TAG)."
+              exit 1
+            fi
+          elif git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            echo "::error::$TAG is already released; bump the version in Cargo.toml first."
+            exit 1
+          fi
+
+      # The exact version is passed in (`custom_tag`), so the action only tags and writes the
+      # changelog from the conventional commits since the previous tag. A draft only calculates
+      # it (`dry_run`): the tag is created when the draft is published.
+      - name: Tag & Changelog
         id: resolve_tag
         uses: mathieudutour/github-tag-action@v7
         if: github.event_name == 'workflow_dispatch'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: minor
-          force_bump: ${{ github.event.inputs.bump_type != 'auto' && github.event.inputs.bump_type || '' }}
+          custom_tag: ${{ steps.declared.outputs.version }}
           release_branches: main
           create_annotated_tag: true
           dry_run: ${{ github.event.inputs.draft }}
@@ -66,20 +78,20 @@ jobs:
       - name: Export Consolidated Version Output
         id: version_output
         env:
-          PUSHED_TAG: ${{ github.ref_name }}
+          TAG: v${{ steps.declared.outputs.version }}
           NEW_TAG: ${{ steps.resolve_tag.outputs.new_tag }}
           CHANGELOG: ${{ steps.resolve_tag.outputs.changelog }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=$PUSHED_TAG" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "changelog=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -z "$NEW_TAG" ]; then
-            echo "::error::No releasable commits since the last tag; choose an explicit bump type to force one."
+          if [ "$NEW_TAG" != "$TAG" ]; then
+            echo "::error::The tag action produced '$NEW_TAG', not the declared $TAG."
             exit 1
           fi
-          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           delimiter="CHANGELOG_$(openssl rand -hex 16)"
           {
             echo "changelog<<$delimiter"
@@ -167,7 +179,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   smoke:
     name: Smoke Test (${{ matrix.arch }})
-    needs: build
+    needs: [version, build]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -192,7 +204,7 @@ jobs:
         shell: pwsh
         run: |
           $archive = Get-ChildItem artifact -Filter "ppm-*-windows-${{ matrix.arch }}.zip" | Select-Object -First 1
-          ./.github/scripts/smoke-release.ps1 -Archive $archive.FullName -Arch ${{ matrix.arch }}
+          ./.github/scripts/smoke-release.ps1 -Archive $archive.FullName -Arch ${{ matrix.arch }} -Tag ${{ needs.version.outputs.tag }}
 
   # ─────────────────────────────────────────────────────────────────────────────
   # STAGE 4: Publish GitHub Release & Checksums
