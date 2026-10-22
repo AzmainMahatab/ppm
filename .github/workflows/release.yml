@@ -42,13 +42,13 @@ jobs:
       changelog: ${{ steps.version_output.outputs.changelog }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Resolve Dynamic Version & Changelog
         id: resolve_tag
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@v7
         if: github.event_name == 'workflow_dispatch'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -95,7 +95,7 @@ jobs:
             msvc_arch: amd64_arm64
     steps:
       - name: Checkout Repository with Submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -137,7 +137,7 @@ jobs:
           "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ASCII
 
       - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ppm-artifact-${{ matrix.arch }}
           path: |
@@ -153,7 +153,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download Build Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release_assets
           merge-multiple: true
@@ -165,7 +165,7 @@ jobs:
           Remove-Item release_assets/*.sha256 -Force
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: "ppm ${{ needs.version.outputs.tag }}"

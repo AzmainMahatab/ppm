@@ -18,7 +18,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # rust-toolchain.toml pins the dated nightly `bindeps` needs, with clippy and rustfmt.
       - name: Install Pinned Rust Toolchain
@@ -33,7 +33,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # cargo-deny reads the dependency graph through `cargo metadata`, which must run on the
       # pinned nightly: stable cargo rejects the `bindeps` artifact dependencies.
@@ -54,7 +54,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -84,7 +84,7 @@ jobs:
     runs-on: windows-11-arm
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
