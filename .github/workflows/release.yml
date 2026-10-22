@@ -42,40 +42,50 @@ jobs:
       changelog: ${{ steps.version_output.outputs.changelog }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # `auto` lets the conventional commits decide, with `minor` for commits that select no
+      # bump; an explicit choice is forced. A draft only calculates the tag (`dry_run`): the
+      # release records the built commit, and the tag is created when the draft is published.
       - name: Resolve Dynamic Version & Changelog
         id: resolve_tag
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@v7
         if: github.event_name == 'workflow_dispatch'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: ${{ github.event.inputs.bump_type == 'auto' && 'minor' || github.event.inputs.bump_type }}
+          default_bump: minor
+          force_bump: ${{ github.event.inputs.bump_type != 'auto' && github.event.inputs.bump_type || '' }}
           release_branches: main
           create_annotated_tag: true
+          dry_run: ${{ github.event.inputs.draft }}
 
+      # The changelog is built from commit messages, so it reaches the shell through the
+      # environment, never by template substitution into the script.
       - name: Export Consolidated Version Output
         id: version_output
+        env:
+          PUSHED_TAG: ${{ github.ref_name }}
+          NEW_TAG: ${{ steps.resolve_tag.outputs.new_tag }}
+          CHANGELOG: ${{ steps.resolve_tag.outputs.changelog }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            TAG="${{ github.ref_name }}"
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "tag=$PUSHED_TAG" >> "$GITHUB_OUTPUT"
             echo "changelog=" >> "$GITHUB_OUTPUT"
-          else
-            TAG="${{ steps.resolve_tag.outputs.new_tag }}"
-            if [ -z "$TAG" ]; then
-              TAG="${{ steps.resolve_tag.outputs.release_type }}"
-            fi
-            if [ -z "$TAG" ]; then
-              TAG="v0.1.0"
-            fi
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
-            echo "${{ steps.resolve_tag.outputs.changelog }}" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if [ -z "$NEW_TAG" ]; then
+            echo "::error::No releasable commits since the last tag; choose an explicit bump type to force one."
+            exit 1
+          fi
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          delimiter="CHANGELOG_$(openssl rand -hex 16)"
+          {
+            echo "changelog<<$delimiter"
+            echo "$CHANGELOG"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
 
   # ─────────────────────────────────────────────────────────────────────────────
   # STAGE 2: Multi-Architecture Build Matrix (x64 & ARM64)
@@ -95,7 +105,7 @@ jobs:
             msvc_arch: amd64_arm64
     steps:
       - name: Checkout Repository with Submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -121,7 +131,7 @@ jobs:
         run: |
           $tag = "${{ needs.version.outputs.tag }}"
           if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = "v0.1.0"
+            throw "The version job produced no tag"
           }
           $zipName = "ppm-$tag-windows-${{ matrix.arch }}.zip"
           $stagingDir = "staging_${{ matrix.arch }}"
@@ -137,7 +147,7 @@ jobs:
           "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ASCII
 
       - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ppm-artifact-${{ matrix.arch }}
           path: |
@@ -153,7 +163,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download Build Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release_assets
           merge-multiple: true
@@ -165,9 +175,10 @@ jobs:
           Remove-Item release_assets/*.sha256 -Force
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: "ppm ${{ needs.version.outputs.tag }}"
           body: ${{ needs.version.outputs.changelog }}
           generate_release_notes: true
