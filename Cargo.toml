@@ -47,7 +47,7 @@ indicatif = "0.18"
 msi = "0.10"
 # Why defaults off: ppm only reads PE headers; the writers and other formats are dead weight.
 object = { version = "0.40", default-features = false }
-parking_lot = "0.12"
+parking_lot = "0.13"
 regex = "1.11"
 reqwest = "0.13"
 schemars = "1.0"
